@@ -262,6 +262,6 @@ pub fn egui_settings_system(
         ui.checkbox(&mut wireframe_config.global, "Wireframe");
 
         ui.separator();
-        ui.label("ESC: unlock mouse | F: fly/walk | 1-0,-: select block (8-0,- = lamps)");
+        ui.label("ESC: unlock mouse | F: fly/walk | 1-0,-,=,T: select block");
     });
 }

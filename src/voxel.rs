@@ -30,6 +30,8 @@ pub enum BlockType {
     LampRed = 9,
     LampGreen = 10,
     LampBlue = 11,
+    Glass = 12,
+    TallGrass = 13,
 }
 
 impl BlockType {
@@ -46,13 +48,21 @@ impl BlockType {
             9 => BlockType::LampRed,
             10 => BlockType::LampGreen,
             11 => BlockType::LampBlue,
+            12 => BlockType::Glass,
+            13 => BlockType::TallGrass,
             _ => BlockType::Air,
         }
     }
 
-    /// บล็อกที่ชนได้/บังแสง
+    /// บล็อกที่ชนตัวผู้เล่นได้
     pub fn is_solid(self) -> bool {
         block_def(self).solid
+    }
+
+    /// บล็อกที่บังแสง/สร้างเงา AO (ตันและไม่โปร่งใส)
+    pub fn occludes(self) -> bool {
+        let def = block_def(self);
+        def.solid && !def.transparent
     }
 }
 
@@ -67,39 +77,63 @@ pub struct BlockDef {
     /// สี fallback เมื่อไม่มี texture (และใช้เป็นสีใน preview mode)
     pub color: [f32; 4],
     pub solid: bool,
+    /// มองทะลุได้ (น้ำ/กระจก/หญ้าสูง) — ไม่บังหน้าบล็อกข้างเคียง ไม่สร้างเงา AO
+    pub transparent: bool,
     /// สีแสงของบล็อกเรืองแสง (None = บล็อกธรรมดา)
     pub emission: Option<[f32; 3]>,
-    /// path ใต้ assets/ — ไฟล์ไหนไม่มีจริงจะ fallback เป็น color อัตโนมัติ
-    pub tex_top: Option<&'static str>,
-    pub tex_side: Option<&'static str>,
-    pub tex_bottom: Option<&'static str>,
+    /// path ใต้ assets/ — ใส่ได้หลายลาย เกมจะสุ่มเลือกตามพิกัดบล็อก
+    /// (deterministic) ให้ไม่ซ้ำกันเป็นแพทเทิร์น ไฟล์ไหนไม่มีจริงถูกข้าม
+    pub tex_top: &'static [&'static str],
+    pub tex_side: &'static [&'static str],
+    pub tex_bottom: &'static [&'static str],
+    /// sprite พู่ห้อยเอียงจากขอบบนของหน้าด้านข้าง (alpha cutout, สุ่มลายตามพิกัด)
+    pub overlay_side: &'static [&'static str],
 }
 
-pub const BLOCK_DEFS: [BlockDef; 12] = [
-    BlockDef { name: "Air", color: [1.0, 1.0, 1.0, 1.0], solid: false, emission: None,
-        tex_top: None, tex_side: None, tex_bottom: None },
-    BlockDef { name: "Dirt", color: [0.4, 0.2, 0.0, 1.0], solid: true, emission: None,
-        tex_top: Some("textures/dirt.png"), tex_side: Some("textures/dirt.png"), tex_bottom: Some("textures/dirt.png") },
-    BlockDef { name: "Grass", color: [0.2, 0.6, 0.2, 1.0], solid: true, emission: None,
-        tex_top: Some("textures/grass_top.png"), tex_side: Some("textures/grass_side.png"), tex_bottom: Some("textures/dirt.png") },
-    BlockDef { name: "Stone", color: [0.5, 0.5, 0.5, 1.0], solid: true, emission: None,
-        tex_top: Some("textures/stone.png"), tex_side: Some("textures/stone.png"), tex_bottom: Some("textures/stone.png") },
-    BlockDef { name: "Water", color: [0.1, 0.3, 0.8, 1.0], solid: false, emission: None,
-        tex_top: None, tex_side: None, tex_bottom: None },
-    BlockDef { name: "Wood", color: [0.35, 0.25, 0.12, 1.0], solid: true, emission: None,
-        tex_top: Some("textures/wood_top.png"), tex_side: Some("textures/wood_side.png"), tex_bottom: Some("textures/wood_top.png") },
-    BlockDef { name: "Leaves", color: [0.15, 0.45, 0.12, 1.0], solid: true, emission: None,
-        tex_top: Some("textures/leaves.png"), tex_side: Some("textures/leaves.png"), tex_bottom: Some("textures/leaves.png") },
-    BlockDef { name: "Sand", color: [0.85, 0.80, 0.55, 1.0], solid: true, emission: None,
-        tex_top: Some("textures/sand.png"), tex_side: Some("textures/sand.png"), tex_bottom: Some("textures/sand.png") },
-    BlockDef { name: "Glowstone", color: [1.0, 0.85, 0.55, 1.0], solid: true, emission: Some([1.0, 0.85, 0.55]),
-        tex_top: None, tex_side: None, tex_bottom: None },
-    BlockDef { name: "Red Lamp", color: [1.0, 0.15, 0.10, 1.0], solid: true, emission: Some([1.0, 0.15, 0.10]),
-        tex_top: None, tex_side: None, tex_bottom: None },
-    BlockDef { name: "Green Lamp", color: [0.15, 1.0, 0.20, 1.0], solid: true, emission: Some([0.15, 1.0, 0.20]),
-        tex_top: None, tex_side: None, tex_bottom: None },
-    BlockDef { name: "Blue Lamp", color: [0.15, 0.30, 1.0, 1.0], solid: true, emission: Some([0.15, 0.30, 1.0]),
-        tex_top: None, tex_side: None, tex_bottom: None },
+pub const BLOCK_DEFS: [BlockDef; 14] = [
+    BlockDef { name: "Air", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Dirt", color: [0.4, 0.2, 0.0, 1.0], solid: true, transparent: false, emission: None,
+        tex_top: &["textures/dirt.png"], tex_side: &["textures/dirt.png"], tex_bottom: &["textures/dirt.png"],
+        overlay_side: &[] },
+    BlockDef { name: "Grass", color: [0.2, 0.6, 0.2, 1.0], solid: true, transparent: false, emission: None,
+        tex_top: &["textures/grass_top.png"],
+        // ด้านข้างมี 3 ลาย สุ่มตามพิกัดให้ไม่ซ้ำกันเป็นแพทเทิร์น
+        tex_side: &["textures/grass_side_1.png", "textures/grass_side_2.png", "textures/grass_side_3.png"],
+        tex_bottom: &["textures/dirt.png"],
+        // พู่หญ้าห้อยเอียงจากขอบบน — สุ่ม 3 ลายเช่นกัน
+        overlay_side: &[
+            "textures/grass_side_overlay_1.png",
+            "textures/grass_side_overlay_2.png",
+            "textures/grass_side_overlay_3.png",
+        ] },
+    BlockDef { name: "Stone", color: [0.5, 0.5, 0.5, 1.0], solid: true, transparent: false, emission: None,
+        tex_top: &["textures/stone.png"], tex_side: &["textures/stone.png"], tex_bottom: &["textures/stone.png"],
+        overlay_side: &[] },
+    BlockDef { name: "Water", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Wood", color: [0.35, 0.25, 0.12, 1.0], solid: true, transparent: false, emission: None,
+        tex_top: &["textures/wood_top.png"], tex_side: &["textures/wood_side.png"], tex_bottom: &["textures/wood_top.png"],
+        overlay_side: &[] },
+    BlockDef { name: "Leaves", color: [0.15, 0.45, 0.12, 1.0], solid: true, transparent: false, emission: None,
+        tex_top: &["textures/leaves.png"], tex_side: &["textures/leaves.png"], tex_bottom: &["textures/leaves.png"],
+        overlay_side: &[] },
+    BlockDef { name: "Sand", color: [0.85, 0.80, 0.55, 1.0], solid: true, transparent: false, emission: None,
+        tex_top: &["textures/sand.png"], tex_side: &["textures/sand.png"], tex_bottom: &["textures/sand.png"],
+        overlay_side: &[] },
+    BlockDef { name: "Glowstone", color: [1.0, 0.85, 0.55, 1.0], solid: true, transparent: false, emission: Some([1.0, 0.85, 0.55]),
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Red Lamp", color: [1.0, 0.15, 0.10, 1.0], solid: true, transparent: false, emission: Some([1.0, 0.15, 0.10]),
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Green Lamp", color: [0.15, 1.0, 0.20, 1.0], solid: true, transparent: false, emission: Some([0.15, 1.0, 0.20]),
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Blue Lamp", color: [0.15, 0.30, 1.0, 1.0], solid: true, transparent: false, emission: Some([0.15, 0.30, 1.0]),
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Glass", color: [0.80, 0.90, 1.0, 1.0], solid: true, transparent: true, emission: None,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Tall Grass", color: [0.25, 0.55, 0.53, 1.0], solid: false, transparent: true, emission: None,
+        // ใช้ช่อง side เป็นรูป sprite ของกากบาท
+        tex_top: &[], tex_side: &["textures/grass.png"], tex_bottom: &[], overlay_side: &[] },
 ];
 
 pub fn block_def(block: BlockType) -> &'static BlockDef {
@@ -120,10 +154,51 @@ pub fn lamp_emission(block: BlockType) -> Option<Color> {
 
 /// texture ที่ใช้ได้จริง (มีไฟล์บน disk) ต่อ (บล็อก, หน้า) — สร้างครั้งเดียวตอน setup
 /// เข้าถึงได้จาก mesh task ทุก thread โดยไม่ต้องส่งผ่าน channel
-static FACE_TEXTURES: OnceLock<Vec<[Option<&'static str>; 6]>> = OnceLock::new();
+static FACE_TEXTURES: OnceLock<Vec<[Vec<&'static str>; 6]>> = OnceLock::new();
 
-pub fn face_texture(block: BlockType, face_id: usize) -> Option<&'static str> {
-    FACE_TEXTURES.get().and_then(|table| table[block as usize][face_id])
+fn face_texture_list(block: BlockType, face_id: usize) -> &'static [&'static str] {
+    FACE_TEXTURES
+        .get()
+        .map(|table| table[block as usize][face_id].as_slice())
+        .unwrap_or(&[])
+}
+
+/// hash พิกัดบล็อก → เลือกลาย texture แบบ deterministic (บล็อกเดิมลายเดิมเสมอ)
+fn pos_hash(x: i32, y: i32, z: i32) -> u32 {
+    let mut h = (x as u32).wrapping_mul(0x85EB_CA6B)
+        ^ (y as u32).wrapping_mul(0xC2B2_AE35)
+        ^ (z as u32).wrapping_mul(0x27D4_EB2F);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2545_F491);
+    h ^= h >> 13;
+    h
+}
+
+/// index ของลายที่บล็อกตำแหน่งนี้ใช้ (0 เสมอถ้ามีลายเดียวหรือไม่มี)
+pub fn texture_variant(block: BlockType, face_id: usize, wx: i32, wy: i32, wz: i32) -> u8 {
+    let list = face_texture_list(block, face_id);
+    if list.len() <= 1 {
+        0
+    } else {
+        (pos_hash(wx, wy, wz) % list.len() as u32) as u8
+    }
+}
+
+pub fn face_texture(block: BlockType, face_id: usize, variant: u8) -> Option<&'static str> {
+    face_texture_list(block, face_id).get(variant as usize).copied()
+}
+
+/// overlay ด้านข้างที่ใช้ได้จริง (มีไฟล์บน disk) ต่อบล็อก
+static SIDE_OVERLAYS: OnceLock<Vec<Vec<&'static str>>> = OnceLock::new();
+
+/// เลือก sprite พู่ของหน้าด้านข้างนี้ (สุ่มลายตามพิกัด+ทิศ, deterministic)
+fn side_overlay_pick(block: BlockType, face_id: usize, wx: i32, wy: i32, wz: i32) -> Option<&'static str> {
+    let list = SIDE_OVERLAYS.get()?.get(block as usize)?.as_slice();
+    if list.is_empty() {
+        return None;
+    }
+    let idx = pos_hash(wx.wrapping_add(face_id as i32 * 7919), wy, wz) % list.len() as u32;
+    Some(list[idx as usize])
 }
 
 pub const CHUNK_WIDTH: usize = 16;
@@ -148,6 +223,8 @@ pub struct VoxelWorld {
     pub chunks: HashMap<IVec2, ChunkData>,            // block data + สถิติ
     pub generated_chunks: HashMap<IVec2, Entity>,     // mesh entity (พื้นดิน vertex color)
     pub water_chunks: HashMap<IVec2, Entity>,         // mesh entity (น้ำ โปร่งใส)
+    pub glass_chunks: HashMap<IVec2, Entity>,         // mesh entity (กระจก โปร่งใส)
+    pub deco_chunks: HashMap<IVec2, Vec<Entity>>,     // mesh entity (ของประดับกากบาทและพู่หญ้า)
     pub glow_chunks: HashMap<IVec2, Vec<Entity>>,     // mesh entity (บล็อกเรืองแสง ต่อสี)
     pub textured_chunks: HashMap<IVec2, Vec<Entity>>, // mesh entity (บล็อกมี texture ต่อไฟล์)
     pub lamp_lights: HashMap<IVec2, Vec<Entity>>,     // PointLight ของบล็อกไฟใน chunk
@@ -294,6 +371,10 @@ pub struct ChunkMeshSet {
     pub solid: MeshBuf,
     /// น้ำ (material โปร่งใส)
     pub water: MeshBuf,
+    /// กระจก (material โปร่งใสอีกระดับ)
+    pub glass: MeshBuf,
+    /// ของประดับ alpha cutout สองหน้า (หญ้าสูง, พู่หญ้าข้างบล็อก) แยกต่อ sprite
+    pub deco: Vec<(&'static str, MeshBuf)>,
     /// บล็อกเรืองแสง แยกต่อชนิด (material emissive)
     pub glow: Vec<(BlockType, MeshBuf)>,
     /// บล็อกมี texture แยกต่อไฟล์ texture
@@ -304,6 +385,8 @@ impl ChunkMeshSet {
     pub fn total_vertices(&self) -> usize {
         self.solid.positions.len()
             + self.water.positions.len()
+            + self.glass.positions.len()
+            + self.deco.iter().map(|(_, b)| b.positions.len()).sum::<usize>()
             + self.glow.iter().map(|(_, b)| b.positions.len()).sum::<usize>()
             + self.textured.iter().map(|(_, b)| b.positions.len()).sum::<usize>()
     }
@@ -311,6 +394,8 @@ impl ChunkMeshSet {
     pub fn total_indices(&self) -> usize {
         self.solid.indices.len()
             + self.water.indices.len()
+            + self.glass.indices.len()
+            + self.deco.iter().map(|(_, b)| b.indices.len()).sum::<usize>()
             + self.glow.iter().map(|(_, b)| b.indices.len()).sum::<usize>()
             + self.textured.iter().map(|(_, b)| b.indices.len()).sum::<usize>()
     }
@@ -344,10 +429,15 @@ fn texture_buf<'a>(bufs: &'a mut Vec<(&'static str, MeshBuf)>, tex: &'static str
 /// ลำดับ neighbors: [+X, -X, +Z, -Z, +X+Z, +X-Z, -X+Z, -X-Z]
 /// (แนวทแยงจำเป็นสำหรับ vertex AO ที่มุม chunk)
 pub fn create_mesh_from_blocks(
+    chunk_pos: IVec2,
     blocks: &[BlockType; CHUNK_VOLUME],
     neighbors: &[Arc<[BlockType; CHUNK_VOLUME]>; 8],
 ) -> ChunkMeshSet {
     let mut set = ChunkMeshSet::default();
+
+    // พิกัดโลกของมุม chunk — ใช้ hash เลือกลาย texture ให้ต่อเนื่องข้าม chunk
+    let world_base_x = chunk_pos.x * CHUNK_WIDTH as i32;
+    let world_base_z = chunk_pos.y * CHUNK_WIDTH as i32;
 
     // อ่านบล็อกด้วยพิกัด local ที่ทะลุขอบ chunk ได้ (รวมแนวทแยง)
     let sample = |x: i32, y: i32, z: i32| -> BlockType {
@@ -399,9 +489,9 @@ pub fn create_mesh_from_blocks(
             pc[a1] += s1;
             pc[a2] += s2;
 
-            let side1 = sample(p1[0], p1[1], p1[2]).is_solid();
-            let side2 = sample(p2[0], p2[1], p2[2]).is_solid();
-            let corner = sample(pc[0], pc[1], pc[2]).is_solid();
+            let side1 = sample(p1[0], p1[1], p1[2]).occludes();
+            let side2 = sample(p2[0], p2[1], p2[2]).occludes();
+            let corner = sample(pc[0], pc[1], pc[2]).occludes();
 
             ao[i] = if side1 && side2 {
                 0
@@ -436,8 +526,9 @@ pub fn create_mesh_from_blocks(
             }
         };
 
-        // mask ของ slice: Some((ชนิดบล็อก, ระดับ AO สม่ำเสมอ)) = รอ merge
-        let mut mask: Vec<Option<(BlockType, u8)>> = vec![None; (lu * lv) as usize];
+        // mask ของ slice: Some((ชนิดบล็อก, ระดับ AO สม่ำเสมอ, ลาย texture)) = รอ merge
+        // ลายอยู่ใน key ด้วย — หน้าที่ลายต่างกัน merge รวมกันไม่ได้
+        let mut mask: Vec<Option<(BlockType, u8, u8)>> = vec![None; (lu * lv) as usize];
 
         for s in 0..la {
             for m in mask.iter_mut() {
@@ -452,28 +543,69 @@ pub fn create_mesh_from_blocks(
                     c[va] = vi;
 
                     let block = blocks[ChunkData::get_index(c[0] as usize, c[1] as usize, c[2] as usize)];
-                    if block == BlockType::Air {
+                    // TallGrass ไม่ใช่ลูกบาศก์ — วาดแยกเป็นกากบาทท้ายฟังก์ชัน
+                    if block == BlockType::Air || block == BlockType::TallGrass {
                         continue;
                     }
 
+                    // เห็นหน้านี้เมื่อเพื่อนบ้านโปร่งใส (อากาศ/น้ำ/กระจก/หญ้าสูง)
+                    // แต่บล็อกโปร่งใสชนิดเดียวกันติดกันไม่วาดหน้าใน (น้ำ-น้ำ, กระจก-กระจก)
                     let n = sample(c[0] + norm[0], c[1] + norm[1], c[2] + norm[2]);
-                    let visible = n == BlockType::Air || (n == BlockType::Water && block != BlockType::Water);
+                    let visible = n == BlockType::Air || (block_def(n).transparent && n != block);
                     if !visible {
                         continue;
                     }
 
-                    // น้ำและบล็อกเรืองแสงไม่คิด AO (บล็อกไฟไม่ควรมีเงามุม)
-                    let ao = if block == BlockType::Water || lamp_emission(block).is_some() {
+                    // พู่ห้อยเอียง: ขอบบนแนบสันบล็อก ชายล่างยื่นออกตาม normal
+                    // (เฉพาะหน้าด้านข้างของบล็อกที่มี overlay เช่นหญ้า)
+                    if face_id >= 2 {
+                        if let Some(overlay) = side_overlay_pick(
+                            block,
+                            face_id,
+                            world_base_x + c[0],
+                            c[1],
+                            world_base_z + c[2],
+                        ) {
+                            const TILT: f32 = 0.3;
+                            let mut verts = [[0f32; 3]; 4];
+                            let mut uvs = [[0f32; 2]; 4];
+                            for i in 0..4 {
+                                let p = CUBE_POSITIONS[face_id][i];
+                                let flat = [p[0] + c[0] as f32, p[1] + c[1] as f32, p[2] + c[2] as f32];
+                                uvs[i] = face_uv(flat);
+                                let mut v = flat;
+                                if p[1] < 0.5 {
+                                    v[0] += norm[0] as f32 * TILT;
+                                    v[2] += norm[2] as f32 * TILT;
+                                }
+                                verts[i] = v;
+                            }
+                            // normal ชี้ขึ้น — รับแสงเหมือนพื้นหญ้าด้านบน
+                            texture_buf(&mut set.deco, overlay)
+                                .push_quad(verts, [0., 1., 0.], [[1.0; 4]; 4], uvs, false);
+                        }
+                    }
+
+                    // บล็อกโปร่งใส (น้ำ/กระจก) และบล็อกเรืองแสงไม่คิด AO
+                    let ao = if block_def(block).transparent || lamp_emission(block).is_some() {
                         [3u8; 4]
                     } else {
                         face_ao(c, face_id)
                     };
 
+                    let variant = texture_variant(
+                        block,
+                        face_id,
+                        world_base_x + c[0],
+                        c[1],
+                        world_base_z + c[2],
+                    );
+
                     if ao[0] == ao[1] && ao[1] == ao[2] && ao[2] == ao[3] {
-                        mask[midx(ui, vi)] = Some((block, ao[0]));
+                        mask[midx(ui, vi)] = Some((block, ao[0], variant));
                     } else {
                         // AO ไล่เฉดภายในหน้า — merge ไม่ได้ วาดเดี่ยวพร้อม flip diagonal
-                        let tex = face_texture(block, face_id);
+                        let tex = face_texture(block, face_id, variant);
                         let base = if tex.is_some() { [1.0, 1.0, 1.0, 1.0] } else { block_color(block) };
                         let shade = FACE_SHADE[face_id];
                         let mut verts = [[0f32; 3]; 4];
@@ -521,10 +653,15 @@ pub fn create_mesh_from_blocks(
                         }
                     }
 
-                    let (block, ao_level) = key;
+                    let (block, ao_level, variant) = key;
                     let is_water = block == BlockType::Water;
+                    let is_glass = block == BlockType::Glass;
                     let is_lamp = lamp_emission(block).is_some();
-                    let tex = if is_water || is_lamp { None } else { face_texture(block, face_id) };
+                    let tex = if is_water || is_glass || is_lamp {
+                        None
+                    } else {
+                        face_texture(block, face_id, variant)
+                    };
                     let base = if tex.is_some() { [1.0, 1.0, 1.0, 1.0] } else { block_color(block) };
                     let br = FACE_SHADE[face_id] * AO_CURVE[ao_level as usize];
                     let col = [base[0] * br, base[1] * br, base[2] * br, base[3]];
@@ -543,6 +680,8 @@ pub fn create_mesh_from_blocks(
 
                     let buf = if is_water {
                         &mut set.water
+                    } else if is_glass {
+                        &mut set.glass
                     } else if is_lamp {
                         glow_buf(&mut set.glow, block)
                     } else if let Some(t) = tex {
@@ -552,6 +691,34 @@ pub fn create_mesh_from_blocks(
                     };
                     buf.push_quad(verts, CUBE_NORMALS[face_id], [col; 4], uvs, false);
                 }
+            }
+        }
+    }
+
+    // ของประดับแบบกากบาท (Tall Grass): quad ทแยงสองแผ่น sprite alpha cutout
+    // (วาดเมื่อมีไฟล์ sprite เท่านั้น) — normal ชี้ขึ้นให้โดนแสงเหมือนพื้นหญ้า
+    if let Some(sprite) = face_texture(BlockType::TallGrass, 2, 0) {
+        const CROSS_QUADS: [[[f32; 3]; 4]; 2] = [
+            [[0., 0., 0.], [1., 0., 1.], [1., 1., 1.], [0., 1., 0.]],
+            [[1., 0., 0.], [0., 0., 1.], [0., 1., 1.], [1., 1., 0.]],
+        ];
+        const CROSS_UVS: [[f32; 2]; 4] = [[0., 1.], [1., 1.], [1., 0.], [0., 0.]];
+
+        for (i, block) in blocks.iter().enumerate() {
+            if *block != BlockType::TallGrass {
+                continue;
+            }
+            let x = (i % CHUNK_WIDTH) as f32;
+            let y = ((i / CHUNK_WIDTH) % CHUNK_HEIGHT) as f32;
+            let z = (i / (CHUNK_WIDTH * CHUNK_HEIGHT)) as f32;
+
+            for quad in CROSS_QUADS {
+                let mut verts = [[0f32; 3]; 4];
+                for v in 0..4 {
+                    verts[v] = [quad[v][0] + x, quad[v][1] + y, quad[v][2] + z];
+                }
+                texture_buf(&mut set.deco, sprite)
+                    .push_quad(verts, [0., 1., 0.], [[1.0; 4]; 4], CROSS_UVS, false);
             }
         }
     }
@@ -700,6 +867,22 @@ fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> Box<[Bl
         }
     }
 
+    // หญ้าสูง: โปรยบนผิวหญ้า (ไม่ขึ้นในทะเลทราย/ใต้น้ำ)
+    let tuft_count = (next() % 14) as usize;
+    for _ in 0..tuft_count {
+        let gx = (next() % CHUNK_WIDTH as u64) as usize;
+        let gz = (next() % CHUNK_WIDTH as u64) as usize;
+        let h = heights[gz][gx];
+        if desert[gz][gx] || h <= SEA_LEVEL as i32 + 1 || h + 1 >= CHUNK_HEIGHT as i32 {
+            continue;
+        }
+        let surface_idx = ChunkData::get_index(gx, h as usize, gz);
+        let above_idx = ChunkData::get_index(gx, (h + 1) as usize, gz);
+        if blocks[surface_idx] == BlockType::Grass && blocks[above_idx] == BlockType::Air {
+            blocks[above_idx] = BlockType::TallGrass;
+        }
+    }
+
     blocks
 }
 
@@ -813,7 +996,7 @@ pub fn spawn_mesh_generation_task(
     sender: Sender<ChunkMeshData>,
 ) {
     AsyncComputeTaskPool::get().spawn(async move {
-        let set = create_mesh_from_blocks(&blocks, &neighbors);
+        let set = create_mesh_from_blocks(chunk_pos, &blocks, &neighbors);
         let _ = sender.send(ChunkMeshData { chunk_pos, set, version });
     }).detach();
 }
@@ -926,6 +1109,13 @@ pub struct LampMaterials(pub HashMap<BlockType, Handle<StandardMaterial>>);
 #[derive(Resource)]
 pub struct BlockMaterials(pub HashMap<&'static str, Handle<StandardMaterial>>);
 
+#[derive(Resource)]
+pub struct GlassMaterial(pub Handle<StandardMaterial>);
+
+/// material ของของประดับ (alpha cutout สองหน้า) ต่อไฟล์ sprite
+#[derive(Resource)]
+pub struct DecoMaterials(pub HashMap<&'static str, Handle<StandardMaterial>>);
+
 pub fn setup_voxel(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -933,12 +1123,12 @@ pub fn setup_voxel(
 ) {
     // สร้างตาราง texture ต่อ (บล็อก, หน้า) — เอาเฉพาะไฟล์ที่มีจริงบน disk
     // ไฟล์ไหนไม่มี หน้านั้น fallback เป็น vertex color (เพิ่มรูปแล้วต้อง restart)
-    let mut face_table: Vec<[Option<&'static str>; 6]> = Vec::with_capacity(BLOCK_DEFS.len());
+    let mut face_table: Vec<[Vec<&'static str>; 6]> = Vec::with_capacity(BLOCK_DEFS.len());
     let mut block_materials: HashMap<&'static str, Handle<StandardMaterial>> = HashMap::new();
     let mut missing: Vec<&'static str> = Vec::new();
 
     for def in BLOCK_DEFS.iter() {
-        let mut faces = [None; 6];
+        let mut faces: [Vec<&'static str>; 6] = Default::default();
         let per_face = [
             (0usize, def.tex_top),
             (1, def.tex_bottom),
@@ -947,29 +1137,24 @@ pub fn setup_voxel(
             (4, def.tex_side),
             (5, def.tex_side),
         ];
-        for (face_id, tex) in per_face {
-            let Some(path) = tex else { continue };
-            if project_root().join("assets").join(path).exists() {
-                faces[face_id] = Some(path);
-                block_materials.entry(path).or_insert_with(|| {
-                    materials.add(StandardMaterial {
-                        base_color: Color::WHITE,
-                        base_color_texture: Some(asset_server.load(path)),
-                        perceptual_roughness: 1.0,
-                        ..default()
-                    })
-                });
-            } else if !missing.contains(&path) {
-                missing.push(path);
+        for (face_id, texs) in per_face {
+            for path in texs {
+                if project_root().join("assets").join(path).exists() {
+                    faces[face_id].push(path);
+                    block_materials.entry(path).or_insert_with(|| {
+                        materials.add(StandardMaterial {
+                            base_color: Color::WHITE,
+                            base_color_texture: Some(asset_server.load(*path)),
+                            perceptual_roughness: 1.0,
+                            ..default()
+                        })
+                    });
+                } else if !missing.contains(path) {
+                    missing.push(path);
+                }
             }
         }
         face_table.push(faces);
-    }
-    if !missing.is_empty() {
-        info!(
-            "textures not found (using vertex colors instead): {}",
-            missing.join(", ")
-        );
     }
     let _ = FACE_TEXTURES.set(face_table);
     commands.insert_resource(BlockMaterials(block_materials));
@@ -989,6 +1174,60 @@ pub fn setup_voxel(
         ..default()
     });
     commands.insert_resource(WaterMaterial(water_material));
+
+    // กระจก: โปร่งใสกว่าน้ำ ผิวเรียบสะท้อนแสง
+    let glass_material = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.80, 0.90, 1.0, 0.30),
+        alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 0.08,
+        ..default()
+    });
+    commands.insert_resource(GlassMaterial(glass_material));
+
+    // sprite ของประดับ (หญ้าสูง + พู่หญ้าข้างบล็อก): alpha cutout + วาดสองหน้า
+    // รวบรวมจาก overlay_side ของทุกบล็อก + sprite กากบาทของ Tall Grass
+    let mut side_overlays: Vec<Vec<&'static str>> = Vec::with_capacity(BLOCK_DEFS.len());
+    let mut deco_materials: HashMap<&'static str, Handle<StandardMaterial>> = HashMap::new();
+    let mut cutout_sprites: Vec<&'static str> =
+        BLOCK_DEFS[BlockType::TallGrass as usize].tex_side.to_vec();
+
+    for def in BLOCK_DEFS.iter() {
+        let mut overlays = Vec::new();
+        for path in def.overlay_side {
+            if project_root().join("assets").join(path).exists() {
+                overlays.push(*path);
+                cutout_sprites.push(*path);
+            } else if !missing.contains(path) {
+                missing.push(path);
+            }
+        }
+        side_overlays.push(overlays);
+    }
+    for path in cutout_sprites {
+        if !project_root().join("assets").join(path).exists() {
+            continue;
+        }
+        deco_materials.entry(path).or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                base_color_texture: Some(asset_server.load(path)),
+                alpha_mode: AlphaMode::Mask(0.5),
+                cull_mode: None,
+                double_sided: true,
+                perceptual_roughness: 1.0,
+                ..default()
+            })
+        });
+    }
+    let _ = SIDE_OVERLAYS.set(side_overlays);
+    commands.insert_resource(DecoMaterials(deco_materials));
+
+    if !missing.is_empty() {
+        info!(
+            "textures not found (using vertex colors instead): {}",
+            missing.join(", ")
+        );
+    }
 
     // บล็อกเรืองแสง: emissive เกิน 1.0 เพื่อให้ bloom ฟุ้ง
     let mut lamp_materials = HashMap::new();
@@ -1078,6 +1317,12 @@ pub fn world_reset_system(
     }
     for (_, entity) in world.water_chunks.drain() {
         commands.entity(entity).despawn();
+    }
+    for (_, entity) in world.glass_chunks.drain() {
+        commands.entity(entity).despawn();
+    }
+    for (_, entities) in world.deco_chunks.drain() {
+        for entity in entities { commands.entity(entity).despawn(); }
     }
     for (_, entities) in world.glow_chunks.drain() {
         for entity in entities {
@@ -1243,6 +1488,42 @@ fn update_glow_entities(
     }
 }
 
+/// สลับชุด mesh แบบ deco ของ chunk (entity เก่าทิ้ง สร้างใหม่)
+fn update_deco_entities(
+    commands: &mut Commands,
+    world: &mut VoxelWorld,
+    meshes: &mut Assets<Mesh>,
+    deco_materials: &DecoMaterials,
+    chunk_pos: IVec2,
+    deco: Vec<(&'static str, MeshBuf)>,
+    transform: Transform,
+) {
+    if let Some(old) = world.deco_chunks.remove(&chunk_pos) {
+        for entity in old {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    let mut entities = Vec::new();
+    for (tex, buf) in deco {
+        if buf.is_empty() {
+            continue;
+        }
+        let Some(material) = deco_materials.0.get(tex) else { continue };
+        let entity = commands.spawn((
+            Mesh3d(meshes.add(buf.into_mesh())),
+            MeshMaterial3d(material.clone()),
+            transform,
+            NotShadowCaster,
+            Block,
+        )).id();
+        entities.push(entity);
+    }
+    if !entities.is_empty() {
+        world.deco_chunks.insert(chunk_pos, entities);
+    }
+}
+
 /// สลับชุด mesh แบบมี texture ของ chunk (entity เก่าทิ้ง สร้างใหม่)
 fn update_textured_entities(
     commands: &mut Commands,
@@ -1275,6 +1556,43 @@ fn update_textured_entities(
     }
     if !entities.is_empty() {
         world.textured_chunks.insert(chunk_pos, entities);
+    }
+}
+
+/// อัปเดต mesh entity เดี่ยวของ chunk (น้ำ/กระจก/ของประดับ):
+/// buffer ว่าง = ลบ entity, มีอยู่แล้ว = เขียนทับ asset เดิม, ยังไม่มี = สร้างใหม่
+fn update_single_mesh_entity(
+    commands: &mut Commands,
+    map: &mut HashMap<IVec2, Entity>,
+    meshes: &mut Assets<Mesh>,
+    mesh_query: &Query<&Mesh3d>,
+    material: &Handle<StandardMaterial>,
+    chunk_pos: IVec2,
+    buf: MeshBuf,
+    transform: Transform,
+) {
+    if buf.is_empty() {
+        if let Some(entity) = map.remove(&chunk_pos) {
+            commands.entity(entity).despawn();
+        }
+    } else if let Some(&entity) = map.get(&chunk_pos) {
+        if let Ok(mesh3d) = mesh_query.get(entity) {
+            let _ = meshes.insert(mesh3d.0.id(), buf.into_mesh());
+            commands.entity(entity).remove::<Aabb>();
+        } else {
+            commands.entity(entity)
+                .insert(Mesh3d(meshes.add(buf.into_mesh())))
+                .remove::<Aabb>();
+        }
+    } else {
+        let entity = commands.spawn((
+            Mesh3d(meshes.add(buf.into_mesh())),
+            MeshMaterial3d(material.clone()),
+            transform,
+            NotShadowCaster,
+            Block,
+        )).id();
+        map.insert(chunk_pos, entity);
     }
 }
 
@@ -1332,6 +1650,8 @@ pub fn process_generated_chunks_system(
     mut meshes: ResMut<Assets<Mesh>>,
     chunk_material: Res<ChunkMaterial>,
     water_material: Res<WaterMaterial>,
+    glass_material: Res<GlassMaterial>,
+    deco_material: Res<DecoMaterials>,
     lamp_materials: Res<LampMaterials>,
     block_materials: Res<BlockMaterials>,
 ) {
@@ -1381,7 +1701,7 @@ pub fn process_generated_chunks_system(
 
         let num_vertices = set.total_vertices();
         let num_indices = set.total_indices();
-        let ChunkMeshSet { solid, water, glow, textured } = set;
+        let ChunkMeshSet { solid, water, glass, deco, glow, textured } = set;
 
         // นับสถิติเฉพาะ chunk ที่มี block data อยู่จริง — mesh ที่มาถึงหลัง
         // chunk ถูก unload (หรือ mesh ของ preview mode) จะไม่ถูกนับ กันตัวเลขรั่ว
@@ -1414,6 +1734,19 @@ pub fn process_generated_chunks_system(
             )).id();
             world.water_chunks.insert(chunk_pos, water_entity);
         }
+
+        if !glass.is_empty() {
+            let glass_entity = commands.spawn((
+                Mesh3d(meshes.add(glass.into_mesh())),
+                MeshMaterial3d(glass_material.0.clone()),
+                transform,
+                NotShadowCaster,
+                Block,
+            )).id();
+            world.glass_chunks.insert(chunk_pos, glass_entity);
+        }
+
+        update_deco_entities(&mut commands, &mut world, &mut meshes, &deco_material, chunk_pos, deco, transform);
 
         update_glow_entities(&mut commands, &mut world, &mut meshes, &lamp_materials, chunk_pos, glow, transform);
         update_textured_entities(&mut commands, &mut world, &mut meshes, &block_materials, chunk_pos, textured, transform);
@@ -1461,6 +1794,12 @@ pub fn chunk_unloading_system(
         }
         if let Some(entity) = world.water_chunks.remove(&pos) {
             commands.entity(entity).despawn();
+        }
+        if let Some(entity) = world.glass_chunks.remove(&pos) {
+            commands.entity(entity).despawn();
+        }
+        if let Some(entities) = world.deco_chunks.remove(&pos) {
+            for entity in entities { commands.entity(entity).despawn(); }
         }
         if let Some(entities) = world.glow_chunks.remove(&pos) {
             for entity in entities {
@@ -1645,14 +1984,16 @@ pub fn block_interaction_system(
     mut meshes: ResMut<Assets<Mesh>>,
     chunk_material: Res<ChunkMaterial>,
     water_material: Res<WaterMaterial>,
+    glass_material: Res<GlassMaterial>,
+    deco_material: Res<DecoMaterials>,
     lamp_materials: Res<LampMaterials>,
     block_materials: Res<BlockMaterials>,
     mesh_query: Query<&Mesh3d>,
     camera_query: Query<&Transform, With<crate::camera::FreeCamera>>,
     mut q_egui: Query<&mut bevy_egui::EguiContext, With<bevy::window::PrimaryWindow>>,
 ) {
-    // Hotbar: กด 1-0 และ - เลือกบล็อก
-    const HOTBAR: [(KeyCode, BlockType); 11] = [
+    // Hotbar: กด 1-0, -, = และ T เลือกบล็อก
+    const HOTBAR: [(KeyCode, BlockType); 13] = [
         (KeyCode::Digit1, BlockType::Dirt),
         (KeyCode::Digit2, BlockType::Grass),
         (KeyCode::Digit3, BlockType::Stone),
@@ -1664,6 +2005,8 @@ pub fn block_interaction_system(
         (KeyCode::Digit9, BlockType::LampRed),
         (KeyCode::Digit0, BlockType::LampGreen),
         (KeyCode::Minus, BlockType::LampBlue),
+        (KeyCode::Equal, BlockType::Glass),
+        (KeyCode::KeyT, BlockType::TallGrass),
     ];
     for (key, block) in HOTBAR {
         if keyboard.just_pressed(key) {
@@ -1768,7 +2111,7 @@ pub fn block_interaction_system(
             old_vertices = chunk_data.num_vertices;
             old_indices = chunk_data.num_indices;
 
-            let s = create_mesh_from_blocks(&chunk_data.blocks, &neighbors);
+            let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors);
             chunk_data.num_vertices = s.total_vertices();
             chunk_data.num_indices = s.total_indices();
             set = s;
@@ -1776,7 +2119,7 @@ pub fn block_interaction_system(
 
         world.total_vertices = (world.total_vertices + set.total_vertices()) - old_vertices;
         world.total_indices = (world.total_indices + set.total_indices()) - old_indices;
-        let ChunkMeshSet { solid, water, glow, textured } = set;
+        let ChunkMeshSet { solid, water, glass, deco, glow, textured } = set;
 
         // สลับ mesh พื้นดิน: เขียนทับ asset เดิมผ่าน handle เดิมถ้าทำได้
         // (asset id คงที่ ไม่มี free/alloc ลดการกระตุ้นบั๊ก slab allocator)
@@ -1797,30 +2140,10 @@ pub fn block_interaction_system(
             }
         }
 
-        // mesh น้ำ: สร้าง/เขียนทับ/ลบ ตามว่ามีหน้าน้ำเหลือไหม
-        if water.is_empty() {
-            if let Some(entity) = world.water_chunks.remove(&chunk_pos) {
-                commands.entity(entity).despawn();
-            }
-        } else if let Some(&entity) = world.water_chunks.get(&chunk_pos) {
-            if let Ok(mesh3d) = mesh_query.get(entity) {
-                let _ = meshes.insert(mesh3d.0.id(), water.into_mesh());
-                commands.entity(entity).remove::<Aabb>();
-            } else {
-                commands.entity(entity)
-                    .insert(Mesh3d(meshes.add(water.into_mesh())))
-                    .remove::<Aabb>();
-            }
-        } else {
-            let water_entity = commands.spawn((
-                Mesh3d(meshes.add(water.into_mesh())),
-                MeshMaterial3d(water_material.0.clone()),
-                transform,
-                NotShadowCaster,
-                Block,
-            )).id();
-            world.water_chunks.insert(chunk_pos, water_entity);
-        }
+        // น้ำ/กระจก/ของประดับ: สร้าง/เขียนทับ/ลบ ตามว่าเหลือหน้าไหม
+        update_single_mesh_entity(&mut commands, &mut world.water_chunks, &mut meshes, &mesh_query, &water_material.0, chunk_pos, water, transform);
+        update_single_mesh_entity(&mut commands, &mut world.glass_chunks, &mut meshes, &mesh_query, &glass_material.0, chunk_pos, glass, transform);
+        update_deco_entities(&mut commands, &mut world, &mut meshes, &deco_material, chunk_pos, deco, transform);
 
         update_glow_entities(&mut commands, &mut world, &mut meshes, &lamp_materials, chunk_pos, glow, transform);
         update_textured_entities(&mut commands, &mut world, &mut meshes, &block_materials, chunk_pos, textured, transform);
