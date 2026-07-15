@@ -1,1 +1,5 @@
 /target
+
+/saves/
+/reconstructed_voxel.rs
+/transcript_dump.txt
