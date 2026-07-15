@@ -53,6 +53,7 @@ fn main() {
         .init_resource::<RegenerateWorld>()
         .init_resource::<voxel::TargetedBlock>()
         .init_resource::<voxel::SelectedBlock>()
+        .init_resource::<voxel::InteractionMode>()
         .add_plugins((
             // sampler แบบ nearest (พิกเซลคม) + repeat (จำเป็น: texture ต้องปูซ้ำ
             // ข้าม quad ที่ greedy meshing รวมแล้ว UV เกิน 1.0)
@@ -82,6 +83,12 @@ fn main() {
                 ui::update_coordinate_ui_system,
                 ui::update_fps_text,
                 ui::update_block_target_text,
+                ui::update_mode_text,
+            ),
+        )
+        .add_systems(
+            Update,
+            (
                 voxel::voxel_raycast_system,
                 voxel::block_interaction_system,
                 voxel::world_reset_system,

@@ -10,6 +10,9 @@ pub struct FpsText;
 #[derive(Component)]
 pub struct BlockIdText;
 
+#[derive(Component)]
+pub struct ModeText;
+
 pub fn setup_ui(mut commands: Commands) {
     // Crosshair
     commands.spawn((
@@ -82,6 +85,18 @@ pub fn setup_ui(mut commands: Commands) {
                 TextColor(Color::WHITE),
                 BlockIdText,
             ));
+
+            // Mode Text
+            parent.spawn((
+                Text::new("Mode: Normal"),
+                TextFont {
+                    font_size: bevy::text::FontSize::Px(16.0),
+                    ..default()
+                },
+                bevy::text::TextLayout::justify(bevy::text::Justify::Right),
+                TextColor(Color::WHITE),
+                ModeText,
+            ));
         });
 }
 
@@ -94,6 +109,17 @@ pub fn update_coordinate_ui_system(
             let pos = camera_transform.translation;
             // อัปเดตข้อความบนจอ
             text.0 = format!("X: {:.2}, Y: {:.2}, Z: {:.2}", pos.x, pos.y, pos.z);
+        }
+    }
+}
+
+pub fn update_mode_text(
+    interaction_mode: Res<crate::voxel::InteractionMode>,
+    mut text_query: Query<&mut Text, With<ModeText>>,
+) {
+    if interaction_mode.is_added() || interaction_mode.is_changed() {
+        for mut text in &mut text_query {
+            text.0 = format!("Mode: {:?}", *interaction_mode);
         }
     }
 }

@@ -32,6 +32,7 @@ pub enum BlockType {
     LampBlue = 11,
     Glass = 12,
     TallGrass = 13,
+    Chiseled = 14,
 }
 
 impl BlockType {
@@ -50,6 +51,7 @@ impl BlockType {
             11 => BlockType::LampBlue,
             12 => BlockType::Glass,
             13 => BlockType::TallGrass,
+            14 => BlockType::Chiseled,
             _ => BlockType::Air,
         }
     }
@@ -90,7 +92,7 @@ pub struct BlockDef {
     pub overlay_side: &'static [&'static str],
 }
 
-pub const BLOCK_DEFS: [BlockDef; 14] = [
+pub const BLOCK_DEFS: [BlockDef; 15] = [
     BlockDef { name: "Air", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
     BlockDef { name: "Dirt", color: [0.4, 0.2, 0.0, 1.0], solid: true, transparent: false, emission: None,
@@ -134,6 +136,8 @@ pub const BLOCK_DEFS: [BlockDef; 14] = [
     BlockDef { name: "Tall Grass", color: [0.25, 0.55, 0.53, 1.0], solid: false, transparent: true, emission: None,
         // ใช้ช่อง side เป็นรูป sprite ของกากบาท
         tex_top: &[], tex_side: &["textures/grass.png"], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Chiseled", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
 ];
 
 pub fn block_def(block: BlockType) -> &'static BlockDef {
@@ -208,6 +212,7 @@ pub const SEA_LEVEL: usize = 200;
 
 pub struct ChunkData {
     pub blocks: Arc<[BlockType; CHUNK_VOLUME]>,
+    pub chiseled_blocks: HashMap<usize, Box<[u8; 4096]>>,
     pub num_vertices: usize,
     pub num_indices: usize,
 }
@@ -216,6 +221,13 @@ impl ChunkData {
     pub fn get_index(x: usize, y: usize, z: usize) -> usize {
         x + y * CHUNK_WIDTH + z * CHUNK_WIDTH * CHUNK_HEIGHT
     }
+}
+
+#[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum InteractionMode {
+    #[default]
+    Normal,
+    SubVoxel,
 }
 
 #[derive(Resource, Default)]
@@ -248,6 +260,47 @@ impl VoxelWorld {
             chunk.blocks[ChunkData::get_index(local_x, local_y, local_z)]
         } else {
             BlockType::Air
+        }
+    }
+
+    pub fn get_chiseled_sub_voxel(&self, x: i32, y: i32, z: i32, sx: usize, sy: usize, sz: usize) -> u8 {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 { return 0; }
+        let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        if let Some(chunk) = self.chunks.get(&IVec2::new(cx, cz)) {
+            let idx = ChunkData::get_index(lx, y as usize, lz);
+            if let Some(data) = chunk.chiseled_blocks.get(&idx) {
+                return data[sx + sy * 16 + sz * 256];
+            }
+        }
+        0
+    }
+    
+    pub fn set_chiseled_sub_voxel(&mut self, x: i32, y: i32, z: i32, sx: usize, sy: usize, sz: usize, val: u8) {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 { return; }
+        let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        if let Some(chunk) = self.chunks.get_mut(&IVec2::new(cx, cz)) {
+            let idx = ChunkData::get_index(lx, y as usize, lz);
+            let entry = chunk.chiseled_blocks.entry(idx).or_insert_with(|| Box::new([0; 4096]));
+            entry[sx + sy * 16 + sz * 256] = val;
+        }
+    }
+
+    pub fn convert_to_chiseled(&mut self, x: i32, y: i32, z: i32) {
+        let block = self.get_block(x, y, z);
+        if block == BlockType::Air || block == BlockType::Chiseled { return; }
+        
+        if y < 0 || y >= CHUNK_HEIGHT as i32 { return; }
+        let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        if let Some(chunk) = self.chunks.get_mut(&IVec2::new(cx, cz)) {
+            let idx = ChunkData::get_index(lx, y as usize, lz);
+            let blocks_mut = Arc::make_mut(&mut chunk.blocks);
+            blocks_mut[idx] = BlockType::Chiseled;
+            let mut data = Box::new([0u8; 4096]);
+            data.fill(block as u8);
+            chunk.chiseled_blocks.insert(idx, data);
         }
     }
 
@@ -432,6 +485,7 @@ pub fn create_mesh_from_blocks(
     chunk_pos: IVec2,
     blocks: &[BlockType; CHUNK_VOLUME],
     neighbors: &[Arc<[BlockType; CHUNK_VOLUME]>; 8],
+    chiseled_blocks: Option<&HashMap<usize, Box<[u8; 4096]>>>,
 ) -> ChunkMeshSet {
     let mut set = ChunkMeshSet::default();
 
@@ -544,7 +598,8 @@ pub fn create_mesh_from_blocks(
 
                     let block = blocks[ChunkData::get_index(c[0] as usize, c[1] as usize, c[2] as usize)];
                     // TallGrass ไม่ใช่ลูกบาศก์ — วาดแยกเป็นกากบาทท้ายฟังก์ชัน
-                    if block == BlockType::Air || block == BlockType::TallGrass {
+                    // Chiseled ข้ามไปก่อน วาดแยกทีหลัง
+                    if block == BlockType::Air || block == BlockType::TallGrass || block == BlockType::Chiseled {
                         continue;
                     }
 
@@ -723,7 +778,110 @@ pub fn create_mesh_from_blocks(
         }
     }
 
+    if let Some(chiseled_map) = chiseled_blocks {
+        for (i, block) in blocks.iter().enumerate() {
+            if *block != BlockType::Chiseled {
+                continue;
+            }
+            if let Some(chiseled_data) = chiseled_map.get(&i) {
+                let x = (i % CHUNK_WIDTH) as f32;
+                let y = ((i / CHUNK_WIDTH) % CHUNK_HEIGHT) as f32;
+                let z = (i / (CHUNK_WIDTH * CHUNK_HEIGHT)) as f32;
+                generate_chiseled_mesh_into(&mut set, x, y, z, chiseled_data);
+            }
+        }
+    }
+
     set
+}
+
+fn generate_chiseled_mesh_into(
+    set: &mut ChunkMeshSet,
+    bx: f32,
+    by: f32,
+    bz: f32,
+    data: &[u8; 4096]
+) {
+    let scale = 1.0 / 16.0;
+    let get = |x: i32, y: i32, z: i32| -> u8 {
+        if x < 0 || x > 15 || y < 0 || y > 15 || z < 0 || z > 15 {
+            return 0;
+        }
+        data[x as usize + (y as usize) * 16 + (z as usize) * 256]
+    };
+    
+    let face_uv = |face_id: usize, p: [f32; 3]| -> [f32; 2] {
+        let norm = FACE_OFFSETS[face_id];
+        let a = if norm[0] != 0 { 0 } else if norm[1] != 0 { 1 } else { 2 };
+        match a {
+            1 => [p[0], p[2]],
+            0 => [p[2], -p[1]],
+            _ => [p[0], -p[1]],
+        }
+    };
+
+    for i in 0..4096 {
+        let val = data[i];
+        if val == 0 {
+            continue;
+        }
+        
+        let cx = (i % 16) as i32;
+        let cy = ((i / 16) % 16) as i32;
+        let cz = (i / 256) as i32;
+        
+        let (is_texture, color, block_type) = if val <= 127 {
+            let bt = BlockType::from_u8(val);
+            let col = block_def(bt).color;
+            (true, [col[0], col[1], col[2], 1.0], bt)
+        } else {
+            // Palette mode 128-255: procedurally generate a hue based on value
+            let hue = (val as f32 - 128.0) / 128.0;
+            let rgb = Color::hsl(hue * 360.0, 0.8, 0.5).to_srgba();
+            (false, [rgb.red, rgb.green, rgb.blue, 1.0], BlockType::Air)
+        };
+
+        for face_id in 0..6 {
+            let norm = FACE_OFFSETS[face_id];
+            let nx = cx + norm[0];
+            let ny = cy + norm[1];
+            let nz = cz + norm[2];
+            
+            if get(nx, ny, nz) == 0 {
+                let mut verts = [[0f32; 3]; 4];
+                let mut uvs = [[0f32; 2]; 4];
+                let positions = CUBE_POSITIONS[face_id];
+                
+                for v in 0..4 {
+                    let local_p = [
+                        (cx as f32 + positions[v][0]) * scale,
+                        (cy as f32 + positions[v][1]) * scale,
+                        (cz as f32 + positions[v][2]) * scale,
+                    ];
+                    verts[v] = [
+                        bx + local_p[0],
+                        by + local_p[1],
+                        bz + local_p[2],
+                    ];
+                    uvs[v] = face_uv(face_id, local_p);
+                }
+                
+                let norm_f32 = [norm[0] as f32, norm[1] as f32, norm[2] as f32];
+                
+                if is_texture {
+                    if let Some(path) = face_texture_list(block_type, face_id).first() {
+                        // ถ้ามี texture ต้องใช้สีขาว (1.0) เพื่อไม่ให้สีไปปนกับสี texture 
+                        // (เหมือนลอจิกใน create_mesh_from_blocks)
+                        texture_buf(&mut set.textured, path).push_quad(verts, norm_f32, [[1.0, 1.0, 1.0, 1.0]; 4], uvs, false);
+                    } else {
+                        set.solid.push_quad(verts, norm_f32, [color; 4], [[0.0, 0.0]; 4], false);
+                    }
+                } else {
+                    set.solid.push_quad(verts, norm_f32, [color; 4], [[0.0, 0.0]; 4], false);
+                }
+            }
+        }
+    }
 }
 
 // --------------------------------------------------------
@@ -996,7 +1154,7 @@ pub fn spawn_mesh_generation_task(
     sender: Sender<ChunkMeshData>,
 ) {
     AsyncComputeTaskPool::get().spawn(async move {
-        let set = create_mesh_from_blocks(chunk_pos, &blocks, &neighbors);
+        let set = create_mesh_from_blocks(chunk_pos, &blocks, &neighbors, None);
         let _ = sender.send(ChunkMeshData { chunk_pos, set, version });
     }).detach();
 }
@@ -1673,6 +1831,7 @@ pub fn process_generated_chunks_system(
         let chunk_pos = block_data.chunk_pos;
         world.chunks.insert(chunk_pos, ChunkData {
             blocks: block_data.blocks,
+            chiseled_blocks: HashMap::new(),
             num_vertices: 0,
             num_indices: 0,
         });
@@ -1832,6 +1991,7 @@ pub struct TargetHit {
     pub pos: IVec3,
     pub normal: IVec3,
     pub block: BlockType,
+    pub sub_pos: Option<IVec3>, // (0..15, 0..15, 0..15)
 }
 
 /// ผล raycast ของเฟรมนี้ — ให้ระบบอื่น (UI, interaction) อ่านต่อ
@@ -1852,6 +2012,7 @@ pub fn voxel_raycast_system(
     camera_query: Query<&Transform, With<crate::camera::FreeCamera>>,
     world: Res<VoxelWorld>,
     mut target: ResMut<TargetedBlock>,
+    interaction_mode: Res<InteractionMode>,
     mut gizmos: Gizmos,
 ) {
     target.0 = None;
@@ -1861,6 +2022,82 @@ pub fn voxel_raycast_system(
     let dir = camera_transform.forward().normalize();
 
     let max_dist = 6.0;
+
+    if *interaction_mode == InteractionMode::SubVoxel {
+        let max_steps = 600;
+        let step = 0.01;
+        let mut prev_macro = IVec3::new(origin.x.floor() as i32, origin.y.floor() as i32, origin.z.floor() as i32);
+        let mut prev_sub = IVec3::new(
+            ((origin.x - prev_macro.x as f32) * 16.0).floor().clamp(0.0, 15.0) as i32,
+            ((origin.y - prev_macro.y as f32) * 16.0).floor().clamp(0.0, 15.0) as i32,
+            ((origin.z - prev_macro.z as f32) * 16.0).floor().clamp(0.0, 15.0) as i32,
+        );
+        
+        for i in 0..max_steps {
+            let t = i as f32 * step;
+            let p = origin + dir * t;
+            
+            let mx = p.x.floor() as i32;
+            let my = p.y.floor() as i32;
+            let mz = p.z.floor() as i32;
+            let m_pos = IVec3::new(mx, my, mz);
+            
+            let block = world.get_block(mx, my, mz);
+            
+            if block != BlockType::Air && block != BlockType::TallGrass {
+                let sx = ((p.x - mx as f32) * 16.0).floor().clamp(0.0, 15.0) as i32;
+                let sy = ((p.y - my as f32) * 16.0).floor().clamp(0.0, 15.0) as i32;
+                let sz = ((p.z - mz as f32) * 16.0).floor().clamp(0.0, 15.0) as i32;
+                let s_pos = IVec3::new(sx, sy, sz);
+
+                let is_solid = if block == BlockType::Chiseled {
+                    world.get_chiseled_sub_voxel(mx, my, mz, sx as usize, sy as usize, sz as usize) > 0
+                } else {
+                    true
+                };
+
+                if is_solid {
+                    let mut normal = IVec3::ZERO;
+                    let dx = (mx * 16 + sx) - (prev_macro.x * 16 + prev_sub.x);
+                    let dy = (my * 16 + sy) - (prev_macro.y * 16 + prev_sub.y);
+                    let dz = (mz * 16 + sz) - (prev_macro.z * 16 + prev_sub.z);
+                    
+                    if dx != 0 { normal.x = -dx.signum(); }
+                    else if dy != 0 { normal.y = -dy.signum(); }
+                    else if dz != 0 { normal.z = -dz.signum(); }
+                    else { normal.y = 1; }
+                    
+                    target.0 = Some(TargetHit {
+                        pos: m_pos,
+                        normal,
+                        block,
+                        sub_pos: Some(s_pos),
+                    });
+
+                    // Draw sub-voxel box
+                    let min = Vec3::new(
+                        mx as f32 + sx as f32 / 16.0,
+                        my as f32 + sy as f32 / 16.0,
+                        mz as f32 + sz as f32 / 16.0,
+                    );
+                    let max = min + Vec3::splat(1.0 / 16.0);
+                    gizmos.cube(Transform::from_translation((min + max) * 0.5).with_scale(max - min), Color::BLACK);
+                    
+                    return;
+                }
+                
+                prev_macro = m_pos;
+                prev_sub = s_pos;
+            } else {
+                let sx = ((p.x - mx as f32) * 16.0).floor().clamp(0.0, 15.0) as i32;
+                let sy = ((p.y - my as f32) * 16.0).floor().clamp(0.0, 15.0) as i32;
+                let sz = ((p.z - mz as f32) * 16.0).floor().clamp(0.0, 15.0) as i32;
+                prev_macro = m_pos;
+                prev_sub = IVec3::new(sx, sy, sz);
+            }
+        }
+        return;
+    }
 
     let mut map_x = origin.x.floor() as i32;
     let mut map_y = origin.y.floor() as i32;
@@ -1946,6 +2183,7 @@ pub fn voxel_raycast_system(
         pos: IVec3::new(map_x, map_y, map_z),
         normal,
         block,
+        sub_pos: None,
     });
 
     // วาดกรอบหน้าที่เล็งอยู่
@@ -1979,8 +2217,8 @@ pub fn block_interaction_system(
     mut world: ResMut<VoxelWorld>,
     target: Res<TargetedBlock>,
     mut selected: ResMut<SelectedBlock>,
-    mouse_input: Res<ButtonInput<MouseButton>>,
-    keyboard: Res<ButtonInput<KeyCode>>,
+    mut interaction_mode: ResMut<InteractionMode>,
+    (mouse_input, keyboard): (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>),
     mut meshes: ResMut<Assets<Mesh>>,
     chunk_material: Res<ChunkMaterial>,
     water_material: Res<WaterMaterial>,
@@ -2006,12 +2244,20 @@ pub fn block_interaction_system(
         (KeyCode::Digit0, BlockType::LampGreen),
         (KeyCode::Minus, BlockType::LampBlue),
         (KeyCode::Equal, BlockType::Glass),
-        (KeyCode::KeyT, BlockType::TallGrass),
+        (KeyCode::KeyY, BlockType::TallGrass),
     ];
     for (key, block) in HOTBAR {
         if keyboard.just_pressed(key) {
             selected.0 = block;
         }
+    }
+
+    // Toggle Interaction Mode
+    if keyboard.just_pressed(KeyCode::KeyT) {
+        *interaction_mode = match *interaction_mode {
+            InteractionMode::Normal => InteractionMode::SubVoxel,
+            InteractionMode::SubVoxel => InteractionMode::Normal,
+        };
     }
 
     let Some(hit) = target.0 else { return };
@@ -2030,30 +2276,74 @@ pub fn block_interaction_system(
     }
 
     let mut target_pos = None;
-    if break_pressed {
-        if world.set_block(hit.pos.x, hit.pos.y, hit.pos.z, BlockType::Air) {
-            target_pos = Some(hit.pos);
-        }
-    } else if place_pressed {
-        let p = hit.pos + hit.normal;
 
-        // กันวางบล็อกตันทับตำแหน่งผู้เล่น
-        let mut blocked = false;
-        if selected.0.is_solid() {
-            if let Some(cam) = camera_query.iter().next() {
-                let feet = cam.translation - Vec3::Y * crate::camera::EYE_HEIGHT;
-                let pmin = feet - Vec3::new(crate::camera::PLAYER_HALF, 0.0, crate::camera::PLAYER_HALF);
-                let pmax = feet + Vec3::new(crate::camera::PLAYER_HALF, crate::camera::PLAYER_HEIGHT, crate::camera::PLAYER_HALF);
-                let bmin = p.as_vec3();
-                let bmax = bmin + Vec3::ONE;
-                blocked = pmin.x < bmax.x && pmax.x > bmin.x
-                    && pmin.y < bmax.y && pmax.y > bmin.y
-                    && pmin.z < bmax.z && pmax.z > bmin.z;
+    if *interaction_mode == InteractionMode::SubVoxel {
+        if let Some(sub_pos) = hit.sub_pos {
+            if break_pressed {
+                if hit.block != BlockType::Chiseled {
+                    world.convert_to_chiseled(hit.pos.x, hit.pos.y, hit.pos.z);
+                }
+                world.set_chiseled_sub_voxel(
+                    hit.pos.x, hit.pos.y, hit.pos.z,
+                    sub_pos.x as usize, sub_pos.y as usize, sub_pos.z as usize,
+                    0,
+                );
+                target_pos = Some(hit.pos);
+            } else if place_pressed {
+                let adj_sub = sub_pos + hit.normal;
+                let (mut target_macro, mut target_sub) = (hit.pos, adj_sub);
+                
+                if target_sub.x < 0 { target_macro.x -= 1; target_sub.x = 15; }
+                else if target_sub.x > 15 { target_macro.x += 1; target_sub.x = 0; }
+                
+                if target_sub.y < 0 { target_macro.y -= 1; target_sub.y = 15; }
+                else if target_sub.y > 15 { target_macro.y += 1; target_sub.y = 0; }
+                
+                if target_sub.z < 0 { target_macro.z -= 1; target_sub.z = 15; }
+                else if target_sub.z > 15 { target_macro.z += 1; target_sub.z = 0; }
+                
+                let target_block = world.get_block(target_macro.x, target_macro.y, target_macro.z);
+                if target_block != BlockType::Chiseled {
+                    if target_block == BlockType::Air {
+                        world.set_block(target_macro.x, target_macro.y, target_macro.z, BlockType::Chiseled);
+                    } else {
+                        world.convert_to_chiseled(target_macro.x, target_macro.y, target_macro.z);
+                    }
+                }
+                
+                world.set_chiseled_sub_voxel(
+                    target_macro.x, target_macro.y, target_macro.z,
+                    target_sub.x as usize, target_sub.y as usize, target_sub.z as usize,
+                    selected.0 as u8,
+                );
+                target_pos = Some(target_macro);
             }
         }
+    } else {
+        if break_pressed {
+            if world.set_block(hit.pos.x, hit.pos.y, hit.pos.z, BlockType::Air) {
+                target_pos = Some(hit.pos);
+            }
+        } else if place_pressed {
+            let p = hit.pos + hit.normal;
 
-        if !blocked && world.set_block(p.x, p.y, p.z, selected.0) {
-            target_pos = Some(p);
+            let mut blocked = false;
+            if selected.0.is_solid() {
+                if let Some(cam) = camera_query.iter().next() {
+                    let feet = cam.translation - Vec3::Y * crate::camera::EYE_HEIGHT;
+                    let pmin = feet - Vec3::new(crate::camera::PLAYER_HALF, 0.0, crate::camera::PLAYER_HALF);
+                    let pmax = feet + Vec3::new(crate::camera::PLAYER_HALF, crate::camera::PLAYER_HEIGHT, crate::camera::PLAYER_HALF);
+                    let bmin = p.as_vec3();
+                    let bmax = bmin + Vec3::ONE;
+                    blocked = pmin.x < bmax.x && pmax.x > bmin.x
+                        && pmin.y < bmax.y && pmax.y > bmin.y
+                        && pmin.z < bmax.z && pmax.z > bmin.z;
+                }
+            }
+
+            if !blocked && world.set_block(p.x, p.y, p.z, selected.0) {
+                target_pos = Some(p);
+            }
         }
     }
 
@@ -2111,7 +2401,7 @@ pub fn block_interaction_system(
             old_vertices = chunk_data.num_vertices;
             old_indices = chunk_data.num_indices;
 
-            let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors);
+            let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors, Some(&chunk_data.chiseled_blocks));
             chunk_data.num_vertices = s.total_vertices();
             chunk_data.num_indices = s.total_indices();
             set = s;
