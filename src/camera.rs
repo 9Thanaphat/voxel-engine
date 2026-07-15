@@ -233,7 +233,11 @@ pub fn camera_look_system(
     }
 }
 
-pub fn setup_camera(mut commands: Commands) {
+pub fn setup_camera(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     let transform =
         Transform::from_xyz(-2.0, 250.0, -2.0).looking_at(Vec3::new(8.0, 200.0, 8.0), Vec3::Y);
 
@@ -261,5 +265,15 @@ pub fn setup_camera(mut commands: Commands) {
             pitch,
             ..default()
         },
+    )).with_child((
+        Mesh3d(meshes.add(Cuboid::new(PLAYER_HALF * 2.0, PLAYER_HEIGHT, PLAYER_HALF * 2.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.2, 0.6, 1.0), // Blue box
+            ..default()
+        })),
+        // กล้องอยู่ที่ระดับสายตา (EYE_HEIGHT) จากเท้า
+        // ส่วนกล่องถูกสร้างโดยมีจุดศูนย์กลางอยู่ที่กึ่งกลางความสูง (PLAYER_HEIGHT / 2)
+        // จึงต้อง offset Y ลงมา
+        Transform::from_xyz(0.0, (PLAYER_HEIGHT / 2.0) - EYE_HEIGHT, 0.0),
     ));
 }

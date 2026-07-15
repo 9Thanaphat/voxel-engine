@@ -3,6 +3,7 @@ use bevy::prelude::*;
 mod camera;
 mod voxel;
 mod ui;
+mod network;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -12,7 +13,7 @@ pub enum RenderMode {
     SurfacePreview,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NoiseParams {
     pub frequency: f64,
     pub amplitude: f64,
@@ -51,7 +52,26 @@ pub struct RegenerateWorld(pub bool);
 pub enum GameState {
     #[default]
     MainMenu,
+    MultiplayerMenu,
     InGame,
+}
+
+/// หาโฟลเดอร์ assets ให้เจอไม่ว่าจะรันแบบไหน:
+/// - dev (cargo run หรือรัน exe ตรงๆ ในเครื่องนี้): assets ที่ root โปรเจกต์
+/// - แจกจ่าย (ก๊อป exe + assets ไปเครื่องอื่น): assets ข้างๆ ตัว exe
+/// ถ้าไม่ตั้งเอง bevy จะหาข้างๆ exe เท่านั้นตอนรันตรงๆ — texture หายหมด
+fn asset_root() -> String {
+    let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+    if dev.exists() {
+        return dev.to_string_lossy().into_owned();
+    }
+    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        let beside_exe = exe_dir.join("assets");
+        if beside_exe.exists() {
+            return beside_exe.to_string_lossy().into_owned();
+        }
+    }
+    "assets".to_string()
 }
 
 fn main() {
@@ -62,6 +82,11 @@ fn main() {
         .init_resource::<voxel::SelectedBlock>()
         .init_resource::<voxel::InteractionMode>()
         .init_resource::<voxel::ActiveFluids>()
+        .init_resource::<network::MultiplayerUi>()
+        .init_resource::<network::PendingNetEdits>()
+        .init_resource::<network::IncomingNetEdits>()
+        .init_resource::<network::IncomingChunkRemesh>()
+        .init_resource::<network::PositionSendTimer>()
         .add_plugins((
             DefaultPlugins.set(ImagePlugin {
                 default_sampler: bevy::image::ImageSamplerDescriptor {
@@ -69,11 +94,19 @@ fn main() {
                     address_mode_v: bevy::image::ImageAddressMode::Repeat,
                     ..bevy::image::ImageSamplerDescriptor::nearest()
                 },
+            }).set(bevy::asset::AssetPlugin {
+                file_path: asset_root(),
+                ..Default::default()
             }),
             bevy::pbr::wireframe::WireframePlugin::default(),
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
             bevy::diagnostic::EntityCountDiagnosticsPlugin::default(),
             bevy_egui::EguiPlugin::default(),
+            // renet: plugins ทำงานเฉพาะตอนมี RenetServer/RenetClient resource
+            bevy_renet::RenetServerPlugin,
+            bevy_renet::RenetClientPlugin,
+            bevy_renet::netcode::NetcodeServerPlugin,
+            bevy_renet::netcode::NetcodeClientPlugin,
         ))
         .init_state::<GameState>()
         .add_systems(Startup, (
@@ -103,14 +136,53 @@ fn main() {
                 voxel::process_generated_chunks_system,
                 voxel::chunk_unloading_system,
                 voxel::update_sun_system,
-                voxel::fluid_simulation_system,
+                // น้ำ simulate เฉพาะ single player กับ host — client รับ delta จาก host แทน
+                voxel::fluid_simulation_system.run_if(network::is_not_client),
             ).run_if(in_state(GameState::InGame)),
         )
+        // ---- Networking ----
+        .add_observer(network::on_server_event)
+        .add_systems(
+            Update,
+            (
+                network::host_receive_client_messages,
+                network::host_send_queued_chunks,
+                network::host_broadcast_edits.after(network::host_receive_client_messages),
+                network::host_broadcast_positions,
+            ).run_if(resource_exists::<bevy_renet::RenetServer>),
+        )
+        .add_systems(
+            Update,
+            (
+                network::client_receive_messages,
+                network::client_send_edits,
+                network::client_send_position,
+                network::client_connection_watchdog,
+            ).run_if(resource_exists::<bevy_renet::RenetClient>),
+        )
+        .add_systems(
+            Update,
+            (
+                network::apply_incoming_net_edits
+                    .after(network::client_receive_messages)
+                    .after(network::host_receive_client_messages)
+                    .before(voxel::fluid_simulation_system),
+                network::interpolate_remote_players,
+            ).run_if(network::is_networked),
+        )
+        .add_systems(Update, (
+            network::cleanup_remote_players,
+            network::stop_host_system,
+            network::auto_host_system,
+            network::nameplate_system,
+        ))
+        .add_systems(Startup, network::autostart_from_args)
         .add_systems(
             bevy_egui::EguiPrimaryContextPass,
             (
                 ui::egui_settings_system.run_if(in_state(GameState::InGame)),
                 ui::main_menu_system.run_if(in_state(GameState::MainMenu)),
+                ui::multiplayer_menu_system.run_if(in_state(GameState::MultiplayerMenu)),
             ),
         )
         .add_systems(

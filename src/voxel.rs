@@ -1159,6 +1159,12 @@ pub fn save_chunk(chunk_pos: IVec2, blocks: &[BlockType; CHUNK_VOLUME]) {
     }
 }
 
+/// อ่าน chunk จาก disk เป็น byte ดิบ (ให้ host ส่งต่อไปให้ client โดยไม่ต้องแปลง)
+pub fn load_chunk_bytes(chunk_pos: IVec2) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(chunk_save_path(chunk_pos)).ok()?;
+    (bytes.len() == CHUNK_VOLUME).then_some(bytes)
+}
+
 fn load_chunk(chunk_pos: IVec2) -> Option<Box<[BlockType; CHUNK_VOLUME]>> {
     let bytes = std::fs::read(chunk_save_path(chunk_pos)).ok()?;
     // ขนาดไม่ตรง = เซฟจากโลกคนละขนาด (เช่นช่วงที่ CHUNK_HEIGHT ถูกแก้) — ทิ้ง
@@ -1179,6 +1185,8 @@ fn load_chunk(chunk_pos: IVec2) -> Option<Box<[BlockType; CHUNK_VOLUME]>> {
 pub struct ChunkBlockData {
     pub chunk_pos: IVec2,
     pub blocks: Arc<[BlockType; CHUNK_VOLUME]>,
+    /// sub-voxel data ที่มากับ chunk (ตอนนี้ใช้เฉพาะ chunk ที่รับจาก network host)
+    pub chiseled: HashMap<usize, Box<[u8; 4096]>>,
     pub version: u32,
 }
 
@@ -1221,13 +1229,20 @@ pub fn spawn_block_generation_task(
     noise: crate::NoiseParams,
     version: u32,
     sender: Sender<ChunkBlockData>,
+    use_disk_save: bool,
 ) {
     AsyncComputeTaskPool::get().spawn(async move {
         // ถ้ามีไฟล์เซฟ (ผู้เล่นเคยแก้ chunk นี้) ใช้ของเซฟแทนการ generate
-        let blocks = load_chunk(chunk_pos).unwrap_or_else(|| generate_chunk_blocks(chunk_pos, noise));
+        // — ยกเว้นตอนเป็น network client: save บนเครื่องเป็นโลก single player
+        //   ของผู้เล่นเอง ห้ามเอามาปนกับโลกของ host
+        let blocks = use_disk_save
+            .then(|| load_chunk(chunk_pos))
+            .flatten()
+            .unwrap_or_else(|| generate_chunk_blocks(chunk_pos, noise));
         let _ = sender.send(ChunkBlockData {
             chunk_pos,
             blocks: Arc::from(*blocks),
+            chiseled: HashMap::new(),
             version,
         });
     }).detach();
@@ -1614,6 +1629,7 @@ pub fn world_generation_system(
     world: Res<VoxelWorld>,
     mut generator: ResMut<ChunkGenerator>,
     settings: Res<crate::GameSettings>,
+    client_sync: Option<Res<crate::network::ClientSync>>,
     // cache offset เรียงจากใกล้ไปไกล (สร้างใหม่เมื่อ render distance เปลี่ยน)
     mut offsets_cache: Local<(i32, Vec<IVec2>)>,
 ) {
@@ -1670,7 +1686,24 @@ pub fn world_generation_system(
         {
             generator.generating_blocks.insert(chunk_pos, true);
             let sender = generator.sender_blocks.lock().unwrap().clone();
-            spawn_block_generation_task(chunk_pos, settings.noise, generator.version, sender);
+            // network client: chunk ที่ host ส่งมา (มี edit) ใช้แทนการ generate
+            if let Some(received) = client_sync.as_ref().and_then(|cs| cs.full_chunks.get(&chunk_pos)) {
+                let mut boxed = Box::new([BlockType::Air; CHUNK_VOLUME]);
+                for (i, b) in received.blocks.iter().enumerate() {
+                    boxed[i] = BlockType::from_u8(*b);
+                }
+                let _ = sender.send(ChunkBlockData {
+                    chunk_pos,
+                    blocks: Arc::from(*boxed),
+                    chiseled: received.chiseled.clone(),
+                    version: generator.version,
+                });
+            } else {
+                spawn_block_generation_task(
+                    chunk_pos, settings.noise, generator.version, sender,
+                    client_sync.is_none(),
+                );
+            }
             block_budget -= 1;
         }
 
@@ -1843,7 +1876,7 @@ fn update_single_mesh_entity(
 
 /// สแกน chunk แล้ว spawn PointLight ให้บล็อกไฟทุกก้อน — สีจากชนิดบล็อก
 /// แสงจากหลายดวงผสมกันแบบ additive (แดง+น้ำเงิน = ม่วง) โดย renderer เอง
-fn refresh_chunk_lamp_lights(
+pub fn refresh_chunk_lamp_lights(
     commands: &mut Commands,
     world: &mut VoxelWorld,
     chunk_pos: IVec2,
@@ -1899,6 +1932,8 @@ pub fn process_generated_chunks_system(
     deco_material: Res<DecoMaterials>,
     lamp_materials: Res<LampMaterials>,
     block_materials: Res<BlockMaterials>,
+    mut client_sync: Option<ResMut<crate::network::ClientSync>>,
+    mut active_fluids: ResMut<ActiveFluids>,
 ) {
     // Process Blocks
     let mut received_blocks = Vec::new();
@@ -1918,11 +1953,26 @@ pub fn process_generated_chunks_system(
         let chunk_pos = block_data.chunk_pos;
         world.chunks.insert(chunk_pos, ChunkData {
             blocks: block_data.blocks,
-            chiseled_blocks: HashMap::new(),
+            chiseled_blocks: block_data.chiseled,
             num_vertices: 0,
             num_indices: 0,
         });
         generator.generating_blocks.remove(&chunk_pos);
+
+        // network client: edit ที่มาถึงก่อน chunk โหลด — apply ก่อน mesh ถูกสร้าง
+        if let Some(cs) = client_sync.as_mut() {
+            if let Some(edits) = cs.pending_edits.remove(&chunk_pos) {
+                for edit in edits {
+                    apply_block_edit(&mut world, &edit);
+                }
+                cs.edited.insert(chunk_pos);
+            }
+        }
+
+        // ปลุกน้ำริมตะเข็บกับเพื่อนบ้าน — เว้น client (host เป็นคนรัน fluid sim)
+        if client_sync.is_none() {
+            wake_seam_water(&world, chunk_pos, &mut active_fluids);
+        }
     }
 
     // Process Meshes
@@ -2007,6 +2057,7 @@ pub fn chunk_unloading_system(
     camera_query: Query<&Transform, With<crate::camera::FreeCamera>>,
     mut world: ResMut<VoxelWorld>,
     settings: Res<crate::GameSettings>,
+    mut client_sync: Option<ResMut<crate::network::ClientSync>>,
 ) {
     let Some(camera_transform) = camera_query.iter().next() else { return };
     let cam_pos = camera_transform.translation;
@@ -2065,6 +2116,17 @@ pub fn chunk_unloading_system(
         if let Some(chunk_data) = world.chunks.remove(&pos) {
             world.total_vertices -= chunk_data.num_vertices;
             world.total_indices -= chunk_data.num_indices;
+
+            // network client ห้ามเขียน disk — เก็บ chunk ที่มี edit กลับเข้า cache
+            // ใน memory แทน ไม่งั้นเดินไกลแล้วกลับมา edit ของ host หาย
+            if let Some(cs) = client_sync.as_mut() {
+                if cs.edited.remove(&pos) || cs.full_chunks.contains_key(&pos) {
+                    cs.full_chunks.insert(pos, crate::network::ReceivedChunk {
+                        blocks: chunk_data.blocks.iter().map(|b| *b as u8).collect(),
+                        chiseled: chunk_data.chiseled_blocks.clone(),
+                    });
+                }
+            }
         }
     }
 }
@@ -2302,6 +2364,151 @@ pub fn voxel_raycast_system(
     gizmos.line(p3, p0, color);
 }
 
+// --------------------------------------------------------
+// Shared edit/remesh helpers (ใช้ร่วมกันทั้ง block edit, fluid และ network)
+// --------------------------------------------------------
+
+/// มัดรวม resource ที่ต้องใช้ตอน remesh chunk แบบ synchronous
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct MeshingParams<'w, 's> {
+    pub meshes: ResMut<'w, Assets<Mesh>>,
+    pub mesh_query: Query<'w, 's, &'static Mesh3d>,
+    pub chunk_material: Res<'w, ChunkMaterial>,
+    pub water_material: Res<'w, WaterMaterial>,
+    pub glass_material: Res<'w, GlassMaterial>,
+    pub deco_material: Res<'w, DecoMaterials>,
+    pub lamp_materials: Res<'w, LampMaterials>,
+    pub block_materials: Res<'w, BlockMaterials>,
+}
+
+/// จุด apply การแก้บล็อกจุดเดียว ใช้ทั้ง input ในเครื่องและ edit ที่มาจาก network
+/// คืนตำแหน่งที่แก้สำเร็จ (None = chunk ยังไม่โหลด / นอกขอบเขต / ไม่มีอะไรให้แก้)
+pub fn apply_block_edit(world: &mut VoxelWorld, edit: &crate::network::BlockEdit) -> Option<IVec3> {
+    use crate::network::BlockEdit;
+    match edit {
+        BlockEdit::SetBlock { pos, block } => {
+            let [x, y, z] = *pos;
+            world.set_block(x, y, z, BlockType::from_u8(*block)).then(|| IVec3::new(x, y, z))
+        }
+        BlockEdit::SetSubVoxel { pos, sub, val } => {
+            let [x, y, z] = *pos;
+            let current = world.get_block(x, y, z);
+            if current != BlockType::Chiseled {
+                if current == BlockType::Air {
+                    // ทุบ sub-voxel ในอากาศ = ไม่มีอะไรให้ทำ (กัน desync สร้าง chiseled เปล่า)
+                    if *val == 0 || !world.set_block(x, y, z, BlockType::Chiseled) {
+                        return None;
+                    }
+                } else {
+                    world.convert_to_chiseled(x, y, z);
+                }
+            }
+            world.set_chiseled_sub_voxel(x, y, z, sub[0] as usize, sub[1] as usize, sub[2] as usize, *val);
+            Some(IVec3::new(x, y, z))
+        }
+    }
+}
+
+/// chunk ที่โดนผลจากการแก้บล็อกที่ tp: ตัวเอง + เพื่อนบ้านถ้าแก้ตรงขอบ/มุม
+/// (AO ของ chunk ข้างเคียงขึ้นกับบล็อกริมขอบ)
+pub fn edit_affected_chunks(tp: IVec3) -> Vec<IVec2> {
+    let edited_chunk = IVec2::new(
+        tp.x.div_euclid(CHUNK_WIDTH as i32),
+        tp.z.div_euclid(CHUNK_WIDTH as i32),
+    );
+    let mut chunks = vec![edited_chunk];
+    let local_x = tp.x.rem_euclid(CHUNK_WIDTH as i32);
+    let local_z = tp.z.rem_euclid(CHUNK_WIDTH as i32);
+    let (cx, cz) = (edited_chunk.x, edited_chunk.y);
+
+    let at_min_x = local_x == 0;
+    let at_max_x = local_x == (CHUNK_WIDTH - 1) as i32;
+    let at_min_z = local_z == 0;
+    let at_max_z = local_z == (CHUNK_WIDTH - 1) as i32;
+
+    if at_min_x { chunks.push(IVec2::new(cx - 1, cz)); }
+    if at_max_x { chunks.push(IVec2::new(cx + 1, cz)); }
+    if at_min_z { chunks.push(IVec2::new(cx, cz - 1)); }
+    if at_max_z { chunks.push(IVec2::new(cx, cz + 1)); }
+
+    if at_min_x && at_min_z { chunks.push(IVec2::new(cx - 1, cz - 1)); }
+    if at_min_x && at_max_z { chunks.push(IVec2::new(cx - 1, cz + 1)); }
+    if at_max_x && at_min_z { chunks.push(IVec2::new(cx + 1, cz - 1)); }
+    if at_max_x && at_max_z { chunks.push(IVec2::new(cx + 1, cz + 1)); }
+
+    chunks
+}
+
+/// remesh chunk แบบ synchronous (สลับ mesh asset ในที่เดิม ลดการ alloc)
+/// คืนรายการ chunk ที่ยังทำไม่ได้เพราะเพื่อนบ้านยังไม่โหลด — ผู้เรียกตัดสินใจเองว่าจะ requeue ไหม
+pub fn remesh_chunks(
+    commands: &mut Commands,
+    world: &mut VoxelWorld,
+    mp: &mut MeshingParams,
+    chunk_positions: impl IntoIterator<Item = IVec2>,
+) -> Vec<IVec2> {
+    let mut skipped = Vec::new();
+    for chunk_pos in chunk_positions {
+        let neighbors_pos = chunk_neighbors(chunk_pos);
+        if !neighbors_pos.iter().all(|p| world.chunks.contains_key(p)) {
+            skipped.push(chunk_pos);
+            continue;
+        }
+        let neighbors = neighbors_pos.map(|p| world.chunks.get(&p).unwrap().blocks.clone());
+
+        let transform = Transform::from_xyz(
+            (chunk_pos.x * CHUNK_WIDTH as i32) as f32,
+            0.0,
+            (chunk_pos.y * CHUNK_WIDTH as i32) as f32,
+        );
+
+        let old_vertices;
+        let old_indices;
+        let set;
+        {
+            let Some(chunk_data) = world.chunks.get_mut(&chunk_pos) else { continue };
+            old_vertices = chunk_data.num_vertices;
+            old_indices = chunk_data.num_indices;
+
+            let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors, Some(&chunk_data.chiseled_blocks));
+            chunk_data.num_vertices = s.total_vertices();
+            chunk_data.num_indices = s.total_indices();
+            set = s;
+        }
+
+        world.total_vertices = (world.total_vertices + set.total_vertices()) - old_vertices;
+        world.total_indices = (world.total_indices + set.total_indices()) - old_indices;
+        let ChunkMeshSet { solid, water, glass, deco, glow, textured } = set;
+
+        // สลับ mesh พื้นดิน: เขียนทับ asset เดิมผ่าน handle เดิมถ้าทำได้
+        // (asset id คงที่ ไม่มี free/alloc ลดการกระตุ้นบั๊ก slab allocator)
+        // และถอด Aabb ให้คำนวณใหม่ ไม่งั้นบล็อกที่วางสูงกว่ายอดเดิมโดน cull หาย
+        if let Some(&entity) = world.generated_chunks.get(&chunk_pos) {
+            if solid.is_empty() {
+                commands.entity(entity).remove::<Mesh3d>().remove::<Aabb>();
+            } else if let Ok(mesh3d) = mp.mesh_query.get(entity) {
+                let _ = mp.meshes.insert(mesh3d.0.id(), solid.into_mesh());
+                commands.entity(entity).remove::<Aabb>();
+            } else {
+                commands.entity(entity)
+                    .insert((
+                        Mesh3d(mp.meshes.add(solid.into_mesh())),
+                        MeshMaterial3d(mp.chunk_material.0.clone()),
+                    ))
+                    .remove::<Aabb>();
+            }
+        }
+
+        // น้ำ/กระจก/ของประดับ: สร้าง/เขียนทับ/ลบ ตามว่าเหลือหน้าไหม
+        update_single_mesh_entity(commands, &mut world.water_chunks, &mut mp.meshes, &mp.mesh_query, &mp.water_material.0, chunk_pos, water, transform);
+        update_single_mesh_entity(commands, &mut world.glass_chunks, &mut mp.meshes, &mp.mesh_query, &mp.glass_material.0, chunk_pos, glass, transform);
+        update_deco_entities(commands, world, &mut mp.meshes, &mp.deco_material, chunk_pos, deco, transform);
+        update_glow_entities(commands, world, &mut mp.meshes, &mp.lamp_materials, chunk_pos, glow, transform);
+        update_textured_entities(commands, world, &mut mp.meshes, &mp.block_materials, chunk_pos, textured, transform);
+    }
+    skipped
+}
+
 pub fn block_interaction_system(
     mut commands: Commands,
     mut world: ResMut<VoxelWorld>,
@@ -2309,13 +2516,15 @@ pub fn block_interaction_system(
     mut selected: ResMut<SelectedBlock>,
     mut interaction_mode: ResMut<InteractionMode>,
     (mouse_input, keyboard): (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>),
-    mut meshes: ResMut<Assets<Mesh>>,
-    (chunk_material, water_material, glass_material): (Res<ChunkMaterial>, Res<WaterMaterial>, Res<GlassMaterial>),
-    (deco_material, lamp_materials, block_materials): (Res<DecoMaterials>, Res<LampMaterials>, Res<BlockMaterials>),
-    mesh_query: Query<&Mesh3d>,
+    mut mp: MeshingParams,
     camera_query: Query<&Transform, With<crate::camera::FreeCamera>>,
     mut q_egui: Query<&mut bevy_egui::EguiContext, With<bevy::window::PrimaryWindow>>,
     mut active_fluids: ResMut<ActiveFluids>,
+    (net_server, net_client, mut net_out): (
+        Option<Res<bevy_renet::RenetServer>>,
+        Option<Res<bevy_renet::RenetClient>>,
+        ResMut<crate::network::PendingNetEdits>,
+    ),
 ) {
     // Hotbar: กด 1-0, -, = และ T เลือกบล็อก
     const HOTBAR: [(KeyCode, BlockType); 13] = [
@@ -2362,55 +2571,43 @@ pub fn block_interaction_system(
         }
     }
 
-    let mut target_pos = None;
+    use crate::network::BlockEdit;
+    let mut edit: Option<BlockEdit> = None;
 
     if *interaction_mode == InteractionMode::SubVoxel {
         if let Some(sub_pos) = hit.sub_pos {
             if break_pressed {
-                if hit.block != BlockType::Chiseled {
-                    world.convert_to_chiseled(hit.pos.x, hit.pos.y, hit.pos.z);
-                }
-                world.set_chiseled_sub_voxel(
-                    hit.pos.x, hit.pos.y, hit.pos.z,
-                    sub_pos.x as usize, sub_pos.y as usize, sub_pos.z as usize,
-                    0,
-                );
-                target_pos = Some(hit.pos);
+                edit = Some(BlockEdit::SetSubVoxel {
+                    pos: hit.pos.to_array(),
+                    sub: [sub_pos.x as u8, sub_pos.y as u8, sub_pos.z as u8],
+                    val: 0,
+                });
             } else if place_pressed {
                 let adj_sub = sub_pos + hit.normal;
                 let (mut target_macro, mut target_sub) = (hit.pos, adj_sub);
-                
+
                 if target_sub.x < 0 { target_macro.x -= 1; target_sub.x = 15; }
                 else if target_sub.x > 15 { target_macro.x += 1; target_sub.x = 0; }
-                
+
                 if target_sub.y < 0 { target_macro.y -= 1; target_sub.y = 15; }
                 else if target_sub.y > 15 { target_macro.y += 1; target_sub.y = 0; }
-                
+
                 if target_sub.z < 0 { target_macro.z -= 1; target_sub.z = 15; }
                 else if target_sub.z > 15 { target_macro.z += 1; target_sub.z = 0; }
-                
-                let target_block = world.get_block(target_macro.x, target_macro.y, target_macro.z);
-                if target_block != BlockType::Chiseled {
-                    if target_block == BlockType::Air {
-                        world.set_block(target_macro.x, target_macro.y, target_macro.z, BlockType::Chiseled);
-                    } else {
-                        world.convert_to_chiseled(target_macro.x, target_macro.y, target_macro.z);
-                    }
-                }
-                
-                world.set_chiseled_sub_voxel(
-                    target_macro.x, target_macro.y, target_macro.z,
-                    target_sub.x as usize, target_sub.y as usize, target_sub.z as usize,
-                    selected.0 as u8,
-                );
-                target_pos = Some(target_macro);
+
+                edit = Some(BlockEdit::SetSubVoxel {
+                    pos: target_macro.to_array(),
+                    sub: [target_sub.x as u8, target_sub.y as u8, target_sub.z as u8],
+                    val: selected.0 as u8,
+                });
             }
         }
     } else {
         if break_pressed {
-            if world.set_block(hit.pos.x, hit.pos.y, hit.pos.z, BlockType::Air) {
-                target_pos = Some(hit.pos);
-            }
+            edit = Some(BlockEdit::SetBlock {
+                pos: hit.pos.to_array(),
+                block: BlockType::Air as u8,
+            });
         } else if place_pressed {
             let p = hit.pos + hit.normal;
 
@@ -2428,109 +2625,46 @@ pub fn block_interaction_system(
                 }
             }
 
-            if !blocked && world.set_block(p.x, p.y, p.z, selected.0) {
-                target_pos = Some(p);
+            if !blocked {
+                edit = Some(BlockEdit::SetBlock {
+                    pos: p.to_array(),
+                    block: selected.0 as u8,
+                });
             }
         }
     }
 
-    let Some(tp) = target_pos else { return };
+    let Some(edit) = edit else { return };
+    let Some(tp) = apply_block_edit(&mut world, &edit) else { return };
 
-    // ปลุกน้ำให้ตื่น (ถ้าบล็อกถูกทุบหรือวาง บล็อกรอบๆ และตัวมันเองต้องเริ่มไหล)
-    active_fluids.0.insert(tp);
-    for dir in [IVec3::new(1,0,0), IVec3::new(-1,0,0), IVec3::new(0,1,0), IVec3::new(0,-1,0), IVec3::new(0,0,1), IVec3::new(0,0,-1)] {
-        active_fluids.0.insert(tp + dir);
+    // ส่งเข้า network: host เอาไป broadcast, client เอาไปส่ง RequestEdit หา host
+    if net_server.is_some() || net_client.is_some() {
+        net_out.0.push_back((None, edit));
     }
 
-    // เซฟ chunk ที่แก้ลง disk ทันที
+    // ปลุกน้ำให้ตื่น (ถ้าบล็อกถูกทุบหรือวาง บล็อกรอบๆ และตัวมันเองต้องเริ่มไหล)
+    // — เว้น client: host เป็นคนรัน fluid sim แล้วส่ง delta กลับมา
+    //   ถ้าปลุกไว้เฉยๆ set จะโตไม่หยุดเพราะไม่มีระบบมา drain
+    if net_client.is_none() {
+        active_fluids.0.insert(tp);
+        for dir in [IVec3::new(1,0,0), IVec3::new(-1,0,0), IVec3::new(0,1,0), IVec3::new(0,-1,0), IVec3::new(0,0,1), IVec3::new(0,0,-1)] {
+            active_fluids.0.insert(tp + dir);
+        }
+    }
+
+    // เซฟ chunk ที่แก้ลง disk ทันที — ยกเว้นตอนเป็น network client:
+    // โลกนี้เป็นของ host, saves/ บนเครื่องเป็นโลก single player ของเราเอง
     let edited_chunk = IVec2::new(
         tp.x.div_euclid(CHUNK_WIDTH as i32),
         tp.z.div_euclid(CHUNK_WIDTH as i32),
     );
-    if let Some(chunk) = world.chunks.get(&edited_chunk) {
-        save_chunk(edited_chunk, &chunk.blocks);
+    if net_client.is_none() {
+        if let Some(chunk) = world.chunks.get(&edited_chunk) {
+            save_chunk(edited_chunk, &chunk.blocks);
+        }
     }
 
-    // หา chunk ที่ต้อง remesh (ตัวเอง + เพื่อนบ้านถ้าแก้ตรงขอบ/มุม)
-    let mut chunks_to_remesh = vec![edited_chunk];
-    let local_x = tp.x.rem_euclid(CHUNK_WIDTH as i32);
-    let local_z = tp.z.rem_euclid(CHUNK_WIDTH as i32);
-    let (cx, cz) = (edited_chunk.x, edited_chunk.y);
-
-    let at_min_x = local_x == 0;
-    let at_max_x = local_x == (CHUNK_WIDTH - 1) as i32;
-    let at_min_z = local_z == 0;
-    let at_max_z = local_z == (CHUNK_WIDTH - 1) as i32;
-
-    if at_min_x { chunks_to_remesh.push(IVec2::new(cx - 1, cz)); }
-    if at_max_x { chunks_to_remesh.push(IVec2::new(cx + 1, cz)); }
-    if at_min_z { chunks_to_remesh.push(IVec2::new(cx, cz - 1)); }
-    if at_max_z { chunks_to_remesh.push(IVec2::new(cx, cz + 1)); }
-
-    // มุม chunk: AO ของ chunk แนวทแยงก็โดนผลด้วย
-    if at_min_x && at_min_z { chunks_to_remesh.push(IVec2::new(cx - 1, cz - 1)); }
-    if at_min_x && at_max_z { chunks_to_remesh.push(IVec2::new(cx - 1, cz + 1)); }
-    if at_max_x && at_min_z { chunks_to_remesh.push(IVec2::new(cx + 1, cz - 1)); }
-    if at_max_x && at_max_z { chunks_to_remesh.push(IVec2::new(cx + 1, cz + 1)); }
-
-    for chunk_pos in chunks_to_remesh {
-        let neighbors_pos = chunk_neighbors(chunk_pos);
-        if !neighbors_pos.iter().all(|p| world.chunks.contains_key(p)) {
-            continue;
-        }
-        let neighbors = neighbors_pos.map(|p| world.chunks.get(&p).unwrap().blocks.clone());
-
-        let transform = Transform::from_xyz(
-            (chunk_pos.x * CHUNK_WIDTH as i32) as f32,
-            0.0,
-            (chunk_pos.y * CHUNK_WIDTH as i32) as f32,
-        );
-
-        let old_vertices;
-        let old_indices;
-        let set;
-        {
-            let Some(chunk_data) = world.chunks.get_mut(&chunk_pos) else { continue };
-            old_vertices = chunk_data.num_vertices;
-            old_indices = chunk_data.num_indices;
-
-            let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors, Some(&chunk_data.chiseled_blocks));
-            chunk_data.num_vertices = s.total_vertices();
-            chunk_data.num_indices = s.total_indices();
-            set = s;
-        }
-
-        world.total_vertices = (world.total_vertices + set.total_vertices()) - old_vertices;
-        world.total_indices = (world.total_indices + set.total_indices()) - old_indices;
-        let ChunkMeshSet { solid, water, glass, deco, glow, textured } = set;
-
-        // สลับ mesh พื้นดิน: เขียนทับ asset เดิมผ่าน handle เดิมถ้าทำได้
-        // (asset id คงที่ ไม่มี free/alloc ลดการกระตุ้นบั๊ก slab allocator)
-        // และถอด Aabb ให้คำนวณใหม่ ไม่งั้นบล็อกที่วางสูงกว่ายอดเดิมโดน cull หาย
-        if let Some(&entity) = world.generated_chunks.get(&chunk_pos) {
-            if solid.is_empty() {
-                commands.entity(entity).remove::<Mesh3d>().remove::<Aabb>();
-            } else if let Ok(mesh3d) = mesh_query.get(entity) {
-                let _ = meshes.insert(mesh3d.0.id(), solid.into_mesh());
-                commands.entity(entity).remove::<Aabb>();
-            } else {
-                commands.entity(entity)
-                    .insert((
-                        Mesh3d(meshes.add(solid.into_mesh())),
-                        MeshMaterial3d(chunk_material.0.clone()),
-                    ))
-                    .remove::<Aabb>();
-            }
-        }
-
-        // น้ำ/กระจก/ของประดับ: สร้าง/เขียนทับ/ลบ ตามว่าเหลือหน้าไหม
-        update_single_mesh_entity(&mut commands, &mut world.water_chunks, &mut meshes, &mesh_query, &water_material.0, chunk_pos, water, transform);
-        update_single_mesh_entity(&mut commands, &mut world.glass_chunks, &mut meshes, &mesh_query, &glass_material.0, chunk_pos, glass, transform);
-        update_deco_entities(&mut commands, &mut world, &mut meshes, &deco_material, chunk_pos, deco, transform);
-
-        update_glow_entities(&mut commands, &mut world, &mut meshes, &lamp_materials, chunk_pos, glow, transform);
-        update_textured_entities(&mut commands, &mut world, &mut meshes, &block_materials, chunk_pos, textured, transform);
-    }
+    remesh_chunks(&mut commands, &mut world, &mut mp, edit_affected_chunks(tp));
 
     // บล็อกเปลี่ยนเฉพาะใน chunk ที่แก้ — อัปเดต PointLight เฉพาะตรงนั้น
     refresh_chunk_lamp_lights(&mut commands, &mut world, edited_chunk);
@@ -2545,6 +2679,68 @@ fn queue_remesh(pos: IVec3, remesh_queue: &mut std::collections::HashSet<IVec2>)
         pos.x.div_euclid(CHUNK_WIDTH as i32),
         pos.z.div_euclid(CHUNK_WIDTH as i32),
     ));
+}
+
+/// ปลุกน้ำตรงตะเข็บระหว่าง chunk ที่เพิ่งโหลดกับเพื่อนบ้านที่โหลดอยู่แล้ว —
+/// น้ำที่เคยหลับเพราะปลายทางยังไม่โหลด (set_block ล้มเหลว) จะได้ไหลต่อ
+/// ปลุกเฉพาะคู่ที่ไหลข้ามได้จริง: น้ำเจออากาศ หรือน้ำต่างระดับ ≥2
+/// (ตะเข็บจาก generation ล้วนๆ เสมอกันพอดี เลยไม่ปลุกทะเลทั้งผืนโดยไม่จำเป็น)
+pub fn wake_seam_water(world: &VoxelWorld, chunk_pos: IVec2, active_fluids: &mut ActiveFluids) {
+    let Some(chunk) = world.chunks.get(&chunk_pos) else { return };
+    let w = CHUNK_WIDTH;
+    let base_x = chunk_pos.x * w as i32;
+    let base_z = chunk_pos.y * w as i32;
+
+    // (offset เพื่อนบ้าน, ฟังก์ชันแปลงตำแหน่งตามแนวขอบ i → (local เรา, local เขา))
+    let sides: [(IVec2, fn(usize) -> ((usize, usize), (usize, usize))); 4] = [
+        (IVec2::new(-1, 0), |i| ((0, i), (CHUNK_WIDTH - 1, i))),
+        (IVec2::new(1, 0),  |i| ((CHUNK_WIDTH - 1, i), (0, i))),
+        (IVec2::new(0, -1), |i| ((i, 0), (i, CHUNK_WIDTH - 1))),
+        (IVec2::new(0, 1),  |i| ((i, CHUNK_WIDTH - 1), (i, 0))),
+    ];
+
+    for (offset, map_locals) in sides {
+        let Some(neighbor) = world.chunks.get(&(chunk_pos + offset)) else { continue };
+        let n_base_x = (chunk_pos.x + offset.x) * w as i32;
+        let n_base_z = (chunk_pos.y + offset.y) * w as i32;
+
+        for i in 0..w {
+            let ((alx, alz), (blx, blz)) = map_locals(i);
+            for y in 0..CHUNK_HEIGHT {
+                let a = chunk.blocks[ChunkData::get_index(alx, y, alz)];
+                let b = neighbor.blocks[ChunkData::get_index(blx, y, blz)];
+                let (av, bv) = (get_water_vol(a), get_water_vol(b));
+
+                // ฝั่งเราไหลไปหาเขาได้ไหม
+                if a.is_water() && (b == BlockType::Air || (b.is_water() && bv + 1 < av)) {
+                    active_fluids.0.insert(IVec3::new(base_x + alx as i32, y as i32, base_z + alz as i32));
+                }
+                // ฝั่งเขาไหลมาหาเราได้ไหม
+                if b.is_water() && (a == BlockType::Air || (a.is_water() && av + 1 < bv)) {
+                    active_fluids.0.insert(IVec3::new(n_base_x + blx as i32, y as i32, n_base_z + blz as i32));
+                }
+            }
+        }
+    }
+}
+
+/// น้ำ simulate เป็นจังหวะคงที่ ไม่ใช่ทุกเฟรม — 10 tick/วินาที
+/// (ทุกเฟรมที่ 60fps น้ำจะแผ่ 60 บล็อก/วิ เร็วจนดูพัง แถม multiplayer
+/// จะ broadcast delta ถี่เกินจน channel บวม)
+const FLUID_TICK_SECONDS: f32 = 0.1;
+
+fn vol_to_block(vol: u8) -> BlockType {
+    match vol {
+        8 => BlockType::Water8,
+        7 => BlockType::Water7,
+        6 => BlockType::Water6,
+        5 => BlockType::Water5,
+        4 => BlockType::Water4,
+        3 => BlockType::Water3,
+        2 => BlockType::Water2,
+        1 => BlockType::Water1,
+        _ => BlockType::Air,
+    }
 }
 
 fn get_water_vol(block: BlockType) -> u8 {
@@ -2640,18 +2836,24 @@ pub fn fluid_simulation_system(
     mut remesh_queue: Local<std::collections::HashSet<IVec2>>,
     mut world: ResMut<VoxelWorld>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mesh_query: Query<&Mesh3d>,
-    chunk_material: Res<ChunkMaterial>,
-    water_material: Res<WaterMaterial>,
-    glass_material: Res<GlassMaterial>,
-    deco_material: Res<DecoMaterials>,
-    lamp_materials: Res<LampMaterials>,
-    block_materials: Res<BlockMaterials>,
+    mut mp: MeshingParams,
+    net_server: Option<Res<bevy_renet::RenetServer>>,
+    mut net_out: ResMut<crate::network::PendingNetEdits>,
+    time: Res<Time>,
+    mut tick_accum: Local<f32>,
 ) {
     if active_fluids.0.is_empty() && remesh_queue.is_empty() {
         return;
     }
+    *tick_accum += time.delta_secs();
+    if *tick_accum < FLUID_TICK_SECONDS {
+        return;
+    }
+    *tick_accum = 0.0;
+
+    // ตอนเป็น host ทุกการเปลี่ยนบล็อกจากน้ำต้อง broadcast ให้ client
+    // (client ไม่รันระบบนี้ — ดู run_if ใน main.rs)
+    let is_host = net_server.is_some();
 
     let current_active: Vec<IVec3> = active_fluids.0.drain().collect();
     let mut next_active = std::collections::HashSet::new();
@@ -2673,24 +2875,20 @@ pub fn fluid_simulation_system(
                 let b_vol = get_water_vol(b_block);
                 if b_vol < 8 {
                     let transfer = current_vol.min(8 - b_vol);
-                    current_vol -= transfer;
-                    
-                    let new_b_vol = b_vol + transfer;
-                    let new_b_block = match new_b_vol {
-                        8 => BlockType::Water8,
-                        7 => BlockType::Water7,
-                        6 => BlockType::Water6,
-                        5 => BlockType::Water5,
-                        4 => BlockType::Water4,
-                        3 => BlockType::Water3,
-                        2 => BlockType::Water2,
-                        1 => BlockType::Water1,
-                        _ => BlockType::Air,
-                    };
-                    world.set_block(b_pos.x, b_pos.y, b_pos.z, new_b_block);
-                    queue_remesh(b_pos, &mut remesh_queue);
-                    next_active.insert(b_pos);
-                    moved = true;
+                    let new_b_block = vol_to_block(b_vol + transfer);
+                    // set สำเร็จเท่านั้นถึงหัก volume — chunk ปลายทางอาจยัง
+                    // ไม่โหลด (get_block คืน Air หลอก) ไม่งั้นน้ำระเหยหายถาวร
+                    if world.set_block(b_pos.x, b_pos.y, b_pos.z, new_b_block) {
+                        current_vol -= transfer;
+                        if is_host {
+                            net_out.0.push_back((None, crate::network::BlockEdit::SetBlock {
+                                pos: b_pos.to_array(), block: new_b_block as u8,
+                            }));
+                        }
+                        queue_remesh(b_pos, &mut remesh_queue);
+                        next_active.insert(b_pos);
+                        moved = true;
+                    }
                 }
             }
         }
@@ -2721,117 +2919,59 @@ pub fn fluid_simulation_system(
                 neighbors.sort_by_key(|&(_, v)| v);
                 let target = neighbors[0].0;
                 let t_vol = neighbors[0].1;
-                
+
                 let transfer = 1;
-                current_vol -= transfer;
-                let new_t_vol = t_vol + transfer;
-                
-                let new_t_block = match new_t_vol {
-                    8 => BlockType::Water8,
-                    7 => BlockType::Water7,
-                    6 => BlockType::Water6,
-                    5 => BlockType::Water5,
-                    4 => BlockType::Water4,
-                    3 => BlockType::Water3,
-                    2 => BlockType::Water2,
-                    1 => BlockType::Water1,
-                    _ => BlockType::Air,
-                };
-                world.set_block(target.x, target.y, target.z, new_t_block);
-                queue_remesh(target, &mut remesh_queue);
-                next_active.insert(target);
-                moved = true;
+                let new_t_block = vol_to_block(t_vol + transfer);
+                // เช็คผล set ก่อนหัก volume เหมือนตอนไหลลง
+                if world.set_block(target.x, target.y, target.z, new_t_block) {
+                    current_vol -= transfer;
+                    if is_host {
+                        net_out.0.push_back((None, crate::network::BlockEdit::SetBlock {
+                            pos: target.to_array(), block: new_t_block as u8,
+                        }));
+                    }
+                    queue_remesh(target, &mut remesh_queue);
+                    next_active.insert(target);
+                    moved = true;
+                }
             }
         }
 
-        let new_block = match current_vol {
-            8 => BlockType::Water8,
-            7 => BlockType::Water7,
-            6 => BlockType::Water6,
-            5 => BlockType::Water5,
-            4 => BlockType::Water4,
-            3 => BlockType::Water3,
-            2 => BlockType::Water2,
-            1 => BlockType::Water1,
-            _ => BlockType::Air,
-        };
-        
+        let new_block = vol_to_block(current_vol);
+
         if new_block != block {
             world.set_block(pos.x, pos.y, pos.z, new_block);
+            if is_host {
+                net_out.0.push_back((None, crate::network::BlockEdit::SetBlock {
+                    pos: pos.to_array(), block: new_block as u8,
+                }));
+            }
             queue_remesh(pos, &mut remesh_queue);
         }
         
         if moved {
             next_active.insert(pos);
+            // volume ใน cell นี้เพิ่งว่างลง — น้ำข้างบน/ข้างๆ ที่หลับอยู่
+            // อาจไหลเข้ามาแทนได้ ต้องปลุก ไม่งั้นเสาน้ำค้างลอยกลางอากาศ
+            for dir in [
+                IVec3::Y,
+                IVec3::new(1, 0, 0), IVec3::new(-1, 0, 0),
+                IVec3::new(0, 0, 1), IVec3::new(0, 0, -1),
+            ] {
+                next_active.insert(pos + dir);
+            }
         }
     }
 
     active_fluids.0.extend(next_active);
 
-    // Meshing Limit (allow max 16 chunks per frame to prevent freezing)
+    // Meshing Limit (สูงสุด 16 chunk ต่อเฟรม กันเฟรมค้าง — ที่เหลือรอเฟรมถัดไป)
     let mut chunks = remesh_queue.drain().collect::<Vec<_>>();
     chunks.sort_by_key(|c| c.x * c.x + c.y * c.y);
+    let overflow = chunks.split_off(chunks.len().min(16));
+    remesh_queue.extend(overflow);
 
-    let mut meshed_count = 0;
-    for chunk_pos in chunks {
-        if meshed_count >= 16 {
-            remesh_queue.insert(chunk_pos);
-            continue;
-        }
-
-        let neighbors_pos = chunk_neighbors(chunk_pos);
-        if !neighbors_pos.iter().all(|p| world.chunks.contains_key(p)) {
-            remesh_queue.insert(chunk_pos);
-            continue;
-        }
-        let neighbors = neighbors_pos.map(|p| world.chunks.get(&p).unwrap().blocks.clone());
-
-        let transform = Transform::from_xyz(
-            (chunk_pos.x * CHUNK_WIDTH as i32) as f32,
-            0.0,
-            (chunk_pos.y * CHUNK_WIDTH as i32) as f32,
-        );
-
-        let old_vertices;
-        let old_indices;
-        let set;
-        {
-            let Some(chunk_data) = world.chunks.get_mut(&chunk_pos) else { continue };
-            old_vertices = chunk_data.num_vertices;
-            old_indices = chunk_data.num_indices;
-
-            let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors, Some(&chunk_data.chiseled_blocks));
-            chunk_data.num_vertices = s.total_vertices();
-            chunk_data.num_indices = s.total_indices();
-            set = s;
-        }
-
-        world.total_vertices = (world.total_vertices + set.total_vertices()) - old_vertices;
-        world.total_indices = (world.total_indices + set.total_indices()) - old_indices;
-        let ChunkMeshSet { solid, water, glass, deco, glow, textured } = set;
-
-        if let Some(&entity) = world.generated_chunks.get(&chunk_pos) {
-            if solid.is_empty() {
-                commands.entity(entity).remove::<Mesh3d>().remove::<Aabb>();
-            } else if let Ok(mesh3d) = mesh_query.get(entity) {
-                let _ = meshes.insert(mesh3d.0.id(), solid.into_mesh());
-                commands.entity(entity).remove::<Aabb>();
-            } else {
-                commands.entity(entity)
-                    .insert((
-                        Mesh3d(meshes.add(solid.into_mesh())),
-                        MeshMaterial3d(chunk_material.0.clone()),
-                    ))
-                    .remove::<Aabb>();
-            }
-        }
-
-        update_single_mesh_entity(&mut commands, &mut world.water_chunks, &mut meshes, &mesh_query, &water_material.0, chunk_pos, water, transform);
-        update_single_mesh_entity(&mut commands, &mut world.glass_chunks, &mut meshes, &mesh_query, &glass_material.0, chunk_pos, glass, transform);
-        update_deco_entities(&mut commands, &mut world, &mut meshes, &deco_material, chunk_pos, deco, transform);
-        update_glow_entities(&mut commands, &mut world, &mut meshes, &lamp_materials, chunk_pos, glow, transform);
-        update_textured_entities(&mut commands, &mut world, &mut meshes, &block_materials, chunk_pos, textured, transform);
-        
-        meshed_count += 1;
-    }
+    // chunk ที่เพื่อนบ้านยังไม่โหลด remesh ไม่ได้ — คืนเข้าคิวไว้ลองใหม่
+    let skipped = remesh_chunks(&mut commands, &mut world, &mut mp, chunks);
+    remesh_queue.extend(skipped);
 }

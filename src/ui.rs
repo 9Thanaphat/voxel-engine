@@ -151,7 +151,7 @@ pub fn main_menu_system(
             ui.add_space(10.0);
             
             if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Multiplayer")).clicked() {
-                // Not implemented
+                next_state.set(crate::GameState::MultiplayerMenu);
             }
             ui.add_space(10.0);
             
@@ -167,6 +167,61 @@ pub fn main_menu_system(
             ui.add_space(20.0);
         });
     });
+}
+
+/// หน้าจอ join เกมผ่าน IP (เข้าจากปุ่ม Multiplayer ในเมนูหลัก)
+pub fn multiplayer_menu_system(
+    mut contexts: bevy_egui::EguiContexts,
+    mut commands: Commands,
+    mut next_state: ResMut<NextState<crate::GameState>>,
+    mut mp_ui: ResMut<crate::network::MultiplayerUi>,
+    client: Option<Res<bevy_renet::RenetClient>>,
+    settings: Res<crate::GameSettings>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    let ctx = ctx.clone();
+    let connecting = client.is_some();
+
+    bevy_egui::egui::Window::new("Multiplayer Menu")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .anchor(bevy_egui::egui::Align2::CENTER_CENTER, bevy_egui::egui::vec2(0.0, 0.0))
+        .show(&ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(20.0);
+                ui.heading(bevy_egui::egui::RichText::new("MULTIPLAYER").size(32.0).strong());
+                ui.add_space(20.0);
+
+                ui.label("Server IP:");
+                ui.add_enabled(
+                    !connecting,
+                    bevy_egui::egui::TextEdit::singleline(&mut mp_ui.address)
+                        .hint_text("192.168.1.10 หรือ 192.168.1.10:5000")
+                        .desired_width(220.0),
+                );
+                ui.add_space(10.0);
+
+                let btn_size = bevy_egui::egui::vec2(200.0, 40.0);
+                if ui.add_enabled(!connecting, bevy_egui::egui::Button::new("Join").min_size(btn_size)).clicked() {
+                    crate::network::start_client(&mut commands, &mut mp_ui, settings.noise);
+                }
+                if !mp_ui.status.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(mp_ui.status.clone());
+                }
+                ui.add_space(10.0);
+
+                if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Back")).clicked() {
+                    if connecting {
+                        crate::network::teardown_client(&mut commands);
+                    }
+                    mp_ui.status.clear();
+                    next_state.set(crate::GameState::MainMenu);
+                }
+                ui.add_space(20.0);
+            });
+        });
 }
 
 pub fn update_coordinate_ui_system(
@@ -285,14 +340,57 @@ pub fn update_fps_text(
 
 pub fn egui_settings_system(
     mut contexts: bevy_egui::EguiContexts,
+    mut commands: Commands,
     mut settings: ResMut<crate::GameSettings>,
     mut regenerate: ResMut<crate::RegenerateWorld>,
     mut camera_query: Query<&mut crate::camera::FreeCamera>,
     mut wireframe_config: ResMut<bevy::pbr::wireframe::WireframeConfig>,
+    (mut server, mut client, lan_info, world, mut mp_ui): (
+        Option<ResMut<bevy_renet::RenetServer>>,
+        Option<ResMut<bevy_renet::RenetClient>>,
+        Option<Res<crate::network::LanInfo>>,
+        Res<crate::voxel::VoxelWorld>,
+        ResMut<crate::network::MultiplayerUi>,
+    ),
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
+    let networked = server.is_some() || client.is_some();
 
     bevy_egui::egui::Window::new("Game Settings").show(ctx, |ui| {
+        ui.heading("Multiplayer");
+        if let Some(server) = server.as_mut() {
+            let addr = lan_info.as_ref().map(|l| l.0.clone()).unwrap_or_default();
+            ui.label(format!("Hosting on {addr}"));
+            ui.label(format!("Players: {}", server.connected_clients() + 1));
+            ui.horizontal(|ui| {
+                if ui.button("Copy IP").clicked() {
+                    ui.ctx().copy_text(addr.clone());
+                }
+                if ui.button("Close LAN").clicked() {
+                    server.disconnect_all();
+                    // ถอด resource เฟรมหน้า ให้ disconnect packet ได้ flush ก่อน
+                    commands.insert_resource(crate::network::StopHostRequested);
+                }
+            });
+        } else if let Some(client) = client.as_mut() {
+            ui.label("Connected to host");
+            if ui.button("Disconnect").clicked() {
+                // watchdog เห็น is_disconnected แล้วจัดการคืนค่า + กลับเมนูให้เอง
+                client.disconnect();
+            }
+        } else {
+            if ui.button("Open to LAN").clicked() {
+                crate::network::start_host(&mut commands, &world, &mut mp_ui);
+            }
+            if !mp_ui.status.is_empty() {
+                ui.label(mp_ui.status.clone());
+            }
+        }
+
+        ui.separator();
+
+        // ตอนเล่น multiplayer ห้ามแตะ world gen — noise ที่ไม่ตรงกัน = desync ทันที
+        ui.add_enabled_ui(!networked, |ui| {
         ui.heading("World Generation");
         ui.add(bevy_egui::egui::Slider::new(&mut settings.render_distance, 2..=32).text("Render Distance"));
 
@@ -330,9 +428,10 @@ pub fn egui_settings_system(
             }
         });
 
-        if regen {
+        if regen && !networked {
             regenerate.0 = true;
         }
+        }); // add_enabled_ui(!networked)
 
         ui.separator();
 
