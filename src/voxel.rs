@@ -33,6 +33,14 @@ pub enum BlockType {
     Glass = 12,
     TallGrass = 13,
     Chiseled = 14,
+    Water1 = 15,
+    Water2 = 16,
+    Water3 = 17,
+    Water4 = 18,
+    Water5 = 19,
+    Water6 = 20,
+    Water7 = 21,
+    Water8 = 22,
 }
 
 impl BlockType {
@@ -52,6 +60,14 @@ impl BlockType {
             12 => BlockType::Glass,
             13 => BlockType::TallGrass,
             14 => BlockType::Chiseled,
+            15 => BlockType::Water1,
+            16 => BlockType::Water2,
+            17 => BlockType::Water3,
+            18 => BlockType::Water4,
+            19 => BlockType::Water5,
+            20 => BlockType::Water6,
+            21 => BlockType::Water7,
+            22 => BlockType::Water8,
             _ => BlockType::Air,
         }
     }
@@ -59,6 +75,14 @@ impl BlockType {
     /// บล็อกที่ชนตัวผู้เล่นได้
     pub fn is_solid(self) -> bool {
         block_def(self).solid
+    }
+
+    pub fn is_water(self) -> bool {
+        match self {
+            BlockType::Water | BlockType::Water1 | BlockType::Water2 | BlockType::Water3 | BlockType::Water4 |
+            BlockType::Water5 | BlockType::Water6 | BlockType::Water7 | BlockType::Water8 => true,
+            _ => false,
+        }
     }
 
     /// บล็อกที่บังแสง/สร้างเงา AO (ตันและไม่โปร่งใส)
@@ -92,7 +116,7 @@ pub struct BlockDef {
     pub overlay_side: &'static [&'static str],
 }
 
-pub const BLOCK_DEFS: [BlockDef; 15] = [
+pub const BLOCK_DEFS: [BlockDef; 23] = [
     BlockDef { name: "Air", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
     BlockDef { name: "Dirt", color: [0.4, 0.2, 0.0, 1.0], solid: true, transparent: false, emission: None,
@@ -114,22 +138,19 @@ pub const BLOCK_DEFS: [BlockDef; 15] = [
         overlay_side: &[] },
     BlockDef { name: "Water", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Wood", color: [0.35, 0.25, 0.12, 1.0], solid: true, transparent: false, emission: None,
-        tex_top: &["textures/wood_top.png"], tex_side: &["textures/wood_side.png"], tex_bottom: &["textures/wood_top.png"],
-        overlay_side: &[] },
-    BlockDef { name: "Leaves", color: [0.15, 0.45, 0.12, 1.0], solid: true, transparent: false, emission: None,
-        tex_top: &["textures/leaves.png"], tex_side: &["textures/leaves.png"], tex_bottom: &["textures/leaves.png"],
-        overlay_side: &[] },
-    BlockDef { name: "Sand", color: [0.85, 0.80, 0.55, 1.0], solid: true, transparent: false, emission: None,
-        tex_top: &["textures/sand.png"], tex_side: &["textures/sand.png"], tex_bottom: &["textures/sand.png"],
-        overlay_side: &[] },
-    BlockDef { name: "Glowstone", color: [1.0, 0.85, 0.55, 1.0], solid: true, transparent: false, emission: Some([1.0, 0.85, 0.55]),
+    BlockDef { name: "Wood", color: [0.4, 0.3, 0.2, 1.0], solid: true, transparent: false, emission: None,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Red Lamp", color: [1.0, 0.15, 0.10, 1.0], solid: true, transparent: false, emission: Some([1.0, 0.15, 0.10]),
+    BlockDef { name: "Leaves", color: [0.1, 0.5, 0.1, 1.0], solid: true, transparent: false, emission: None,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Green Lamp", color: [0.15, 1.0, 0.20, 1.0], solid: true, transparent: false, emission: Some([0.15, 1.0, 0.20]),
+    BlockDef { name: "Sand", color: [0.9, 0.8, 0.6, 1.0], solid: true, transparent: false, emission: None,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Blue Lamp", color: [0.15, 0.30, 1.0, 1.0], solid: true, transparent: false, emission: Some([0.15, 0.30, 1.0]),
+    BlockDef { name: "Glowstone", color: [1.0, 0.9, 0.5, 1.0], solid: true, transparent: false, emission: Some([1.0, 0.9, 0.5]),
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "LampRed", color: [0.5, 0.1, 0.1, 1.0], solid: true, transparent: false, emission: Some([1.0, 0.2, 0.2]),
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "LampGreen", color: [0.1, 0.5, 0.1, 1.0], solid: true, transparent: false, emission: Some([0.2, 1.0, 0.2]),
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "LampBlue", color: [0.1, 0.1, 0.5, 1.0], solid: true, transparent: false, emission: Some([0.2, 0.2, 1.0]),
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
     BlockDef { name: "Glass", color: [0.80, 0.90, 1.0, 1.0], solid: true, transparent: true, emission: None,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
@@ -137,6 +158,22 @@ pub const BLOCK_DEFS: [BlockDef; 15] = [
         // ใช้ช่อง side เป็นรูป sprite ของกากบาท
         tex_top: &[], tex_side: &["textures/grass.png"], tex_bottom: &[], overlay_side: &[] },
     BlockDef { name: "Chiseled", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Water1", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Water2", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Water3", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Water4", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Water5", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Water6", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Water7", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Water8", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
 ];
 
@@ -487,6 +524,8 @@ pub fn create_mesh_from_blocks(
     neighbors: &[Arc<[BlockType; CHUNK_VOLUME]>; 8],
     chiseled_blocks: Option<&HashMap<usize, Box<[u8; 4096]>>>,
 ) -> ChunkMeshSet {
+    let mut drop_cache: HashMap<(i32, i32, i32), f32> = HashMap::with_capacity(1024);
+    
     let mut set = ChunkMeshSet::default();
 
     // พิกัดโลกของมุม chunk — ใช้ hash เลือกลาย texture ให้ต่อเนื่องข้าม chunk
@@ -656,7 +695,7 @@ pub fn create_mesh_from_blocks(
                         world_base_z + c[2],
                     );
 
-                    if ao[0] == ao[1] && ao[1] == ao[2] && ao[2] == ao[3] {
+                    if !block.is_water() && ao[0] == ao[1] && ao[1] == ao[2] && ao[2] == ao[3] {
                         mask[midx(ui, vi)] = Some((block, ao[0], variant));
                     } else {
                         // AO ไล่เฉดภายในหน้า — merge ไม่ได้ วาดเดี่ยวพร้อม flip diagonal
@@ -666,15 +705,63 @@ pub fn create_mesh_from_blocks(
                         let mut verts = [[0f32; 3]; 4];
                         let mut cols = [[0f32; 4]; 4];
                         let mut uvs = [[0f32; 2]; 4];
+                        let (vx, vy, vz) = (c[0], c[1], c[2]);
+                        let is_w = block.is_water();
+                        let drop = if is_w && face_id != 5 {
+                            *drop_cache.entry((vx, vy, vz)).or_insert_with(|| {
+                                let mut has_water_above = false;
+                                for dx in -1..=0 {
+                                    for dz in -1..=0 {
+                                        if sample(vx + dx, vy + 1, vz + dz).is_water() {
+                                            has_water_above = true;
+                                            break;
+                                        }
+                                    }
+                                    if has_water_above { break; }
+                                }
+                                
+                                if !has_water_above {
+                                    let mut sum = 0.0;
+                                    let mut cnt = 0;
+                                    for dx in -1..=0 {
+                                        for dz in -1..=0 {
+                                            let b = sample(vx + dx, vy, vz + dz);
+                                            if b.is_water() {
+                                                let d = match b {
+                                                    BlockType::Water7 => 0.125,
+                                                    BlockType::Water6 => 0.25,
+                                                    BlockType::Water5 => 0.375,
+                                                    BlockType::Water4 => 0.50,
+                                                    BlockType::Water3 => 0.625,
+                                                    BlockType::Water2 => 0.75,
+                                                    BlockType::Water1 => 0.875,
+                                                    _ => 0.0,
+                                                };
+                                                sum += d;
+                                                cnt += 1;
+                                            }
+                                        }
+                                    }
+                                    if cnt > 0 { sum / (cnt as f32) } else { 0.0 }
+                                } else {
+                                    0.0
+                                }
+                            })
+                        } else {
+                            0.0
+                        };
                         for i in 0..4 {
                             let p = CUBE_POSITIONS[face_id][i];
-                            verts[i] = [p[0] + c[0] as f32, p[1] + c[1] as f32, p[2] + c[2] as f32];
+                            verts[i] = [p[0] + vx as f32, p[1] + vy as f32, p[2] + vz as f32];
+                            if is_w && p[1] > 0.5 { verts[i][1] -= drop; }
                             let br = shade * AO_CURVE[ao[i] as usize];
                             cols[i] = [base[0] * br, base[1] * br, base[2] * br, base[3]];
                             uvs[i] = face_uv(verts[i]);
                         }
                         let flip = (ao[0] as u32 + ao[2] as u32) < (ao[1] as u32 + ao[3] as u32);
-                        let buf = if let Some(t) = tex {
+                        let buf = if is_w {
+                            &mut set.water
+                        } else if let Some(t) = tex {
                             texture_buf(&mut set.textured, t)
                         } else {
                             &mut set.solid
@@ -709,7 +796,7 @@ pub fn create_mesh_from_blocks(
                     }
 
                     let (block, ao_level, variant) = key;
-                    let is_water = block == BlockType::Water;
+                    let is_water = block.is_water();
                     let is_glass = block == BlockType::Glass;
                     let is_lamp = lamp_emission(block).is_some();
                     let tex = if is_water || is_glass || is_lamp {
@@ -2044,7 +2131,10 @@ pub fn voxel_raycast_system(
             
             let block = world.get_block(mx, my, mz);
             
-            if block != BlockType::Air && block != BlockType::TallGrass {
+            if block != BlockType::Air
+                && block != BlockType::TallGrass
+                && !block.is_water()
+            {
                 let sx = ((p.x - mx as f32) * 16.0).floor().clamp(0.0, 15.0) as i32;
                 let sy = ((p.y - my as f32) * 16.0).floor().clamp(0.0, 15.0) as i32;
                 let sz = ((p.z - mz as f32) * 16.0).floor().clamp(0.0, 15.0) as i32;
@@ -2220,15 +2310,12 @@ pub fn block_interaction_system(
     mut interaction_mode: ResMut<InteractionMode>,
     (mouse_input, keyboard): (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>),
     mut meshes: ResMut<Assets<Mesh>>,
-    chunk_material: Res<ChunkMaterial>,
-    water_material: Res<WaterMaterial>,
-    glass_material: Res<GlassMaterial>,
-    deco_material: Res<DecoMaterials>,
-    lamp_materials: Res<LampMaterials>,
-    block_materials: Res<BlockMaterials>,
+    (chunk_material, water_material, glass_material): (Res<ChunkMaterial>, Res<WaterMaterial>, Res<GlassMaterial>),
+    (deco_material, lamp_materials, block_materials): (Res<DecoMaterials>, Res<LampMaterials>, Res<BlockMaterials>),
     mesh_query: Query<&Mesh3d>,
     camera_query: Query<&Transform, With<crate::camera::FreeCamera>>,
     mut q_egui: Query<&mut bevy_egui::EguiContext, With<bevy::window::PrimaryWindow>>,
+    mut active_fluids: ResMut<ActiveFluids>,
 ) {
     // Hotbar: กด 1-0, -, = และ T เลือกบล็อก
     const HOTBAR: [(KeyCode, BlockType); 13] = [
@@ -2238,7 +2325,7 @@ pub fn block_interaction_system(
         (KeyCode::Digit4, BlockType::Wood),
         (KeyCode::Digit5, BlockType::Leaves),
         (KeyCode::Digit6, BlockType::Sand),
-        (KeyCode::Digit7, BlockType::Water),
+        (KeyCode::Digit7, BlockType::Water8),
         (KeyCode::Digit8, BlockType::Glowstone),
         (KeyCode::Digit9, BlockType::LampRed),
         (KeyCode::Digit0, BlockType::LampGreen),
@@ -2349,6 +2436,12 @@ pub fn block_interaction_system(
 
     let Some(tp) = target_pos else { return };
 
+    // ปลุกน้ำให้ตื่น (ถ้าบล็อกถูกทุบหรือวาง บล็อกรอบๆ และตัวมันเองต้องเริ่มไหล)
+    active_fluids.0.insert(tp);
+    for dir in [IVec3::new(1,0,0), IVec3::new(-1,0,0), IVec3::new(0,1,0), IVec3::new(0,-1,0), IVec3::new(0,0,1), IVec3::new(0,0,-1)] {
+        active_fluids.0.insert(tp + dir);
+    }
+
     // เซฟ chunk ที่แก้ลง disk ทันที
     let edited_chunk = IVec2::new(
         tp.x.div_euclid(CHUNK_WIDTH as i32),
@@ -2441,4 +2534,304 @@ pub fn block_interaction_system(
 
     // บล็อกเปลี่ยนเฉพาะใน chunk ที่แก้ — อัปเดต PointLight เฉพาะตรงนั้น
     refresh_chunk_lamp_lights(&mut commands, &mut world, edited_chunk);
+}
+
+
+#[derive(Resource, Default)]
+pub struct ActiveFluids(pub std::collections::HashSet<IVec3>);
+
+fn queue_remesh(pos: IVec3, remesh_queue: &mut std::collections::HashSet<IVec2>) {
+    remesh_queue.insert(IVec2::new(
+        pos.x.div_euclid(CHUNK_WIDTH as i32),
+        pos.z.div_euclid(CHUNK_WIDTH as i32),
+    ));
+}
+
+fn get_water_vol(block: BlockType) -> u8 {
+    match block {
+        BlockType::Water8 | BlockType::Water => 8,
+        BlockType::Water7 => 7,
+        BlockType::Water6 => 6,
+        BlockType::Water5 => 5,
+        BlockType::Water4 => 4,
+        BlockType::Water3 => 3,
+        BlockType::Water2 => 2,
+        BlockType::Water1 => 1,
+        _ => 0,
+    }
+}
+
+fn find_flow_dirs_finite(pos: IVec3, world: &VoxelWorld, current_vol: u8) -> Vec<IVec3> {
+    let horiz = [IVec3::new(1,0,0), IVec3::new(-1,0,0), IVec3::new(0,0,1), IVec3::new(0,0,-1)];
+    let mut dirs = Vec::new();
+    let mut min_dist = 100;
+    
+    let mut queue = std::collections::VecDeque::new();
+    let mut visited = std::collections::HashSet::new();
+    
+    visited.insert(pos);
+    
+    for &dir in &horiz {
+        let n_pos = pos + dir;
+        let n_block = world.get_block(n_pos.x, n_pos.y, n_pos.z);
+        if n_block.is_solid() { continue; }
+        
+        let n_vol = get_water_vol(n_block);
+        if n_vol > current_vol { continue; }
+        
+        let b_pos = n_pos - IVec3::Y;
+        let b_block = world.get_block(b_pos.x, b_pos.y, b_pos.z);
+        let b_vol = get_water_vol(b_block);
+        
+        if b_block == BlockType::Air || (b_block.is_water() && b_vol < 8) {
+            if 1 < min_dist {
+                min_dist = 1;
+                dirs.clear();
+            }
+            if 1 == min_dist {
+                dirs.push(dir);
+            }
+        } else {
+            queue.push_back((n_pos, 1, dir));
+            visited.insert(n_pos);
+        }
+    }
+    
+    if !dirs.is_empty() { return dirs; }
+    
+    while let Some((curr, dist, first_dir)) = queue.pop_front() {
+        if dist >= 4 { continue; }
+        
+        for &dir in &horiz {
+            let n_pos = curr + dir;
+            if visited.contains(&n_pos) { continue; }
+            let n_block = world.get_block(n_pos.x, n_pos.y, n_pos.z);
+            if n_block.is_solid() { continue; }
+            
+            let n_vol = get_water_vol(n_block);
+            if n_vol > current_vol { continue; }
+            
+            let b_pos = n_pos - IVec3::Y;
+            let b_block = world.get_block(b_pos.x, b_pos.y, b_pos.z);
+            let b_vol = get_water_vol(b_block);
+            
+            if b_block == BlockType::Air || (b_block.is_water() && b_vol < 8) {
+                if dist + 1 < min_dist {
+                    min_dist = dist + 1;
+                    dirs.clear();
+                }
+                if dist + 1 == min_dist {
+                    if !dirs.contains(&first_dir) {
+                        dirs.push(first_dir);
+                    }
+                }
+            } else {
+                queue.push_back((n_pos, dist + 1, first_dir));
+                visited.insert(n_pos);
+            }
+        }
+    }
+    
+    dirs
+}
+
+pub fn fluid_simulation_system(
+    mut active_fluids: ResMut<ActiveFluids>,
+    mut remesh_queue: Local<std::collections::HashSet<IVec2>>,
+    mut world: ResMut<VoxelWorld>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mesh_query: Query<&Mesh3d>,
+    chunk_material: Res<ChunkMaterial>,
+    water_material: Res<WaterMaterial>,
+    glass_material: Res<GlassMaterial>,
+    deco_material: Res<DecoMaterials>,
+    lamp_materials: Res<LampMaterials>,
+    block_materials: Res<BlockMaterials>,
+) {
+    if active_fluids.0.is_empty() && remesh_queue.is_empty() {
+        return;
+    }
+
+    let current_active: Vec<IVec3> = active_fluids.0.drain().collect();
+    let mut next_active = std::collections::HashSet::new();
+
+    // Process fluids
+    for pos in current_active.into_iter().take(20000) {
+        let block = world.get_block(pos.x, pos.y, pos.z);
+        if !block.is_water() { continue; }
+
+        let vol = get_water_vol(block);
+        let mut current_vol = vol;
+        let mut moved = false;
+
+        // Try to flow down first
+        if pos.y > 0 {
+            let b_pos = IVec3::new(pos.x, pos.y - 1, pos.z);
+            let b_block = world.get_block(b_pos.x, b_pos.y, b_pos.z);
+            if b_block == BlockType::Air || b_block.is_water() {
+                let b_vol = get_water_vol(b_block);
+                if b_vol < 8 {
+                    let transfer = current_vol.min(8 - b_vol);
+                    current_vol -= transfer;
+                    
+                    let new_b_vol = b_vol + transfer;
+                    let new_b_block = match new_b_vol {
+                        8 => BlockType::Water8,
+                        7 => BlockType::Water7,
+                        6 => BlockType::Water6,
+                        5 => BlockType::Water5,
+                        4 => BlockType::Water4,
+                        3 => BlockType::Water3,
+                        2 => BlockType::Water2,
+                        1 => BlockType::Water1,
+                        _ => BlockType::Air,
+                    };
+                    world.set_block(b_pos.x, b_pos.y, b_pos.z, new_b_block);
+                    queue_remesh(b_pos, &mut remesh_queue);
+                    next_active.insert(b_pos);
+                    moved = true;
+                }
+            }
+        }
+
+        // Spread horizontally if we still have volume > 1 and didn't fall down entirely
+        if current_vol > 1 && !moved {
+            let preferred_dirs = find_flow_dirs_finite(pos, &world, current_vol);
+            let check_dirs = if preferred_dirs.is_empty() {
+                vec![IVec3::new(1, 0, 0), IVec3::new(-1, 0, 0), IVec3::new(0, 0, 1), IVec3::new(0, 0, -1)]
+            } else {
+                preferred_dirs
+            };
+            
+            let mut neighbors = vec![];
+            for dir in check_dirs {
+                let n_pos = pos + dir;
+                let n_block = world.get_block(n_pos.x, n_pos.y, n_pos.z);
+                if n_block == BlockType::Air || n_block.is_water() {
+                    let n_vol = get_water_vol(n_block);
+                    // Use < current_vol - 1 to prevent ping-ponging!
+                    if n_vol < current_vol - 1 {
+                        neighbors.push((n_pos, n_vol));
+                    }
+                }
+            }
+
+            if !neighbors.is_empty() {
+                neighbors.sort_by_key(|&(_, v)| v);
+                let target = neighbors[0].0;
+                let t_vol = neighbors[0].1;
+                
+                let transfer = 1;
+                current_vol -= transfer;
+                let new_t_vol = t_vol + transfer;
+                
+                let new_t_block = match new_t_vol {
+                    8 => BlockType::Water8,
+                    7 => BlockType::Water7,
+                    6 => BlockType::Water6,
+                    5 => BlockType::Water5,
+                    4 => BlockType::Water4,
+                    3 => BlockType::Water3,
+                    2 => BlockType::Water2,
+                    1 => BlockType::Water1,
+                    _ => BlockType::Air,
+                };
+                world.set_block(target.x, target.y, target.z, new_t_block);
+                queue_remesh(target, &mut remesh_queue);
+                next_active.insert(target);
+                moved = true;
+            }
+        }
+
+        let new_block = match current_vol {
+            8 => BlockType::Water8,
+            7 => BlockType::Water7,
+            6 => BlockType::Water6,
+            5 => BlockType::Water5,
+            4 => BlockType::Water4,
+            3 => BlockType::Water3,
+            2 => BlockType::Water2,
+            1 => BlockType::Water1,
+            _ => BlockType::Air,
+        };
+        
+        if new_block != block {
+            world.set_block(pos.x, pos.y, pos.z, new_block);
+            queue_remesh(pos, &mut remesh_queue);
+        }
+        
+        if moved {
+            next_active.insert(pos);
+        }
+    }
+
+    active_fluids.0.extend(next_active);
+
+    // Meshing Limit (allow max 16 chunks per frame to prevent freezing)
+    let mut chunks = remesh_queue.drain().collect::<Vec<_>>();
+    chunks.sort_by_key(|c| c.x * c.x + c.y * c.y);
+
+    let mut meshed_count = 0;
+    for chunk_pos in chunks {
+        if meshed_count >= 16 {
+            remesh_queue.insert(chunk_pos);
+            continue;
+        }
+
+        let neighbors_pos = chunk_neighbors(chunk_pos);
+        if !neighbors_pos.iter().all(|p| world.chunks.contains_key(p)) {
+            remesh_queue.insert(chunk_pos);
+            continue;
+        }
+        let neighbors = neighbors_pos.map(|p| world.chunks.get(&p).unwrap().blocks.clone());
+
+        let transform = Transform::from_xyz(
+            (chunk_pos.x * CHUNK_WIDTH as i32) as f32,
+            0.0,
+            (chunk_pos.y * CHUNK_WIDTH as i32) as f32,
+        );
+
+        let old_vertices;
+        let old_indices;
+        let set;
+        {
+            let Some(chunk_data) = world.chunks.get_mut(&chunk_pos) else { continue };
+            old_vertices = chunk_data.num_vertices;
+            old_indices = chunk_data.num_indices;
+
+            let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors, Some(&chunk_data.chiseled_blocks));
+            chunk_data.num_vertices = s.total_vertices();
+            chunk_data.num_indices = s.total_indices();
+            set = s;
+        }
+
+        world.total_vertices = (world.total_vertices + set.total_vertices()) - old_vertices;
+        world.total_indices = (world.total_indices + set.total_indices()) - old_indices;
+        let ChunkMeshSet { solid, water, glass, deco, glow, textured } = set;
+
+        if let Some(&entity) = world.generated_chunks.get(&chunk_pos) {
+            if solid.is_empty() {
+                commands.entity(entity).remove::<Mesh3d>().remove::<Aabb>();
+            } else if let Ok(mesh3d) = mesh_query.get(entity) {
+                let _ = meshes.insert(mesh3d.0.id(), solid.into_mesh());
+                commands.entity(entity).remove::<Aabb>();
+            } else {
+                commands.entity(entity)
+                    .insert((
+                        Mesh3d(meshes.add(solid.into_mesh())),
+                        MeshMaterial3d(chunk_material.0.clone()),
+                    ))
+                    .remove::<Aabb>();
+            }
+        }
+
+        update_single_mesh_entity(&mut commands, &mut world.water_chunks, &mut meshes, &mesh_query, &water_material.0, chunk_pos, water, transform);
+        update_single_mesh_entity(&mut commands, &mut world.glass_chunks, &mut meshes, &mesh_query, &glass_material.0, chunk_pos, glass, transform);
+        update_deco_entities(&mut commands, &mut world, &mut meshes, &deco_material, chunk_pos, deco, transform);
+        update_glow_entities(&mut commands, &mut world, &mut meshes, &lamp_materials, chunk_pos, glow, transform);
+        update_textured_entities(&mut commands, &mut world, &mut meshes, &block_materials, chunk_pos, textured, transform);
+        
+        meshed_count += 1;
+    }
 }

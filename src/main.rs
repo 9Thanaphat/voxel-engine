@@ -47,6 +47,13 @@ impl Default for GameSettings {
 #[derive(Resource, Default)]
 pub struct RegenerateWorld(pub bool);
 
+#[derive(Clone, Copy, Default, Eq, PartialEq, Debug, Hash, States)]
+pub enum GameState {
+    #[default]
+    MainMenu,
+    InGame,
+}
+
 fn main() {
     App::new()
         .init_resource::<GameSettings>()
@@ -54,9 +61,8 @@ fn main() {
         .init_resource::<voxel::TargetedBlock>()
         .init_resource::<voxel::SelectedBlock>()
         .init_resource::<voxel::InteractionMode>()
+        .init_resource::<voxel::ActiveFluids>()
         .add_plugins((
-            // sampler แบบ nearest (พิกเซลคม) + repeat (จำเป็น: texture ต้องปูซ้ำ
-            // ข้าม quad ที่ greedy meshing รวมแล้ว UV เกิน 1.0)
             DefaultPlugins.set(ImagePlugin {
                 default_sampler: bevy::image::ImageSamplerDescriptor {
                     address_mode_u: bevy::image::ImageAddressMode::Repeat,
@@ -69,6 +75,7 @@ fn main() {
             bevy::diagnostic::EntityCountDiagnosticsPlugin::default(),
             bevy_egui::EguiPlugin::default(),
         ))
+        .init_state::<GameState>()
         .add_systems(Startup, (
             voxel::setup_voxel,
             camera::setup_camera,
@@ -84,7 +91,7 @@ fn main() {
                 ui::update_fps_text,
                 ui::update_block_target_text,
                 ui::update_mode_text,
-            ),
+            ).run_if(in_state(GameState::InGame)),
         )
         .add_systems(
             Update,
@@ -96,11 +103,19 @@ fn main() {
                 voxel::process_generated_chunks_system,
                 voxel::chunk_unloading_system,
                 voxel::update_sun_system,
-            ),
+                voxel::fluid_simulation_system,
+            ).run_if(in_state(GameState::InGame)),
         )
         .add_systems(
             bevy_egui::EguiPrimaryContextPass,
-            ui::egui_settings_system,
+            (
+                ui::egui_settings_system.run_if(in_state(GameState::InGame)),
+                ui::main_menu_system.run_if(in_state(GameState::MainMenu)),
+            ),
+        )
+        .add_systems(
+            Update,
+            ui::toggle_ingame_ui,
         )
         .run();
 }

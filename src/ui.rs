@@ -13,6 +13,9 @@ pub struct BlockIdText;
 #[derive(Component)]
 pub struct ModeText;
 
+#[derive(Component)]
+pub struct InGameUi;
+
 pub fn setup_ui(mut commands: Commands) {
     // Crosshair
     commands.spawn((
@@ -23,6 +26,8 @@ pub fn setup_ui(mut commands: Commands) {
             align_items: AlignItems::Center,
             ..default()
         },
+        InGameUi,
+        Visibility::Hidden,
     )).with_children(|parent| {
         parent.spawn((
             Node {
@@ -48,6 +53,8 @@ pub fn setup_ui(mut commands: Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+            InGameUi,
+            Visibility::Hidden,
         ))
         .with_children(|parent| {
             // Performance Text
@@ -98,6 +105,68 @@ pub fn setup_ui(mut commands: Commands) {
                 ModeText,
             ));
         });
+}
+
+pub fn toggle_ingame_ui(
+    state: Res<State<crate::GameState>>,
+    mut query: Query<&mut Visibility, With<InGameUi>>,
+) {
+    if state.is_changed() || state.is_added() {
+        let is_ingame = *state.get() == crate::GameState::InGame;
+        for mut vis in &mut query {
+            *vis = if is_ingame { Visibility::Inherited } else { Visibility::Hidden };
+        }
+    }
+}
+
+pub fn main_menu_system(
+    mut contexts: bevy_egui::EguiContexts,
+    mut next_state: ResMut<NextState<crate::GameState>>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    let ctx = ctx.clone(); // In egui 0.35 Context is easily cloned to avoid mutability issues
+
+    bevy_egui::egui::Window::new("Main Menu")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .anchor(bevy_egui::egui::Align2::CENTER_CENTER, bevy_egui::egui::vec2(0.0, 0.0))
+        .show(&ctx, |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space(20.0);
+            
+            ui.heading(
+                bevy_egui::egui::RichText::new("VOXEL GAME")
+                    .size(50.0)
+                    .strong()
+            );
+            
+            ui.add_space(50.0);
+
+            let btn_size = bevy_egui::egui::vec2(200.0, 40.0);
+
+            if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Singleplayer")).clicked() {
+                next_state.set(crate::GameState::InGame);
+            }
+            ui.add_space(10.0);
+            
+            if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Multiplayer")).clicked() {
+                // Not implemented
+            }
+            ui.add_space(10.0);
+            
+            if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Option")).clicked() {
+                // Not implemented
+            }
+            ui.add_space(10.0);
+            
+            if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Quit")).clicked() {
+                std::process::exit(0);
+            }
+            
+            ui.add_space(20.0);
+        });
+    });
 }
 
 pub fn update_coordinate_ui_system(
