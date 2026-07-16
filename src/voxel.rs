@@ -252,12 +252,44 @@ pub struct ChunkData {
     pub chiseled_blocks: HashMap<usize, Box<[u8; 4096]>>,
     pub num_vertices: usize,
     pub num_indices: usize,
+    /// ช่วง y ที่มีน้ำ (inclusive) — grow-only ตอน set_block เขียนน้ำ,
+    /// tighten ตอน rebuild mesh น้ำ; สถานะ "ไม่มีน้ำ" = min > max
+    pub water_y_min: usize,
+    pub water_y_max: usize,
+    /// ส่วนแบ่งของ mesh น้ำใน num_vertices/num_indices —
+    /// ให้เส้นทาง remesh เฉพาะน้ำอัปเดตยอดรวมแบบ delta ได้โดยไม่พัง
+    pub num_water_vertices: usize,
+    pub num_water_indices: usize,
 }
 
 impl ChunkData {
     pub fn get_index(x: usize, y: usize, z: usize) -> usize {
         x + y * CHUNK_WIDTH + z * CHUNK_WIDTH * CHUNK_HEIGHT
     }
+}
+
+/// สแกนหาแถบ y ที่มีน้ำทั้ง chunk (ใช้ครั้งเดียวตอน insert — ~131k cells, ราวๆ 0.1ms)
+pub fn scan_water_bounds(blocks: &[BlockType; CHUNK_VOLUME]) -> (usize, usize) {
+    let mut min_y = CHUNK_HEIGHT;
+    let mut max_y = 0usize;
+    for y in 0..CHUNK_HEIGHT {
+        let mut has_water = false;
+        for z in 0..CHUNK_WIDTH {
+            let base = y * CHUNK_WIDTH + z * CHUNK_WIDTH * CHUNK_HEIGHT;
+            for x in 0..CHUNK_WIDTH {
+                if blocks[base + x].is_water() {
+                    has_water = true;
+                    break;
+                }
+            }
+            if has_water { break; }
+        }
+        if has_water {
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+    }
+    (min_y, max_y)
 }
 
 #[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
@@ -356,6 +388,11 @@ impl VoxelWorld {
 
             let blocks_mut = Arc::make_mut(&mut chunk.blocks);
             blocks_mut[ChunkData::get_index(local_x, local_y, local_z)] = block_type;
+            // ขยายแถบน้ำแบบ grow-only (tighten ทีเดียวตอน rebuild mesh น้ำ)
+            if block_type.is_water() {
+                chunk.water_y_min = chunk.water_y_min.min(local_y);
+                chunk.water_y_max = chunk.water_y_max.max(local_y);
+            }
             true
         } else {
             false
@@ -1131,6 +1168,185 @@ fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> Box<[Bl
     blocks
 }
 
+/// สร้างเฉพาะ mesh น้ำของ chunk — คู่แฝดของเส้นทางน้ำใน create_mesh_from_blocks
+/// (น้ำไม่เข้า greedy merge อยู่แล้ว จึงตัด machinery ทิ้งได้ทั้งหมด)
+///
+/// ต้อง**เป๊ะทุก byte**กับ set.water ของ mesher เต็ม (มี parity test คุม) —
+/// ห้ามแก้ฝั่งเดียว: ลำดับ loop, predicate, quirk face_id != 5 ของ drop smoothing
+/// ต้องตรงกันเสมอ
+///
+/// วนเฉพาะแถบ y [y_min, y_max] (superset ของน้ำจริง จาก metadata grow-only)
+/// คืน (buffer, ช่วง y ที่เจอน้ำจริง) ไว้ tighten metadata — อิงการเจอ cell น้ำ
+/// ไม่ใช่การมี face (น้ำจมไร้หน้าก็ยังต้องอยู่ใน band ไม่งั้นรูโผล่ตอน seam เปลี่ยน)
+pub fn create_water_mesh(
+    chunk_pos: IVec2,
+    blocks: &[BlockType; CHUNK_VOLUME],
+    neighbors: &[Arc<[BlockType; CHUNK_VOLUME]>; 8],
+    y_min: usize,
+    y_max: usize,
+) -> (MeshBuf, Option<(usize, usize)>) {
+    let mut buf = MeshBuf::default();
+    if y_min > y_max {
+        return (buf, None);
+    }
+    let y_lo = y_min as i32;
+    let y_hi = (y_max.min(CHUNK_HEIGHT - 1)) as i32;
+
+    let mut drop_cache: HashMap<(i32, i32, i32), f32> = HashMap::with_capacity(256);
+    let mut observed: Option<(usize, usize)> = None;
+
+    let world_base_x = chunk_pos.x * CHUNK_WIDTH as i32;
+    let world_base_z = chunk_pos.y * CHUNK_WIDTH as i32;
+
+    // เหมือน sample ใน create_mesh_from_blocks ทุกตัวอักษร
+    let sample = |x: i32, y: i32, z: i32| -> BlockType {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 {
+            return BlockType::Air;
+        }
+        let w = CHUNK_WIDTH as i32;
+        let lx = x.rem_euclid(w) as usize;
+        let lz = z.rem_euclid(w) as usize;
+        let src: &[BlockType; CHUNK_VOLUME] = match (x.div_euclid(w), z.div_euclid(w)) {
+            (0, 0) => blocks,
+            (1, 0) => &neighbors[0],
+            (-1, 0) => &neighbors[1],
+            (0, 1) => &neighbors[2],
+            (0, -1) => &neighbors[3],
+            (1, 1) => &neighbors[4],
+            (1, -1) => &neighbors[5],
+            (-1, 1) => &neighbors[6],
+            (-1, -1) => &neighbors[7],
+            _ => return BlockType::Air,
+        };
+        src[ChunkData::get_index(lx, y as usize, lz)]
+    };
+
+    let axis_len = [CHUNK_WIDTH as i32, CHUNK_HEIGHT as i32, CHUNK_WIDTH as i32];
+
+    for face_id in 0..6 {
+        let norm = FACE_OFFSETS[face_id];
+        let a = if norm[0] != 0 { 0 } else if norm[1] != 0 { 1 } else { 2 };
+        let (ua, va) = match a {
+            0 => (1, 2),
+            1 => (0, 2),
+            _ => (0, 1),
+        };
+        let (la, lu, lv) = (axis_len[a], axis_len[ua], axis_len[va]);
+
+        let face_uv = move |p: [f32; 3]| -> [f32; 2] {
+            match a {
+                1 => [p[0], p[2]],
+                0 => [p[2], -p[1]],
+                _ => [p[0], -p[1]],
+            }
+        };
+
+        // จำกัดเฉพาะตัวแปร loop ที่รับบทแกน y (a=0 → ui, a=1 → s, a=2 → vi)
+        // การตัดช่วงไม่กระทบลำดับ emit เพราะ cell นอกแถบไม่มีน้ำให้วาดอยู่แล้ว
+        let (s_lo, s_hi) = if a == 1 { (y_lo, y_hi) } else { (0, la - 1) };
+        let (ui_lo, ui_hi) = if ua == 1 { (y_lo, y_hi) } else { (0, lu - 1) };
+        let (vi_lo, vi_hi) = if va == 1 { (y_lo, y_hi) } else { (0, lv - 1) };
+
+        for s in s_lo..=s_hi {
+            for vi in vi_lo..=vi_hi {
+                for ui in ui_lo..=ui_hi {
+                    let mut c = [0i32; 3];
+                    c[a] = s;
+                    c[ua] = ui;
+                    c[va] = vi;
+
+                    let block = blocks[ChunkData::get_index(c[0] as usize, c[1] as usize, c[2] as usize)];
+                    if !block.is_water() {
+                        continue;
+                    }
+
+                    // เจอน้ำ = อยู่ใน band จริง (นับก่อนเช็ค visibility)
+                    let wy = c[1] as usize;
+                    observed = Some(match observed {
+                        Some((lo, hi)) => (lo.min(wy), hi.max(wy)),
+                        None => (wy, wy),
+                    });
+
+                    let n = sample(c[0] + norm[0], c[1] + norm[1], c[2] + norm[2]);
+                    let visible = n == BlockType::Air || (block_def(n).transparent && n != block);
+                    if !visible {
+                        continue;
+                    }
+
+                    // ตรงกับ branch วาดเดี่ยวของ mesher เต็ม (น้ำ: ao คงที่ [3;4])
+                    let variant = texture_variant(
+                        block,
+                        face_id,
+                        world_base_x + c[0],
+                        c[1],
+                        world_base_z + c[2],
+                    );
+                    let tex = face_texture(block, face_id, variant);
+                    let base = if tex.is_some() { [1.0, 1.0, 1.0, 1.0] } else { block_color(block) };
+                    let shade = FACE_SHADE[face_id];
+                    let ao = [3u8; 4];
+                    let (vx, vy, vz) = (c[0], c[1], c[2]);
+
+                    let mut corner_drop = [0f32; 4];
+                    if face_id != 5 {
+                        for i in 0..4 {
+                            let p = CUBE_POSITIONS[face_id][i];
+                            if p[1] < 0.5 { continue; }
+                            let (cx, cz) = (vx + p[0] as i32, vz + p[2] as i32);
+                            corner_drop[i] = *drop_cache.entry((cx, vy, cz)).or_insert_with(|| {
+                                for dx in -1..=0 {
+                                    for dz in -1..=0 {
+                                        if sample(cx + dx, vy + 1, cz + dz).is_water() {
+                                            return 0.0;
+                                        }
+                                    }
+                                }
+                                let mut sum = 0.0;
+                                let mut cnt = 0;
+                                for dx in -1..=0 {
+                                    for dz in -1..=0 {
+                                        let b = sample(cx + dx, vy, cz + dz);
+                                        if b.is_water() {
+                                            sum += match b {
+                                                BlockType::Water7 => 0.125,
+                                                BlockType::Water6 => 0.25,
+                                                BlockType::Water5 => 0.375,
+                                                BlockType::Water4 => 0.50,
+                                                BlockType::Water3 => 0.625,
+                                                BlockType::Water2 => 0.75,
+                                                BlockType::Water1 => 0.875,
+                                                _ => 0.0,
+                                            };
+                                            cnt += 1;
+                                        }
+                                    }
+                                }
+                                if cnt > 0 { sum / (cnt as f32) } else { 0.0 }
+                            });
+                        }
+                    }
+
+                    let mut verts = [[0f32; 3]; 4];
+                    let mut cols = [[0f32; 4]; 4];
+                    let mut uvs = [[0f32; 2]; 4];
+                    for i in 0..4 {
+                        let p = CUBE_POSITIONS[face_id][i];
+                        verts[i] = [p[0] + vx as f32, p[1] + vy as f32, p[2] + vz as f32];
+                        if p[1] > 0.5 { verts[i][1] -= corner_drop[i]; }
+                        let br = shade * AO_CURVE[ao[i] as usize];
+                        cols[i] = [base[0] * br, base[1] * br, base[2] * br, base[3]];
+                        uvs[i] = face_uv(verts[i]);
+                    }
+                    let flip = (ao[0] as u32 + ao[2] as u32) < (ao[1] as u32 + ao[3] as u32);
+                    buf.push_quad(verts, CUBE_NORMALS[face_id], cols, uvs, flip);
+                }
+            }
+        }
+    }
+
+    (buf, observed)
+}
+
 // --------------------------------------------------------
 // Save / Load (เก็บ chunk ที่ผู้เล่นแก้ไขลง disk)
 // --------------------------------------------------------
@@ -1566,11 +1782,17 @@ pub fn world_reset_system(
     mut request: ResMut<crate::RegenerateWorld>,
     mut world: ResMut<VoxelWorld>,
     mut generator: ResMut<ChunkGenerator>,
+    mut pools: ResMut<ActivePools>,
+    mut active_fluids: ResMut<ActiveFluids>,
 ) {
     if !request.0 {
         return;
     }
     request.0 = false;
+
+    // โลกกำลังจะหายทั้งใบ — สระ/น้ำที่ตื่นอยู่อ้างอิงบล็อกเก่า ทิ้งให้หมด
+    pools.0.clear();
+    active_fluids.0.clear();
 
     for (_, entity) in world.generated_chunks.drain() {
         commands.entity(entity).despawn();
@@ -1951,11 +2173,16 @@ pub fn process_generated_chunks_system(
             continue;
         }
         let chunk_pos = block_data.chunk_pos;
+        let (water_y_min, water_y_max) = scan_water_bounds(&block_data.blocks);
         world.chunks.insert(chunk_pos, ChunkData {
             blocks: block_data.blocks,
             chiseled_blocks: block_data.chiseled,
             num_vertices: 0,
             num_indices: 0,
+            water_y_min,
+            water_y_max,
+            num_water_vertices: 0,
+            num_water_indices: 0,
         });
         generator.generating_blocks.remove(&chunk_pos);
 
@@ -1997,6 +2224,8 @@ pub fn process_generated_chunks_system(
 
         let num_vertices = set.total_vertices();
         let num_indices = set.total_indices();
+        let num_water_vertices = set.water.positions.len();
+        let num_water_indices = set.water.indices.len();
         let ChunkMeshSet { solid, water, glass, deco, glow, textured } = set;
 
         // นับสถิติเฉพาะ chunk ที่มี block data อยู่จริง — mesh ที่มาถึงหลัง
@@ -2004,6 +2233,8 @@ pub fn process_generated_chunks_system(
         if let Some(chunk_data) = world.chunks.get_mut(&chunk_pos) {
             chunk_data.num_vertices = num_vertices;
             chunk_data.num_indices = num_indices;
+            chunk_data.num_water_vertices = num_water_vertices;
+            chunk_data.num_water_indices = num_water_indices;
             world.total_vertices += num_vertices;
             world.total_indices += num_indices;
         }
@@ -2058,6 +2289,7 @@ pub fn chunk_unloading_system(
     mut world: ResMut<VoxelWorld>,
     settings: Res<crate::GameSettings>,
     mut client_sync: Option<ResMut<crate::network::ClientSync>>,
+    mut pools: ResMut<ActivePools>,
 ) {
     let Some(camera_transform) = camera_query.iter().next() else { return };
     let cam_pos = camera_transform.translation;
@@ -2086,6 +2318,11 @@ pub fn chunk_unloading_system(
     );
 
     for pos in to_unload {
+        // chunk มีสระทับอยู่ — เลื่อน unload ออกไปก่อน ให้สระ flush สถานะ
+        // สุดท้ายลงบล็อกให้เสร็จ (tick หน้า) แล้วค่อย unload รอบถัดไป
+        if pools.mark_dying_overlapping(pos) {
+            continue;
+        }
         if let Some(entity) = world.generated_chunks.remove(&pos) {
             commands.entity(entity).despawn();
         }
@@ -2473,6 +2710,8 @@ pub fn remesh_chunks(
             let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors, Some(&chunk_data.chiseled_blocks));
             chunk_data.num_vertices = s.total_vertices();
             chunk_data.num_indices = s.total_indices();
+            chunk_data.num_water_vertices = s.water.positions.len();
+            chunk_data.num_water_indices = s.water.indices.len();
             set = s;
         }
 
@@ -2509,6 +2748,87 @@ pub fn remesh_chunks(
     skipped
 }
 
+/// remesh เฉพาะชั้นน้ำ (สลับ asset ในที่เดิม) — ถูกต้องเฉพาะเมื่อการเปลี่ยนแปลง
+/// ทั้งหมดตั้งแต่ mesh ล่าสุดเป็น Air↔WaterN / WaterN↔WaterM เท่านั้น
+/// (น้ำไม่ occlude AO และ visibility ของ solid มอง Air/น้ำเหมือนกัน —
+/// ชั้นอื่นจึงไม่เปลี่ยนแม้แต่ byte เดียว มี parity test คุม)
+/// fluid sim การันตีเงื่อนไขนี้เพราะเขียนบล็อกผ่าน vol_to_block เท่านั้น
+/// คืนรายการ chunk ที่ remesh ไม่ได้เพราะเพื่อนบ้านยังไม่โหลด
+pub fn remesh_water_only(
+    commands: &mut Commands,
+    world: &mut VoxelWorld,
+    mp: &mut MeshingParams,
+    chunk_positions: impl IntoIterator<Item = IVec2>,
+) -> Vec<IVec2> {
+    let mut skipped = Vec::new();
+    for chunk_pos in chunk_positions {
+        let neighbors_pos = chunk_neighbors(chunk_pos);
+        if !neighbors_pos.iter().all(|p| world.chunks.contains_key(p)) {
+            skipped.push(chunk_pos);
+            continue;
+        }
+        let neighbors = neighbors_pos.map(|p| world.chunks.get(&p).unwrap().blocks.clone());
+
+        let transform = Transform::from_xyz(
+            (chunk_pos.x * CHUNK_WIDTH as i32) as f32,
+            0.0,
+            (chunk_pos.y * CHUNK_WIDTH as i32) as f32,
+        );
+
+        let old_water_v;
+        let old_water_i;
+        let buf;
+        {
+            let Some(chunk_data) = world.chunks.get_mut(&chunk_pos) else { continue };
+            // ไม่มีน้ำและ mesh น้ำก็ว่างอยู่แล้ว → ไม่มีอะไรให้ทำ
+            if chunk_data.water_y_min > chunk_data.water_y_max && chunk_data.num_water_vertices == 0 {
+                continue;
+            }
+            let (b, observed) = create_water_mesh(
+                chunk_pos,
+                &chunk_data.blocks,
+                &neighbors,
+                chunk_data.water_y_min,
+                chunk_data.water_y_max,
+            );
+            // tighten แถบ y ตามน้ำที่เจอจริง (band เป็น grow-only ระหว่าง rebuild)
+            match observed {
+                Some((lo, hi)) => {
+                    chunk_data.water_y_min = lo;
+                    chunk_data.water_y_max = hi;
+                }
+                None => {
+                    chunk_data.water_y_min = CHUNK_HEIGHT;
+                    chunk_data.water_y_max = 0;
+                }
+            }
+            old_water_v = chunk_data.num_water_vertices;
+            old_water_i = chunk_data.num_water_indices;
+            let nv = b.positions.len();
+            let ni = b.indices.len();
+            chunk_data.num_vertices = (chunk_data.num_vertices + nv) - old_water_v;
+            chunk_data.num_indices = (chunk_data.num_indices + ni) - old_water_i;
+            chunk_data.num_water_vertices = nv;
+            chunk_data.num_water_indices = ni;
+            buf = b;
+        }
+        world.total_vertices = (world.total_vertices + buf.positions.len()) - old_water_v;
+        world.total_indices = (world.total_indices + buf.indices.len()) - old_water_i;
+
+        update_single_mesh_entity(
+            commands,
+            &mut world.water_chunks,
+            &mut mp.meshes,
+            &mp.mesh_query,
+            &mp.water_material.0,
+            chunk_pos,
+            buf,
+            transform,
+        );
+    }
+    skipped
+}
+
 pub fn block_interaction_system(
     mut commands: Commands,
     mut world: ResMut<VoxelWorld>,
@@ -2525,6 +2845,7 @@ pub fn block_interaction_system(
         Option<Res<bevy_renet::RenetClient>>,
         ResMut<crate::network::PendingNetEdits>,
     ),
+    mut pools: ResMut<ActivePools>,
 ) {
     // Hotbar: กด 1-0, -, = และ T เลือกบล็อก
     const HOTBAR: [(KeyCode, BlockType); 13] = [
@@ -2637,6 +2958,10 @@ pub fn block_interaction_system(
     let Some(edit) = edit else { return };
     let Some(tp) = apply_block_edit(&mut world, &edit) else { return };
 
+    // แก้บล็อกแตะเขตสระ = โครงสร้างรอบน้ำเปลี่ยน บัญชีสระเชื่อไม่ได้แล้ว —
+    // ทิ้งสระ (ถ้าน้ำยังขยับ เดี๋ยว form ใหม่ในรูปทรงใหม่เอง)
+    pools.invalidate_touching(tp);
+
     // ส่งเข้า network: host เอาไป broadcast, client เอาไปส่ง RequestEdit หา host
     if net_server.is_some() || net_client.is_some() {
         net_out.0.push_back((None, edit));
@@ -2674,11 +2999,489 @@ pub fn block_interaction_system(
 #[derive(Resource, Default)]
 pub struct ActiveFluids(pub std::collections::HashSet<IVec3>);
 
+// --------------------------------------------------------
+// Ephemeral pools — สระชั่วคราวสำหรับระบาย/เกลี่ยน้ำผืนใหญ่
+// เกิดเฉพาะตอนน้ำผืนใหญ่กำลังขยับ ใช้บัญชีปริมาตรรวม + เลขระดับผิวตัวเดียว
+// แทน simulate ราย cell; นิ่งเมื่อไรทิ้ง object ทันที (บล็อกในโลกคือ state จริง)
+// conserve volume เป๊ะทุกหน่วย — ห้ามมี infinite source (ทิศทาง design โปรเจกต์)
+// --------------------------------------------------------
+
+/// จำนวน active cells ต่อ tick ที่เริ่มลอง form pool (ต่ำกว่านี้ cellular เอาอยู่)
+const POOL_TRIGGER_ACTIVE: usize = 400;
+/// เพดาน cells ต่อสระ — เกิน = ไม่ form (ทะเล/มหาสมุทรอยู่ cellular ตามเดิม)
+const POOL_CELL_CAP: usize = 150_000;
+const POOL_COLUMN_CAP: usize = 32_768;
+/// สระเล็กกว่านี้ไม่คุ้มค่า overhead
+const POOL_MIN_COLUMNS: usize = 16;
+const MAX_POOLS: usize = 4;
+/// tick ที่นิ่งสนิทติดกันก่อน retire (20 tick = ~2 วินาที)
+const POOL_IDLE_TICKS: u32 = 20;
+/// งบ set_block ต่อ tick รวมทุกสระ (คุมทั้ง CPU และปริมาณ delta บน network)
+const POOL_SWEEP_BUDGET: usize = 2_048;
+/// เพดานรายการจุดรั่วต่อสระ
+const POOL_MAX_LEAKS: usize = 1_024;
+
+/// run น้ำต่อเนื่องหนึ่งช่วงในคอลัมน์ (สระจับแค่ run เดียวต่อคอลัมน์ —
+/// น้ำช่วงอื่นในคอลัมน์เดียวกัน เช่นแอ่งบนหิ้งถ้ำ ปล่อยให้ cellular ดูแล)
+pub struct PoolColumn {
+    pub y_bottom: i32,
+    pub y_top: i32,
+}
+
+/// จุดเปลี่ยนความชันของฟังก์ชันความจุ cap(S) — ไว้ solve ระดับผิวจาก volume
+/// แบบ O(log n) (cap เป็น piecewise linear ของระดับ S หน่วย 1/8 บล็อก)
+struct CapSegment {
+    s_start: i64,
+    cap_start: u64,
+    active: i64,
+}
+
+pub struct Pool {
+    pub columns: HashMap<(i32, i32), PoolColumn>,
+    pub column_order: Vec<(i32, i32)>,
+    /// ปริมาตรจริงในบัญชี หน่วย 1/8 บล็อก — แหล่งความจริงเดียวระหว่างสระมีชีวิต
+    pub volume: u64,
+    /// ระดับผิวเป้าหมาย fixed-point (y*8 + เศษ)
+    pub surface: i64,
+    /// ระดับที่บล็อกในโลกสะท้อนอยู่ (sweep ไล่ให้เท่า surface ทีละ lap)
+    pub applied_surface: i64,
+    /// ระดับผิว ณ ตอนเริ่ม lap ปัจจุบัน — lap จบถึงตั้ง applied เป็นค่านี้
+    /// (surface อาจขยับระหว่าง lap คอลัมน์ต้นๆ จะเขียนด้วยค่าเก่า)
+    lap_surface: i64,
+    pub sweep_cursor: usize,
+    pub min: IVec3,
+    pub max: IVec3,
+    pub chunks: std::collections::HashSet<IVec2>,
+    pub leaks: Vec<IVec3>,
+    pub idle_ticks: u32,
+    /// โดน invalidate — flush สถานะสุดท้ายแล้ว drop ใน tick ถัดไป
+    pub dying: bool,
+    /// absorption เพิ่ม volume นอก tick_pools — ต้อง recompute ผิวแม้ volume
+    /// ไม่ต่างจากต้น tick
+    volume_dirty: bool,
+    segments: Vec<CapSegment>,
+}
+
+#[derive(Resource, Default)]
+pub struct ActivePools(pub Vec<Pool>);
+
+impl ActivePools {
+    /// cell นี้เป็นสมาชิกสระไหนไหม — AABB ก่อน (ตัดเกือบทุก call) ค่อย lookup คอลัมน์
+    pub fn member_of(&self, p: IVec3) -> Option<usize> {
+        for (i, pool) in self.0.iter().enumerate() {
+            if pool.dying { continue; }
+            if p.x < pool.min.x || p.x > pool.max.x
+                || p.y < pool.min.y || p.y > pool.max.y
+                || p.z < pool.min.z || p.z > pool.max.z {
+                continue;
+            }
+            if let Some(col) = pool.columns.get(&(p.x, p.z)) {
+                if p.y >= col.y_bottom && p.y <= col.y_top {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    /// edit แตะเขตสระ (AABB พองขอบ 1) → ทิ้งสระ (โครงสร้างรอบน้ำเปลี่ยนแล้ว
+    /// บัญชี capacity เชื่อไม่ได้อีก — ถ้าน้ำยังขยับเดี๋ยว form ใหม่เอง)
+    pub fn invalidate_touching(&mut self, p: IVec3) {
+        for pool in &mut self.0 {
+            if p.x >= pool.min.x - 1 && p.x <= pool.max.x + 1
+                && p.y >= pool.min.y - 1 && p.y <= pool.max.y + 1
+                && p.z >= pool.min.z - 1 && p.z <= pool.max.z + 1 {
+                pool.dying = true;
+            }
+        }
+    }
+
+    /// chunk นี้มีสระทับอยู่ไหม — ถ้ามี ตั้ง dying แล้วคืน true
+    /// (ผู้เรียกควรเลื่อน unload chunk ออกไปก่อนจนสระ flush เสร็จ)
+    pub fn mark_dying_overlapping(&mut self, cp: IVec2) -> bool {
+        let mut any = false;
+        for pool in &mut self.0 {
+            if pool.chunks.contains(&cp) {
+                pool.dying = true;
+                any = true;
+            }
+        }
+        any
+    }
+}
+
+/// สร้างตารางความจุสะสมจากคอลัมน์ทั้งหมด (ครั้งเดียวตอน form)
+fn build_cap_segments(columns: &HashMap<(i32, i32), PoolColumn>) -> Vec<CapSegment> {
+    let mut events: Vec<(i64, i64)> = Vec::with_capacity(columns.len() * 2);
+    for col in columns.values() {
+        events.push((8 * col.y_bottom as i64, 1));
+        events.push((8 * (col.y_top as i64 + 1), -1));
+    }
+    events.sort_unstable();
+    let mut segs: Vec<CapSegment> = Vec::new();
+    let mut active = 0i64;
+    let mut cap = 0u64;
+    let mut last_s = events.first().map(|e| e.0).unwrap_or(0);
+    let mut idx = 0;
+    while idx < events.len() {
+        let s = events[idx].0;
+        cap += (active.max(0) as u64) * ((s - last_s) as u64);
+        while idx < events.len() && events[idx].0 == s {
+            active += events[idx].1;
+            idx += 1;
+        }
+        segs.push(CapSegment { s_start: s, cap_start: cap, active });
+        last_s = s;
+    }
+    segs
+}
+
+/// ความจุรวมใต้ระดับ S
+fn eval_cap(segs: &[CapSegment], s: i64) -> u64 {
+    let i = segs.partition_point(|seg| seg.s_start <= s);
+    if i == 0 {
+        return 0;
+    }
+    let seg = &segs[i - 1];
+    seg.cap_start + (seg.active.max(0) as u64) * ((s - seg.s_start).max(0) as u64)
+}
+
+/// ระดับผิวมากสุดที่ cap(S) <= volume (caller ต้องเช็ค volume เกินความจุรวมเอง)
+fn surface_for_volume(segs: &[CapSegment], volume: u64) -> i64 {
+    let i = segs.partition_point(|seg| seg.cap_start <= volume);
+    if i == 0 {
+        return segs.first().map(|s| s.s_start).unwrap_or(0);
+    }
+    let seg = &segs[i - 1];
+    if seg.active <= 0 {
+        return seg.s_start;
+    }
+    seg.s_start + ((volume - seg.cap_start) / seg.active as u64) as i64
+}
+
+/// พยายาม form สระจาก seed (ผิวน้ำลึกที่ settled) — คืน None ถ้าไม่เข้าเกณฑ์
+/// เดินแบบ scanline ราย "คอลัมน์" ไม่ใช่ราย cell: หา run น้ำในคอลัมน์แล้วแผ่ 4 ทิศ
+fn try_form_pool(seed: IVec3, world: &VoxelWorld, pools: &ActivePools) -> Option<Pool> {
+    if !world.get_block(seed.x, seed.y, seed.z).is_water() || pools.member_of(seed).is_some() {
+        return None;
+    }
+
+    let mut visited: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<(i32, i32, i32)> = std::collections::VecDeque::new();
+    let mut columns: HashMap<(i32, i32), PoolColumn> = HashMap::new();
+    let mut column_order: Vec<(i32, i32)> = Vec::new();
+    let mut chunks: std::collections::HashSet<IVec2> = std::collections::HashSet::new();
+    let mut leaks: Vec<IVec3> = Vec::new();
+    let mut volume: u64 = 0;
+    let mut cells: usize = 0;
+    let mut min = seed;
+    let mut max = seed;
+
+    visited.insert((seed.x, seed.z));
+    queue.push_back((seed.x, seed.z, seed.y));
+
+    while let Some((x, z, y_hint)) = queue.pop_front() {
+        // ส่วนของสระที่อยู่ใน chunk ที่ไม่โหลด = มองไม่เห็น นับบัญชีไม่ได้ — ยกเลิก
+        let cp = IVec2::new(x.div_euclid(CHUNK_WIDTH as i32), z.div_euclid(CHUNK_WIDTH as i32));
+        if !world.chunks.contains_key(&cp) {
+            return None;
+        }
+        if !world.get_block(x, y_hint, z).is_water() {
+            continue;
+        }
+
+        // run น้ำต่อเนื่องรอบ y_hint
+        let mut y_bottom = y_hint;
+        while y_bottom > 0 && world.get_block(x, y_bottom - 1, z).is_water() {
+            y_bottom -= 1;
+        }
+        let mut y_top = y_hint;
+        while y_top + 1 < CHUNK_HEIGHT as i32 && world.get_block(x, y_top + 1, z).is_water() {
+            y_top += 1;
+        }
+
+        // ใต้ run เป็นอากาศ = คอลัมน์นี้คือน้ำที่กำลังร่วง (น้ำตก) —
+        // ไม่รับเป็นสมาชิก แต่เป็นจุดรั่วของสระ ให้ cellular จัดการต่อ
+        if y_bottom > 0 && world.get_block(x, y_bottom - 1, z) == BlockType::Air {
+            leaks.push(IVec3::new(x, y_bottom, z));
+            continue;
+        }
+
+        for y in y_bottom..=y_top {
+            volume += get_water_vol(world.get_block(x, y, z)) as u64;
+        }
+        cells += (y_top - y_bottom + 1) as usize;
+        if cells > POOL_CELL_CAP || columns.len() >= POOL_COLUMN_CAP {
+            return None;
+        }
+
+        columns.insert((x, z), PoolColumn { y_bottom, y_top });
+        column_order.push((x, z));
+        chunks.insert(cp);
+        min = min.min(IVec3::new(x, y_bottom, z));
+        max = max.max(IVec3::new(x, y_top, z));
+
+        // แผ่ 4 ทิศ: เชื่อมที่ y สูงสุดของ run ที่ฝั่งโน้นเป็นน้ำ
+        // ระหว่างสแกนเก็บช่องอากาศข้างลำตัว (จุดรั่ว/ชายฝั่งใต้ระดับผิว)
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let (nx, nz) = (x + dx, z + dz);
+            let mut connect_y = None;
+            for y in (y_bottom..=y_top).rev() {
+                let nb = world.get_block(nx, y, nz);
+                if nb.is_water() {
+                    if connect_y.is_none() {
+                        connect_y = Some(y);
+                    }
+                } else if nb == BlockType::Air && leaks.len() < POOL_MAX_LEAKS {
+                    leaks.push(IVec3::new(nx, y, nz));
+                }
+            }
+            if let Some(y) = connect_y {
+                if visited.insert((nx, nz)) {
+                    queue.push_back((nx, nz, y));
+                }
+            }
+        }
+    }
+
+    if column_order.len() < POOL_MIN_COLUMNS {
+        return None;
+    }
+
+    leaks.sort_unstable_by_key(|l| (l.x, l.y, l.z));
+    leaks.dedup();
+
+    let segments = build_cap_segments(&columns);
+    let surface = surface_for_volume(&segments, volume);
+    Some(Pool {
+        columns,
+        column_order,
+        volume,
+        surface,
+        // เชื่อสถานะโลกตอน form ว่า ~ตรงกับ surface ที่คำนวณ (น้ำ settled อยู่แล้ว)
+        // ถ้าคลาดเคลื่อนเล็กน้อย sweep รอบแรกจะเก็บให้เอง
+        applied_surface: surface + 1, // บังคับ sweep ตรวจหนึ่ง lap แรกเสมอ
+        lap_surface: surface,
+        sweep_cursor: 0,
+        min,
+        max,
+        chunks,
+        leaks,
+        idle_ticks: 0,
+        dying: false,
+        volume_dirty: false,
+        segments,
+    })
+}
+
+/// เขียนบล็อกน้ำในนามสระ: set_block + delta (host) + คิว remesh น้ำ + คืนสำเร็จไหม
+fn pool_write(
+    world: &mut VoxelWorld,
+    pos: IVec3,
+    block: BlockType,
+    is_host: bool,
+    net_out: &mut crate::network::PendingNetEdits,
+    remesh_queue: &mut std::collections::HashSet<IVec2>,
+) -> bool {
+    if !world.set_block(pos.x, pos.y, pos.z, block) {
+        return false;
+    }
+    if is_host {
+        net_out.0.push_back((None, crate::network::BlockEdit::SetBlock {
+            pos: pos.to_array(),
+            block: block as u8,
+        }));
+    }
+    remesh_queue.extend(edit_affected_chunks(pos));
+    true
+}
+
+/// เขียนสถานะสุดท้ายของสระทั้งผืนตาม ledger (ตอน dying — ครั้งเดียว ไม่คิดงบ)
+/// เศษ integer จากการ solve ระดับ (<8 ต่อสระ) เทเข้า cell แถวผิวไม่ให้น้ำหาย
+fn flush_pool(
+    pool: &Pool,
+    world: &mut VoxelWorld,
+    is_host: bool,
+    net_out: &mut crate::network::PendingNetEdits,
+    remesh_queue: &mut std::collections::HashSet<IVec2>,
+    active_fluids: &mut ActiveFluids,
+) {
+    let mut leftover = pool.volume.saturating_sub(eval_cap(&pool.segments, pool.surface));
+    let surface_cell_y = pool.surface.div_euclid(8);
+    for &(cx, cz) in &pool.column_order {
+        let col = &pool.columns[&(cx, cz)];
+        for y in col.y_bottom..=col.y_top {
+            let mut target = (pool.surface - 8 * y as i64).clamp(0, 8) as u8;
+            if leftover > 0 && y as i64 == surface_cell_y && target < 8 {
+                let add = leftover.min((8 - target) as u64);
+                target += add as u8;
+                leftover -= add;
+            }
+            let cur = world.get_block(cx, y, cz);
+            // ห้ามทับ solid ที่ผู้เล่นเพิ่งวางแทรกเข้ามา
+            if !(cur == BlockType::Air || cur.is_water()) {
+                continue;
+            }
+            if get_water_vol(cur) != target {
+                let p = IVec3::new(cx, y, cz);
+                pool_write(world, p, vol_to_block(target), is_host, net_out, remesh_queue);
+                // ปลุกให้ cellular รับช่วงต่อ — สระตายแล้วน้ำอาจยังต้องขยับ
+                active_fluids.0.insert(p);
+            }
+        }
+    }
+    if leftover > 0 {
+        warn!("pool flush เหลือเศษ {} หน่วย (ผิวเต็มพอดี) — ยอมทิ้ง", leftover);
+    }
+}
+
+/// tick รายสระ: outflow ที่จุดรั่ว → recompute ระดับ → sweep เขียนแถบผิว → retire
+fn tick_pools(
+    pools: &mut ActivePools,
+    world: &mut VoxelWorld,
+    active_fluids: &mut ActiveFluids,
+    remesh_queue: &mut std::collections::HashSet<IVec2>,
+    net_out: &mut crate::network::PendingNetEdits,
+    is_host: bool,
+) {
+    let mut budget = POOL_SWEEP_BUDGET;
+    let mut i = 0;
+    while i < pools.0.len() {
+        if pools.0[i].dying {
+            let pool = pools.0.swap_remove(i);
+            info!(
+                "pool ถูกทิ้ง: {} คอลัมน์ เหลือ {} หน่วย",
+                pool.column_order.len(), pool.volume
+            );
+            flush_pool(&pool, world, is_host, net_out, remesh_queue, active_fluids);
+            continue;
+        }
+
+        let pool = &mut pools.0[i];
+        let vol_before = pool.volume;
+
+        // --- ระบายออกที่จุดรั่ว (อัตราตามความลึกหัวน้ำ, เติมได้แค่ถึงระดับผิว) ---
+        let mut li = 0;
+        while li < pool.leaks.len() {
+            let l = pool.leaks[li];
+            if pool.volume == 0 {
+                break;
+            }
+            let head = pool.surface - 8 * l.y as i64;
+            let fill_cap = head.clamp(0, 8) as u8;
+            let lb = world.get_block(l.x, l.y, l.z);
+            let leak_open = lb == BlockType::Air || lb.is_water();
+            if !leak_open || fill_cap == 0 {
+                // โดนอุด (ผู้เล่นสร้างเขื่อนปิด) หรือลอยเหนือระดับผิวแล้ว — ตัดทิ้ง
+                pool.leaks.swap_remove(li);
+                continue;
+            }
+            let cur = get_water_vol(lb);
+            if cur >= fill_cap {
+                li += 1;
+                continue;
+            }
+            let rate = (1 + head / 16).clamp(1, 8) as u8;
+            let t = rate.min(fill_cap - cur).min(pool.volume.min(8) as u8);
+            if t > 0 {
+                let p_new = vol_to_block(cur + t);
+                if pool_write(world, l, p_new, is_host, net_out, remesh_queue) {
+                    pool.volume -= t as u64;
+                    // ปลุก cellular รับน้ำที่จุดรั่วไปไหลต่อ
+                    active_fluids.0.insert(l);
+                    for dir in [
+                        IVec3::new(1, 0, 0), IVec3::new(-1, 0, 0), IVec3::new(0, 1, 0),
+                        IVec3::new(0, -1, 0), IVec3::new(0, 0, 1), IVec3::new(0, 0, -1),
+                    ] {
+                        active_fluids.0.insert(l + dir);
+                    }
+                } else {
+                    pool.leaks.swap_remove(li);
+                    continue;
+                }
+            }
+            li += 1;
+        }
+
+        // --- ระดับผิวใหม่จากบัญชี ---
+        if pool.volume != vol_before || pool.volume_dirty {
+            pool.volume_dirty = false;
+            let total_cap = pool.segments.last().map(|s| s.cap_start).unwrap_or(0);
+            if pool.volume > total_cap {
+                // น้ำจะล้นเกินขอบสระตอน form — สระเป็นตัวเร่งขาลง/เกลี่ยเท่านั้น
+                // ขาขึ้นคืนให้ cellular แล้วค่อย form ใหม่ในขอบเขตใหม่
+                pool.dying = true;
+                i += 1;
+                continue;
+            }
+            pool.surface = surface_for_volume(&pool.segments, pool.volume);
+        }
+
+        // --- sweep: ไล่เขียนบล็อกให้ตรง surface ทีละ lap ตามงบ ---
+        if pool.applied_surface != pool.surface && budget > 0 {
+            if pool.sweep_cursor == 0 {
+                pool.lap_surface = pool.surface;
+            }
+            let total = pool.column_order.len();
+            while budget > 0 {
+                let (cx, cz) = pool.column_order[pool.sweep_cursor];
+                let col = &pool.columns[&(cx, cz)];
+                for y in (col.y_bottom..=col.y_top).rev() {
+                    let target = (pool.lap_surface - 8 * y as i64).clamp(0, 8) as u8;
+                    let cur = world.get_block(cx, y, cz);
+                    if !(cur == BlockType::Air || cur.is_water()) {
+                        continue; // solid แทรก — ไม่แตะ
+                    }
+                    if get_water_vol(cur) == target {
+                        continue;
+                    }
+                    let p = IVec3::new(cx, y, cz);
+                    if pool_write(world, p, vol_to_block(target), is_host, net_out, remesh_queue) {
+                        budget = budget.saturating_sub(1);
+                    }
+                    if budget == 0 {
+                        break;
+                    }
+                }
+                if budget == 0 && pool.sweep_cursor != 0 {
+                    break; // คอลัมน์นี้อาจยังไม่จบ — cursor ค้างไว้ทำต่อ tick หน้า
+                }
+                pool.sweep_cursor = (pool.sweep_cursor + 1) % total;
+                if pool.sweep_cursor == 0 {
+                    // ครบ lap — โลกตรงกับระดับ ณ ตอนเริ่ม lap แล้ว
+                    pool.applied_surface = pool.lap_surface;
+                    break;
+                }
+            }
+        }
+
+        // --- นิ่งครบกำหนด = retire เงียบๆ (บล็อกตรง ledger แล้ว ไม่ต้อง flush) ---
+        let quiescent = pool.volume == vol_before && pool.applied_surface == pool.surface;
+        if quiescent {
+            pool.idle_ticks += 1;
+        } else {
+            pool.idle_ticks = 0;
+        }
+        if pool.idle_ticks >= POOL_IDLE_TICKS {
+            info!(
+                "pool retire: {} คอลัมน์ ปริมาตร {} หน่วย ผิว y*8={}",
+                pool.column_order.len(), pool.volume, pool.surface
+            );
+            pools.0.swap_remove(i);
+            continue;
+        }
+        i += 1;
+    }
+}
+
+/// เพดาน remesh น้ำต่อ tick — เส้นทางเฉพาะน้ำถูกกว่าตัวเต็มมาก (สแกนแค่แถบ y
+/// ที่มีน้ำ ไม่มี AO/greedy) เลยตั้งสูงกว่าเพดานเดิม 16 ได้สบาย
+const WATER_REMESH_CAP: usize = 64;
+
 fn queue_remesh(pos: IVec3, remesh_queue: &mut std::collections::HashSet<IVec2>) {
-    remesh_queue.insert(IVec2::new(
-        pos.x.div_euclid(CHUNK_WIDTH as i32),
-        pos.z.div_euclid(CHUNK_WIDTH as i32),
-    ));
+    // รวมเพื่อนบ้านเมื่อแตะขอบ chunk — ผิวน้ำเรียบ (drop smoothing) สุ่มมุมข้าม
+    // seam ถ้าไม่ remesh ฝั่งโน้นด้วยมุมผิวจะค้างระดับเก่า (ของถูกลงแล้วทำได้)
+    remesh_queue.extend(edit_affected_chunks(pos));
 }
 
 /// ปลุกน้ำตรงตะเข็บระหว่าง chunk ที่เพิ่งโหลดกับเพื่อนบ้านที่โหลดอยู่แล้ว —
@@ -2840,9 +3643,10 @@ pub fn fluid_simulation_system(
     mut net_out: ResMut<crate::network::PendingNetEdits>,
     time: Res<Time>,
     settings: Res<crate::GameSettings>,
+    mut pools: ResMut<ActivePools>,
     mut tick_accum: Local<f32>,
 ) {
-    if active_fluids.0.is_empty() && remesh_queue.is_empty() {
+    if active_fluids.0.is_empty() && remesh_queue.is_empty() && pools.0.is_empty() {
         return;
     }
     // น้ำ simulate เป็นจังหวะคงที่ ไม่ใช่ทุกเฟรม — คาบปรับได้จาก settings UI
@@ -2868,8 +3672,15 @@ pub fn fluid_simulation_system(
         active_fluids.0.extend(overflow);
     }
 
+    // seed สำหรับลอง form pool ปลายเฟรม (cell ผิวน้ำลึกที่นิ่ง)
+    let mut pool_seed: Option<IVec3> = None;
+
     // Process fluids
     for pos in current_active.into_iter() {
+        // cell สมาชิกสระ: ข้าม cellular ทั้งหมด — สระจัดการผ่านบัญชีรวมเอง
+        if pools.member_of(pos).is_some() {
+            continue;
+        }
         let block = world.get_block(pos.x, pos.y, pos.z);
 
         // น้ำเป็น finite แท้ (conserve volume เสมอ ไม่มี infinite source) —
@@ -2883,8 +3694,18 @@ pub fn fluid_simulation_system(
         // Try to flow down first
         if pos.y > 0 {
             let b_pos = IVec3::new(pos.x, pos.y - 1, pos.z);
+            // เทลงสระ: เข้าบัญชีรวมแทนการเขียนบล็อก (sweep ของสระจะสะท้อน
+            // ระดับที่ขึ้นเอง) — conserve โดยโครงสร้าง
+            if let Some(pi) = pools.member_of(b_pos) {
+                let pool = &mut pools.0[pi];
+                pool.volume += current_vol as u64;
+                pool.volume_dirty = true;
+                pool.idle_ticks = 0;
+                current_vol = 0;
+                moved = true;
+            }
             let b_block = world.get_block(b_pos.x, b_pos.y, b_pos.z);
-            if b_block == BlockType::Air || b_block.is_water() {
+            if current_vol > 0 && (b_block == BlockType::Air || b_block.is_water()) {
                 let b_vol = get_water_vol(b_block);
                 if b_vol < 8 {
                     let transfer = current_vol.min(8 - b_vol);
@@ -2913,6 +3734,16 @@ pub fn fluid_simulation_system(
             // (ไม่มีทิศ = เป็นแอ่งจริง นอนนิ่งตามเดิม)
             for dir in find_flow_dirs_finite(pos, &world, current_vol) {
                 let n_pos = pos + dir;
+                // เดินเข้าเขตสระ = ถูกดูดเข้าบัญชี
+                if let Some(pi) = pools.member_of(n_pos) {
+                    let pool = &mut pools.0[pi];
+                    pool.volume += 1;
+                    pool.volume_dirty = true;
+                    pool.idle_ticks = 0;
+                    current_vol = 0;
+                    moved = true;
+                    break;
+                }
                 let n_block = world.get_block(n_pos.x, n_pos.y, n_pos.z);
                 if n_block.is_solid() { continue; }
                 let n_vol = get_water_vol(n_block);
@@ -2962,6 +3793,15 @@ pub fn fluid_simulation_system(
                 // ให้ทันตา ไม่ค้างเป็นสายนิ่งๆ (ยังนิ่งเมื่อเท่ากัน ไม่ ping-pong
                 // เพราะเงื่อนไขเข้าลูปยังต้องต่าง ≥2 เหมือนเดิม)
                 let transfer = (current_vol - t_vol) / 2;
+                // เกลี่ยเข้าเขตสระ = ถูกดูดเข้าบัญชี
+                if let Some(pi) = pools.member_of(target) {
+                    let pool = &mut pools.0[pi];
+                    pool.volume += transfer as u64;
+                    pool.volume_dirty = true;
+                    pool.idle_ticks = 0;
+                    current_vol -= transfer;
+                    moved = true;
+                } else {
                 let new_t_block = vol_to_block(t_vol + transfer);
                 // เช็คผล set ก่อนหัก volume เหมือนตอนไหลลง
                 if world.set_block(target.x, target.y, target.z, new_t_block) {
@@ -2975,6 +3815,7 @@ pub fn fluid_simulation_system(
                     next_active.insert(target);
                     moved = true;
                 }
+                } // else: ปลายทางไม่ใช่สระ
             }
         }
 
@@ -3001,18 +3842,163 @@ pub fn fluid_simulation_system(
             ] {
                 next_active.insert(pos + dir);
             }
+        } else if pool_seed.is_none()
+            && current_vol == 8
+            && world.get_block(pos.x, pos.y + 1, pos.z) == BlockType::Air
+            && pos.y > 0
+            && world.get_block(pos.x, pos.y - 1, pos.z).is_water()
+        {
+            // cell ผิวน้ำลึกที่นิ่งสนิท — ผู้ท้าชิงตำแหน่ง seed ของสระ
+            pool_seed = Some(pos);
         }
     }
 
     active_fluids.0.extend(next_active);
 
-    // Meshing Limit (สูงสุด 16 chunk ต่อเฟรม กันเฟรมค้าง — ที่เหลือรอเฟรมถัดไป)
+    // --- Ephemeral pools ---
+    // น้ำขยับพร้อมกันเยอะ = ผืนใหญ่กำลังเกลี่ย/ระบาย → ยกไปเข้าระบบสระ
+    // (มากสุด 1 สระใหม่ต่อ tick — formation BFS มีค่าใช้จ่ายก้อนเดียวจบ)
+    if active_fluids.0.len() > POOL_TRIGGER_ACTIVE && pools.0.len() < MAX_POOLS {
+        if let Some(seed) = pool_seed {
+            if let Some(pool) = try_form_pool(seed, &world, &pools) {
+                info!(
+                    "form pool: {} คอลัมน์ ปริมาตร {} หน่วย ผิว y*8={} จุดรั่ว {}",
+                    pool.column_order.len(), pool.volume, pool.surface, pool.leaks.len()
+                );
+                pools.0.push(pool);
+            }
+        }
+    }
+    tick_pools(
+        &mut pools, &mut world, &mut active_fluids,
+        &mut remesh_queue, &mut net_out, is_host,
+    );
+
+    // Meshing Limit (ที่เหลือรอ tick ถัดไป) — ใช้เส้นทาง remesh เฉพาะชั้นน้ำ:
+    // fluid sim เขียนแค่ Air↔WaterN จึงไม่กระทบ mesh ชั้นอื่นโดยพิสูจน์แล้ว
     let mut chunks = remesh_queue.drain().collect::<Vec<_>>();
     chunks.sort_by_key(|c| c.x * c.x + c.y * c.y);
-    let overflow = chunks.split_off(chunks.len().min(16));
+    let overflow = chunks.split_off(chunks.len().min(WATER_REMESH_CAP));
     remesh_queue.extend(overflow);
 
     // chunk ที่เพื่อนบ้านยังไม่โหลด remesh ไม่ได้ — คืนเข้าคิวไว้ลองใหม่
-    let skipped = remesh_chunks(&mut commands, &mut world, &mut mp, chunks);
+    let skipped = remesh_water_only(&mut commands, &mut world, &mut mp, chunks);
     remesh_queue.extend(skipped);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set(blocks: &mut [BlockType; CHUNK_VOLUME], x: usize, y: usize, z: usize, b: BlockType) {
+        blocks[ChunkData::get_index(x, y, z)] = b;
+    }
+
+    /// คณิตบัญชีสระ: ความจุสะสม + solve ระดับผิวจากปริมาตร ต้อง invertible
+    #[test]
+    fn pool_surface_solve() {
+        // สองคอลัมน์เท่ากัน y 0..=1 (จุคอลัมน์ละ 16 หน่วย)
+        let mut cols: HashMap<(i32, i32), PoolColumn> = HashMap::new();
+        cols.insert((0, 0), PoolColumn { y_bottom: 0, y_top: 1 });
+        cols.insert((1, 0), PoolColumn { y_bottom: 0, y_top: 1 });
+        let segs = build_cap_segments(&cols);
+        assert_eq!(eval_cap(&segs, 0), 0);
+        assert_eq!(eval_cap(&segs, 8), 16);
+        assert_eq!(eval_cap(&segs, 16), 32);
+        assert_eq!(surface_for_volume(&segs, 16), 8);
+        assert_eq!(surface_for_volume(&segs, 20), 10);
+        assert_eq!(surface_for_volume(&segs, 32), 16);
+
+        // ก้นสระไม่เท่ากัน: A ลึก (y 0..=3), B ตื้น (y 2..=3)
+        let mut cols2: HashMap<(i32, i32), PoolColumn> = HashMap::new();
+        cols2.insert((0, 0), PoolColumn { y_bottom: 0, y_top: 3 });
+        cols2.insert((1, 0), PoolColumn { y_bottom: 2, y_top: 3 });
+        let segs2 = build_cap_segments(&cols2);
+        // น้ำ 16 หน่วยพอดีเต็ม A ถึงระดับก้น B
+        assert_eq!(surface_for_volume(&segs2, 16), 16);
+        // เกินจากนั้นเกลี่ยสองคอลัมน์
+        assert_eq!(surface_for_volume(&segs2, 18), 17);
+        assert_eq!(eval_cap(&segs2, 17), 18);
+        // เต็มสระ
+        assert_eq!(surface_for_volume(&segs2, 48), 32);
+        // roundtrip ทุกปริมาตร: cap(solve(v)) <= v เสมอ (เศษ < จำนวนคอลัมน์ active)
+        for v in 0..=48u64 {
+            let s = surface_for_volume(&segs2, v);
+            assert!(eval_cap(&segs2, s) <= v, "cap(solve({v})) เกิน");
+        }
+    }
+
+    /// anchor ความถูกต้องของเส้นทาง remesh เฉพาะน้ำ: buffer น้ำจาก
+    /// create_water_mesh ต้องเป๊ะทุก byte กับ set.water ของ mesher เต็ม
+    /// ครอบเคส: หลาย vol, น้ำ-กระจก, น้ำต่าง vol ติดกัน, น้ำจม, ขอบ chunk,
+    /// เพื่อนบ้านตรง + ทแยง (drop smoothing ข้ามมุม)
+    #[test]
+    fn water_mesh_parity_with_full_mesher() {
+        let mut main = Box::new([BlockType::Air; CHUNK_VOLUME]);
+        // พื้นหิน
+        for z in 0..CHUNK_WIDTH {
+            for x in 0..CHUNK_WIDTH {
+                set(&mut main, x, 9, z, BlockType::Stone);
+            }
+        }
+        // บ่อระดับผสม เต็มถึงขอบ chunk ทุกด้าน
+        for z in 0..CHUNK_WIDTH {
+            for x in 0..CHUNK_WIDTH {
+                let b = match (x + z) % 5 {
+                    0 => BlockType::Water8,
+                    1 => BlockType::Water4,
+                    2 => BlockType::Water1,
+                    3 => BlockType::Air,
+                    _ => BlockType::Water7,
+                };
+                set(&mut main, x, 10, z, b);
+            }
+        }
+        // น้ำชั้นบน (มีน้ำจมข้างใต้)
+        for x in 3..8 {
+            set(&mut main, x, 11, 5, BlockType::Water8);
+        }
+        // กระจกแทรกในบ่อ (น้ำ-กระจกต้องวาดหน้า)
+        set(&mut main, 6, 10, 6, BlockType::Glass);
+        // เสาน้ำลอยโดด (เห็นครบทุกหน้า)
+        set(&mut main, 2, 20, 2, BlockType::Water5);
+
+        // เพื่อนบ้าน +X: น้ำ vol ต่างชิดขอบ (หน้าระหว่าง vol ต่างต้องวาด)
+        let mut nx = Box::new([BlockType::Air; CHUNK_VOLUME]);
+        for z in 0..CHUNK_WIDTH {
+            set(&mut nx, 0, 10, z, BlockType::Water6);
+        }
+        // เพื่อนบ้านทแยง +X+Z: น้ำที่มุม (ทดสอบ drop_cache ข้ามทแยง)
+        let mut nxz = Box::new([BlockType::Air; CHUNK_VOLUME]);
+        set(&mut nxz, 0, 10, 0, BlockType::Water3);
+
+        let air: Arc<[BlockType; CHUNK_VOLUME]> = Arc::from(*Box::new([BlockType::Air; CHUNK_VOLUME]));
+        let neighbors: [Arc<[BlockType; CHUNK_VOLUME]>; 8] = [
+            Arc::from(*nx),
+            air.clone(),
+            air.clone(),
+            air.clone(),
+            Arc::from(*nxz),
+            air.clone(),
+            air.clone(),
+            air.clone(),
+        ];
+
+        let chunk_pos = IVec2::new(3, -2);
+        let full = create_mesh_from_blocks(chunk_pos, &main, &neighbors, None);
+        let (water, observed) = create_water_mesh(chunk_pos, &main, &neighbors, 0, CHUNK_HEIGHT - 1);
+
+        assert!(!full.water.positions.is_empty(), "ฉากทดสอบต้องมีหน้าน้ำจริง");
+        assert_eq!(water.positions, full.water.positions);
+        assert_eq!(water.normals, full.water.normals);
+        assert_eq!(water.colors, full.water.colors);
+        assert_eq!(water.uvs, full.water.uvs);
+        assert_eq!(water.indices, full.water.indices);
+        assert_eq!(observed, Some((10, 20)));
+
+        // แถบ y แคบ (superset ของน้ำจริง) ต้องให้ผลเหมือนสแกนทั้ง chunk
+        let (banded, _) = create_water_mesh(chunk_pos, &main, &neighbors, 8, 24);
+        assert_eq!(banded.positions, full.water.positions);
+        assert_eq!(banded.indices, full.water.indices);
+    }
 }

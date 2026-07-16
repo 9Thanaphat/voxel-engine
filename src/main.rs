@@ -97,6 +97,7 @@ fn main() {
         .init_resource::<voxel::SelectedBlock>()
         .init_resource::<voxel::InteractionMode>()
         .init_resource::<voxel::ActiveFluids>()
+        .init_resource::<voxel::ActivePools>()
         .init_resource::<Paused>()
         .init_resource::<network::MultiplayerUi>()
         .init_resource::<network::PendingNetEdits>()

@@ -1008,6 +1008,7 @@ pub fn apply_incoming_net_edits(
     mut client_sync: Option<ResMut<ClientSync>>,
     server: Option<Res<RenetServer>>,
     mut active_fluids: ResMut<crate::voxel::ActiveFluids>,
+    mut pools: ResMut<crate::voxel::ActivePools>,
     mut mp: crate::voxel::MeshingParams,
 ) {
     if incoming.0.is_empty() && chunk_remesh.0.is_empty() {
@@ -1015,7 +1016,11 @@ pub fn apply_incoming_net_edits(
     }
     let is_host = server.is_some();
     let mut to_remesh: HashSet<IVec2> = HashSet::new();
+    // edit ที่ทั้งก่อน/หลังเป็นน้ำหรืออากาศ (delta จาก fluid sim ของ host เกือบทั้งหมด)
+    // เข้าเส้นทาง remesh เฉพาะชั้นน้ำที่ถูกกว่ามาก
+    let mut water_remesh: HashSet<IVec2> = HashSet::new();
     let mut edited_chunks: HashSet<IVec2> = HashSet::new();
+    let water_like = |b: crate::voxel::BlockType| b == crate::voxel::BlockType::Air || b.is_water();
 
     for edit in incoming.0.drain(..) {
         let cp = chunk_of(edit_pos(&edit));
@@ -1027,9 +1032,24 @@ pub fn apply_incoming_net_edits(
             }
             continue;
         }
+        // ต้องดู block เก่าก่อน apply ถึงจะรู้ว่าเป็น edit น้ำล้วนไหม
+        let is_water_edit = match &edit {
+            BlockEdit::SetBlock { pos, block } => {
+                water_like(world.get_block(pos[0], pos[1], pos[2]))
+                    && water_like(crate::voxel::BlockType::from_u8(*block))
+            }
+            BlockEdit::SetSubVoxel { .. } => false,
+        };
         let Some(tp) = crate::voxel::apply_block_edit(&mut world, &edit) else { continue };
-        to_remesh.extend(crate::voxel::edit_affected_chunks(tp));
-        edited_chunks.insert(cp);
+        // edit จาก client แตะเขตสระ (host เท่านั้นที่มีสระ — client list ว่างเสมอ)
+        pools.invalidate_touching(tp);
+        if is_water_edit {
+            water_remesh.extend(crate::voxel::edit_affected_chunks(tp));
+        } else {
+            to_remesh.extend(crate::voxel::edit_affected_chunks(tp));
+            // lamp light อัปเดตเฉพาะ edit ที่ไม่ใช่น้ำ (น้ำไม่มีทางแตะบล็อกไฟ)
+            edited_chunks.insert(cp);
+        }
         if let Some(cs) = client_sync.as_mut() {
             cs.edited.insert(cp);
         }
@@ -1048,13 +1068,17 @@ pub fn apply_incoming_net_edits(
         }
     }
 
-    // chunk เต็มก้อนที่เพิ่งรับจาก host และโหลดอยู่แล้ว
+    // chunk เต็มก้อนที่เพิ่งรับจาก host และโหลดอยู่แล้ว — full เสมอ
     for pos in chunk_remesh.0.drain(..) {
         to_remesh.insert(pos);
         edited_chunks.insert(pos);
     }
 
+    // full remesh ครอบชั้นน้ำอยู่แล้ว — อย่าทำ chunk เดิมซ้ำสองรอบ
+    water_remesh.retain(|c| !to_remesh.contains(c));
+
     crate::voxel::remesh_chunks(&mut commands, &mut world, &mut mp, to_remesh);
+    let _ = crate::voxel::remesh_water_only(&mut commands, &mut world, &mut mp, water_remesh);
     for cp in edited_chunks {
         crate::voxel::refresh_chunk_lamp_lights(&mut commands, &mut world, cp);
     }
