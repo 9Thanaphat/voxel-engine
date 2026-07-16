@@ -27,6 +27,8 @@ pub struct GameSettings {
     pub noise: NoiseParams,
     /// เวลาในเกม หน่วยชั่วโมง 0-24 (6 = พระอาทิตย์ขึ้น, 12 = เที่ยง, 18 = ตก)
     pub time_of_day: f32,
+    /// คาบ tick ของ fluid sim (วินาที) — น้อย = น้ำไหลเร็ว, มาก = ช้า/เบาเครื่อง
+    pub fluid_tick_seconds: f32,
 }
 
 impl Default for GameSettings {
@@ -40,6 +42,7 @@ impl Default for GameSettings {
                 octaves: 4,
             },
             time_of_day: 10.0,
+            fluid_tick_seconds: 0.1,
         }
     }
 }
@@ -47,6 +50,18 @@ impl Default for GameSettings {
 /// ตั้งเป็น true เพื่อล้างโลกแล้ว generate ใหม่ (ตอนเปลี่ยนโหมด/ค่า noise)
 #[derive(Resource, Default)]
 pub struct RegenerateWorld(pub bool);
+
+/// เปิด pause menu อยู่ไหม (ESC ในเกม) — โลกยังเดินต่อ แค่ล็อค input ผู้เล่น
+#[derive(Resource, Default)]
+pub struct Paused(pub bool);
+
+fn unpaused(paused: Res<Paused>) -> bool {
+    !paused.0
+}
+
+fn reset_paused(mut paused: ResMut<Paused>) {
+    paused.0 = false;
+}
 
 #[derive(Clone, Copy, Default, Eq, PartialEq, Debug, Hash, States)]
 pub enum GameState {
@@ -82,6 +97,7 @@ fn main() {
         .init_resource::<voxel::SelectedBlock>()
         .init_resource::<voxel::InteractionMode>()
         .init_resource::<voxel::ActiveFluids>()
+        .init_resource::<Paused>()
         .init_resource::<network::MultiplayerUi>()
         .init_resource::<network::PendingNetEdits>()
         .init_resource::<network::IncomingNetEdits>()
@@ -117,20 +133,24 @@ fn main() {
         .add_systems(
             Update,
             (
-                camera::camera_movement_system,
-                camera::camera_look_system,
-                camera::cursor_grab_system,
+                // input ผู้เล่นหยุดตอน pause แต่ HUD text อัปเดตต่อ
+                (
+                    camera::camera_movement_system,
+                    camera::camera_look_system,
+                    camera::cursor_grab_system,
+                ).run_if(unpaused),
                 ui::update_coordinate_ui_system,
                 ui::update_fps_text,
                 ui::update_block_target_text,
                 ui::update_mode_text,
             ).run_if(in_state(GameState::InGame)),
         )
+        .add_systems(OnEnter(GameState::InGame), reset_paused)
         .add_systems(
             Update,
             (
                 voxel::voxel_raycast_system,
-                voxel::block_interaction_system,
+                voxel::block_interaction_system.run_if(unpaused),
                 voxel::world_reset_system,
                 voxel::world_generation_system,
                 voxel::process_generated_chunks_system,
@@ -181,6 +201,7 @@ fn main() {
             bevy_egui::EguiPrimaryContextPass,
             (
                 ui::egui_settings_system.run_if(in_state(GameState::InGame)),
+                ui::pause_menu_system.run_if(in_state(GameState::InGame)),
                 ui::main_menu_system.run_if(in_state(GameState::MainMenu)),
                 ui::multiplayer_menu_system.run_if(in_state(GameState::MultiplayerMenu)),
             ),

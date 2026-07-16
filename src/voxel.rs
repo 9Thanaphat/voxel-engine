@@ -707,27 +707,32 @@ pub fn create_mesh_from_blocks(
                         let mut uvs = [[0f32; 2]; 4];
                         let (vx, vy, vz) = (c[0], c[1], c[2]);
                         let is_w = block.is_water();
-                        let drop = if is_w && face_id != 5 {
-                            *drop_cache.entry((vx, vy, vz)).or_insert_with(|| {
-                                let mut has_water_above = false;
-                                for dx in -1..=0 {
-                                    for dz in -1..=0 {
-                                        if sample(vx + dx, vy + 1, vz + dz).is_water() {
-                                            has_water_above = true;
-                                            break;
+                        // ผิวน้ำเรียบแบบ Terraria: กดความสูง "รายมุม vertex" —
+                        // แต่ละมุมเฉลี่ยระดับน้ำจาก column 2x2 ที่ล้อมมุมนั้นเอง
+                        // มุมที่บล็อกข้างกันแชร์กันได้ค่าเดียวกัน (ผ่าน cache)
+                        // ผิวน้ำจึงไล่ต่อเนื่องไม่เป็นขั้นบันได
+                        let mut corner_drop = [0f32; 4];
+                        if is_w && face_id != 5 {
+                            for i in 0..4 {
+                                let p = CUBE_POSITIONS[face_id][i];
+                                if p[1] < 0.5 { continue; } // มุมล่างไม่กด
+                                let (cx, cz) = (vx + p[0] as i32, vz + p[2] as i32);
+                                corner_drop[i] = *drop_cache.entry((cx, vy, cz)).or_insert_with(|| {
+                                    // มีน้ำชั้นบนติดมุมนี้ = จมอยู่ ผิวเต็มความสูง
+                                    for dx in -1..=0 {
+                                        for dz in -1..=0 {
+                                            if sample(cx + dx, vy + 1, cz + dz).is_water() {
+                                                return 0.0;
+                                            }
                                         }
                                     }
-                                    if has_water_above { break; }
-                                }
-                                
-                                if !has_water_above {
                                     let mut sum = 0.0;
                                     let mut cnt = 0;
                                     for dx in -1..=0 {
                                         for dz in -1..=0 {
-                                            let b = sample(vx + dx, vy, vz + dz);
+                                            let b = sample(cx + dx, vy, cz + dz);
                                             if b.is_water() {
-                                                let d = match b {
+                                                sum += match b {
                                                     BlockType::Water7 => 0.125,
                                                     BlockType::Water6 => 0.25,
                                                     BlockType::Water5 => 0.375,
@@ -737,23 +742,18 @@ pub fn create_mesh_from_blocks(
                                                     BlockType::Water1 => 0.875,
                                                     _ => 0.0,
                                                 };
-                                                sum += d;
                                                 cnt += 1;
                                             }
                                         }
                                     }
                                     if cnt > 0 { sum / (cnt as f32) } else { 0.0 }
-                                } else {
-                                    0.0
-                                }
-                            })
-                        } else {
-                            0.0
-                        };
+                                });
+                            }
+                        }
                         for i in 0..4 {
                             let p = CUBE_POSITIONS[face_id][i];
                             verts[i] = [p[0] + vx as f32, p[1] + vy as f32, p[2] + vz as f32];
-                            if is_w && p[1] > 0.5 { verts[i][1] -= drop; }
+                            if is_w && p[1] > 0.5 { verts[i][1] -= corner_drop[i]; }
                             let br = shade * AO_CURVE[ao[i] as usize];
                             cols[i] = [base[0] * br, base[1] * br, base[2] * br, base[3]];
                             uvs[i] = face_uv(verts[i]);
@@ -2724,11 +2724,6 @@ pub fn wake_seam_water(world: &VoxelWorld, chunk_pos: IVec2, active_fluids: &mut
     }
 }
 
-/// น้ำ simulate เป็นจังหวะคงที่ ไม่ใช่ทุกเฟรม — 10 tick/วินาที
-/// (ทุกเฟรมที่ 60fps น้ำจะแผ่ 60 บล็อก/วิ เร็วจนดูพัง แถม multiplayer
-/// จะ broadcast delta ถี่เกินจน channel บวม)
-const FLUID_TICK_SECONDS: f32 = 0.1;
-
 fn vol_to_block(vol: u8) -> BlockType {
     match vol {
         8 => BlockType::Water8,
@@ -2756,6 +2751,10 @@ fn get_water_vol(block: BlockType) -> u8 {
         _ => 0,
     }
 }
+
+/// รัศมี (บล็อก) ที่น้ำมองหาขอบผา/หลุมเพื่อไหลไปหา — ไกลขึ้น = น้ำฉลาดขึ้น
+/// แต่ BFS แพงขึ้นเป็นกำลังสองของระยะ (8 → ~130 cells/ครั้ง ยังเบา)
+const FLOW_SEARCH_DIST: i32 = 8;
 
 fn find_flow_dirs_finite(pos: IVec3, world: &VoxelWorld, current_vol: u8) -> Vec<IVec3> {
     let horiz = [IVec3::new(1,0,0), IVec3::new(-1,0,0), IVec3::new(0,0,1), IVec3::new(0,0,-1)];
@@ -2796,7 +2795,7 @@ fn find_flow_dirs_finite(pos: IVec3, world: &VoxelWorld, current_vol: u8) -> Vec
     if !dirs.is_empty() { return dirs; }
     
     while let Some((curr, dist, first_dir)) = queue.pop_front() {
-        if dist >= 4 { continue; }
+        if dist >= FLOW_SEARCH_DIST { continue; }
         
         for &dir in &horiz {
             let n_pos = curr + dir;
@@ -2840,13 +2839,17 @@ pub fn fluid_simulation_system(
     net_server: Option<Res<bevy_renet::RenetServer>>,
     mut net_out: ResMut<crate::network::PendingNetEdits>,
     time: Res<Time>,
+    settings: Res<crate::GameSettings>,
     mut tick_accum: Local<f32>,
 ) {
     if active_fluids.0.is_empty() && remesh_queue.is_empty() {
         return;
     }
+    // น้ำ simulate เป็นจังหวะคงที่ ไม่ใช่ทุกเฟรม — คาบปรับได้จาก settings UI
+    // (ทุกเฟรมที่ 60fps น้ำจะแผ่ 60 บล็อก/วิ เร็วจนดูพัง แถม multiplayer
+    // จะ broadcast delta ถี่เกินจน channel บวม)
     *tick_accum += time.delta_secs();
-    if *tick_accum < FLUID_TICK_SECONDS {
+    if *tick_accum < settings.fluid_tick_seconds {
         return;
     }
     *tick_accum = 0.0;
@@ -2855,12 +2858,22 @@ pub fn fluid_simulation_system(
     // (client ไม่รันระบบนี้ — ดู run_if ใน main.rs)
     let is_host = net_server.is_some();
 
-    let current_active: Vec<IVec3> = active_fluids.0.drain().collect();
+    let mut current_active: Vec<IVec3> = active_fluids.0.drain().collect();
     let mut next_active = std::collections::HashSet::new();
 
+    // เกินงบ 20000 cells/tick ให้คืนเข้าคิวทำ tick หน้า — ห้ามทิ้ง
+    // (เดิม take() แล้วทิ้งส่วนเกิน น้ำเลยแข็งค้างกลางทางเวลาไหลพร้อมกันเยอะๆ)
+    if current_active.len() > 20000 {
+        let overflow = current_active.split_off(20000);
+        active_fluids.0.extend(overflow);
+    }
+
     // Process fluids
-    for pos in current_active.into_iter().take(20000) {
+    for pos in current_active.into_iter() {
         let block = world.get_block(pos.x, pos.y, pos.z);
+
+        // น้ำเป็น finite แท้ (conserve volume เสมอ ไม่มี infinite source) —
+        // ตั้งใจเพื่อ gameplay สายเขื่อน/กักน้ำ: ตักออกระดับลดจริง เจาะบ่อน้ำหมดได้จริง
         if !block.is_water() { continue; }
 
         let vol = get_water_vol(block);
@@ -2893,7 +2906,32 @@ pub fn fluid_simulation_system(
             }
         }
 
-        // Spread horizontally if we still have volume > 1 and didn't fall down entirely
+        // Spread horizontally ถ้ายังเหลือ volume และไม่ได้ไหลลงหมดไปแล้ว
+        if current_vol == 1 && !moved {
+            // หยดสุดท้าย: ปกตินอนเป็นคราบ แต่ถ้า BFS เจอที่ให้ตกในระยะค้นหา
+            // ให้ย้ายทั้งหยดเดินตามทิศนั้น — เข้าใกล้จุดตกทุก tick เลยไม่ ping-pong
+            // (ไม่มีทิศ = เป็นแอ่งจริง นอนนิ่งตามเดิม)
+            for dir in find_flow_dirs_finite(pos, &world, current_vol) {
+                let n_pos = pos + dir;
+                let n_block = world.get_block(n_pos.x, n_pos.y, n_pos.z);
+                if n_block.is_solid() { continue; }
+                let n_vol = get_water_vol(n_block);
+                if n_vol >= 8 { continue; }
+                let new_t_block = vol_to_block(n_vol + 1);
+                if world.set_block(n_pos.x, n_pos.y, n_pos.z, new_t_block) {
+                    current_vol = 0;
+                    if is_host {
+                        net_out.0.push_back((None, crate::network::BlockEdit::SetBlock {
+                            pos: n_pos.to_array(), block: new_t_block as u8,
+                        }));
+                    }
+                    queue_remesh(n_pos, &mut remesh_queue);
+                    next_active.insert(n_pos);
+                    moved = true;
+                    break;
+                }
+            }
+        }
         if current_vol > 1 && !moved {
             let preferred_dirs = find_flow_dirs_finite(pos, &world, current_vol);
             let check_dirs = if preferred_dirs.is_empty() {
@@ -2920,7 +2958,10 @@ pub fn fluid_simulation_system(
                 let target = neighbors[0].0;
                 let t_vol = neighbors[0].1;
 
-                let transfer = 1;
+                // เกลี่ยครึ่งหนึ่งของส่วนต่างแทนทีละ 1 — น้ำผิวบ่อไหลตามลงรู
+                // ให้ทันตา ไม่ค้างเป็นสายนิ่งๆ (ยังนิ่งเมื่อเท่ากัน ไม่ ping-pong
+                // เพราะเงื่อนไขเข้าลูปยังต้องต่าง ≥2 เหมือนเดิม)
+                let transfer = (current_vol - t_vol) / 2;
                 let new_t_block = vol_to_block(t_vol + transfer);
                 // เช็คผล set ก่อนหัก volume เหมือนตอนไหลลง
                 if world.set_block(target.x, target.y, target.z, new_t_block) {

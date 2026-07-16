@@ -164,6 +164,9 @@ pub struct ClientSync {
     /// เลขผู้เล่นของเราเอง (จาก Welcome)
     pub my_number: u32,
     pub received_welcome: bool,
+    /// ตั้งใจออกเอง (จาก pause menu) — watchdog จะพากลับ MainMenu เงียบๆ
+    /// แทนที่จะเด้งไปหน้า multiplayer พร้อมข้อความ "หลุดจากเซิร์ฟเวอร์"
+    pub leaving: bool,
     /// noise เดิมของผู้เล่น ไว้คืนค่าตอน disconnect
     pub prev_noise: Option<crate::NoiseParams>,
     /// chunk cache จาก host — อยู่ข้าม unload/reload โดยไม่แตะ disk
@@ -934,16 +937,23 @@ pub fn client_connection_watchdog(
         .unwrap_or_else(|| "connection lost".into());
 
     if client_sync.received_welcome {
-        // หลุดกลางเกม → คืนค่า noise เดิม ล้างโลกของ host ทิ้ง กลับหน้า multiplayer
+        // ออกจากเกม → คืนค่า noise เดิม ล้างโลกของ host ทิ้ง
         if let Some(prev) = client_sync.prev_noise {
             settings.noise = prev;
         }
         regenerate.0 = true;
-        mp_ui.status = format!("หลุดจากเซิร์ฟเวอร์: {reason}");
+        if client_sync.leaving {
+            // ออกเองผ่าน pause menu — กลับเมนูหลักเงียบๆ
+            mp_ui.status.clear();
+            next_state.set(crate::GameState::MainMenu);
+        } else {
+            mp_ui.status = format!("หลุดจากเซิร์ฟเวอร์: {reason}");
+            next_state.set(crate::GameState::MultiplayerMenu);
+        }
     } else {
         mp_ui.status = format!("เชื่อมต่อไม่สำเร็จ: {reason}");
+        next_state.set(crate::GameState::MultiplayerMenu);
     }
-    next_state.set(crate::GameState::MultiplayerMenu);
     teardown_client(&mut commands);
 }
 

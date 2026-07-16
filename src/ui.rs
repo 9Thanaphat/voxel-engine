@@ -224,6 +224,75 @@ pub fn multiplayer_menu_system(
         });
 }
 
+/// Pause menu: ESC ในเกมเปิด/ปิด — โลกเดินต่อ แค่หยุด input ผู้เล่น (ดู run_if ใน main.rs)
+pub fn pause_menu_system(
+    mut contexts: bevy_egui::EguiContexts,
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut paused: ResMut<crate::Paused>,
+    mut next_state: ResMut<NextState<crate::GameState>>,
+    mut server: Option<ResMut<bevy_renet::RenetServer>>,
+    mut client: Option<ResMut<bevy_renet::RenetClient>>,
+    mut client_sync: Option<ResMut<crate::network::ClientSync>>,
+) {
+    if keyboard.just_pressed(KeyCode::Escape) {
+        paused.0 = !paused.0;
+    }
+    if !paused.0 {
+        return;
+    }
+
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    let ctx = ctx.clone();
+
+    bevy_egui::egui::Window::new("Pause Menu")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .anchor(bevy_egui::egui::Align2::CENTER_CENTER, bevy_egui::egui::vec2(0.0, 0.0))
+        .show(&ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(20.0);
+                ui.heading(bevy_egui::egui::RichText::new("PAUSED").size(32.0).strong());
+                ui.add_space(20.0);
+
+                let btn_size = bevy_egui::egui::vec2(200.0, 40.0);
+
+                if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Back to Game")).clicked() {
+                    paused.0 = false;
+                }
+                ui.add_space(10.0);
+
+                if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Back to Main Menu")).clicked() {
+                    paused.0 = false;
+                    if let Some(server) = server.as_mut() {
+                        // ปิด host: เตะทุกคนออกก่อน แล้วถอด resource เฟรมถัดไป
+                        // (ให้ disconnect packet ได้ flush — ดู StopHostRequested)
+                        server.disconnect_all();
+                        commands.insert_resource(crate::network::StopHostRequested);
+                        next_state.set(crate::GameState::MainMenu);
+                    } else if let (Some(client), Some(cs)) = (client.as_mut(), client_sync.as_mut()) {
+                        // ออกจากเซิร์ฟเวอร์แบบตั้งใจ — watchdog เห็น disconnect แล้ว
+                        // จัดการคืน noise + ล้างโลก + กลับ MainMenu ให้ (flag leaving)
+                        cs.leaving = true;
+                        client.disconnect();
+                    } else {
+                        // single player: โลกยังอยู่ใน memory กลับมาเล่นต่อได้เลย
+                        // (chunk ที่แก้เซฟลง disk ตลอดอยู่แล้ว)
+                        next_state.set(crate::GameState::MainMenu);
+                    }
+                }
+                ui.add_space(10.0);
+
+                if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Quit Game")).clicked() {
+                    std::process::exit(0);
+                }
+
+                ui.add_space(20.0);
+            });
+        });
+}
+
 pub fn update_coordinate_ui_system(
     camera_query: Query<&Transform, With<FreeCamera>>,
     mut text_query: Query<&mut Text, With<CoordinateText>>,
@@ -439,6 +508,13 @@ pub fn egui_settings_system(
         ui.add(
             bevy_egui::egui::Slider::new(&mut settings.time_of_day, 0.0..=24.0)
                 .text("Time of Day (h)"),
+        );
+        // ความเร็วน้ำ: คาบ tick ของ fluid sim — มีผลเฉพาะ single player/host
+        // (client รับผลจาก host อยู่แล้ว ปรับไปก็ไม่เปลี่ยนอะไร)
+        ui.add(
+            bevy_egui::egui::Slider::new(&mut settings.fluid_tick_seconds, 0.02..=1.0)
+                .logarithmic(true)
+                .text("Water Tick (s)"),
         );
 
         ui.separator();
