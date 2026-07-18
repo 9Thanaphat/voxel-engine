@@ -4,3 +4,5 @@
 /reconstructed_voxel.rs
 /transcript_dump.txt
 assets/dem/raw_*.tif
+saves/
+saves_dem/
