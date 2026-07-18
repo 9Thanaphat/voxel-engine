@@ -555,13 +555,78 @@ fn texture_buf<'a>(bufs: &'a mut Vec<(&'static str, MeshBuf)>, tex: &'static str
 ///
 /// ลำดับ neighbors: [+X, -X, +Z, -Z, +X+Z, +X-Z, -X+Z, -X-Z]
 /// (แนวทแยงจำเป็นสำหรับ vertex AO ที่มุม chunk)
+/// ความมืดสูงสุดของสีน้ำลึก (0 = ไม่ไล่สี, 0.45 = ลึกสุดเหลือ 55% ความสว่าง)
+const WATER_DEPTH_DARKEN: f32 = 0.45;
+/// จำนวนชั้นน้ำที่นับว่า "ลึกสุด" สำหรับการไล่สี
+const WATER_DEPTH_RANGE: i32 = 8;
+
+/// ข้อมูลต่อมุมผิวน้ำ: (ระยะกดผิวลง, ความลึก normalize 0..1)
+/// ใช้ร่วมกันทั้ง mesher เต็มและ create_water_mesh — logic มุมน้ำมีที่เดียว
+/// - กดผิว: เฉลี่ยระดับน้ำจาก column 2x2 รอบมุม; column ที่เป็น "อากาศ" ร่วม
+///   เฉลี่ยด้วยค่าจมสุด → ผิวลาดลงจูบพื้นตรงตลิ่ง/ขอบผา; solid ไม่ร่วมเฉลี่ย
+///   → น้ำชนกำแพง/เขื่อนคงระดับ ไม่บุ๋ม
+/// - ความลึก: เฉลี่ยจำนวนชั้นน้ำต่อเนื่องใต้มุม (ไว้ไล่สีน้ำลึกให้เข้ม)
+fn water_corner_info(
+    sample: &impl Fn(i32, i32, i32) -> BlockType,
+    cx: i32,
+    vy: i32,
+    cz: i32,
+) -> (f32, f32) {
+    // มีน้ำชั้นบนติดมุม = จมใต้ผิว: เต็มความสูง + มืดสุด
+    for dx in -1..=0 {
+        for dz in -1..=0 {
+            if sample(cx + dx, vy + 1, cz + dz).is_water() {
+                return (0.0, 1.0);
+            }
+        }
+    }
+    let mut drop_sum = 0.0;
+    let mut depth_sum = 0.0;
+    let mut cnt = 0;
+    for dx in -1..=0 {
+        for dz in -1..=0 {
+            let b = sample(cx + dx, vy, cz + dz);
+            if b.is_water() {
+                drop_sum += match b {
+                    BlockType::Water7 => 0.125,
+                    BlockType::Water6 => 0.25,
+                    BlockType::Water5 => 0.375,
+                    BlockType::Water4 => 0.50,
+                    BlockType::Water3 => 0.625,
+                    BlockType::Water2 => 0.75,
+                    BlockType::Water1 => 0.875,
+                    _ => 0.0,
+                };
+                let mut d = 0i32;
+                while d < WATER_DEPTH_RANGE && sample(cx + dx, vy - d, cz + dz).is_water() {
+                    d += 1;
+                }
+                depth_sum += d as f32;
+                cnt += 1;
+            } else if b == BlockType::Air {
+                drop_sum += 1.0;
+                cnt += 1;
+            }
+        }
+    }
+    if cnt > 0 {
+        (
+            drop_sum / cnt as f32,
+            (depth_sum / cnt as f32 / WATER_DEPTH_RANGE as f32).min(1.0),
+        )
+    } else {
+        (0.0, 0.0)
+    }
+}
+
 pub fn create_mesh_from_blocks(
     chunk_pos: IVec2,
     blocks: &[BlockType; CHUNK_VOLUME],
     neighbors: &[Arc<[BlockType; CHUNK_VOLUME]>; 8],
     chiseled_blocks: Option<&HashMap<usize, Box<[u8; 4096]>>>,
 ) -> ChunkMeshSet {
-    let mut drop_cache: HashMap<(i32, i32, i32), f32> = HashMap::with_capacity(1024);
+    // ต่อมุมผิวน้ำ: (ระยะกดผิวลง, ความลึกน้ำ normalize 0..1) — แชร์ข้ามหน้า/บล็อก
+    let mut drop_cache: HashMap<(i32, i32, i32), (f32, f32)> = HashMap::with_capacity(1024);
     
     let mut set = ChunkMeshSet::default();
 
@@ -686,6 +751,13 @@ pub fn create_mesh_from_blocks(
                     if !visible {
                         continue;
                     }
+                    // น้ำติดน้ำไม่วาดหน้าระหว่างกันแม้ระดับต่าง — ผิวบนเป็น
+                    // heightfield ต่อเนื่องอยู่แล้ว (มุมเฉลี่ยร่วมกัน) หน้าแทรก
+                    // จะกลายเป็นแผ่นจมใต้ผิวซ้อน alpha เป็นเส้นเข้มดูสกปรก
+                    // (ต้องแก้คู่กับ create_water_mesh เสมอ — parity test คุม)
+                    if block.is_water() && n.is_water() {
+                        continue;
+                    }
 
                     // พู่ห้อยเอียง: ขอบบนแนบสันบล็อก ชายล่างยื่นออกตาม normal
                     // (เฉพาะหน้าด้านข้างของบล็อกที่มี overlay เช่นหญ้า)
@@ -749,42 +821,18 @@ pub fn create_mesh_from_blocks(
                         // มุมที่บล็อกข้างกันแชร์กันได้ค่าเดียวกัน (ผ่าน cache)
                         // ผิวน้ำจึงไล่ต่อเนื่องไม่เป็นขั้นบันได
                         let mut corner_drop = [0f32; 4];
-                        if is_w && face_id != 5 {
+                        let mut corner_depth = [0f32; 4];
+                        // กดทุกหน้า (เดิมเว้น face_id 5 — ขอบบนด้าน Z- เลยโผล่
+                        // เป็นครีบเหนือผิวที่ลาดลงไปแล้ว)
+                        if is_w {
                             for i in 0..4 {
                                 let p = CUBE_POSITIONS[face_id][i];
-                                if p[1] < 0.5 { continue; } // มุมล่างไม่กด
                                 let (cx, cz) = (vx + p[0] as i32, vz + p[2] as i32);
-                                corner_drop[i] = *drop_cache.entry((cx, vy, cz)).or_insert_with(|| {
-                                    // มีน้ำชั้นบนติดมุมนี้ = จมอยู่ ผิวเต็มความสูง
-                                    for dx in -1..=0 {
-                                        for dz in -1..=0 {
-                                            if sample(cx + dx, vy + 1, cz + dz).is_water() {
-                                                return 0.0;
-                                            }
-                                        }
-                                    }
-                                    let mut sum = 0.0;
-                                    let mut cnt = 0;
-                                    for dx in -1..=0 {
-                                        for dz in -1..=0 {
-                                            let b = sample(cx + dx, vy, cz + dz);
-                                            if b.is_water() {
-                                                sum += match b {
-                                                    BlockType::Water7 => 0.125,
-                                                    BlockType::Water6 => 0.25,
-                                                    BlockType::Water5 => 0.375,
-                                                    BlockType::Water4 => 0.50,
-                                                    BlockType::Water3 => 0.625,
-                                                    BlockType::Water2 => 0.75,
-                                                    BlockType::Water1 => 0.875,
-                                                    _ => 0.0,
-                                                };
-                                                cnt += 1;
-                                            }
-                                        }
-                                    }
-                                    if cnt > 0 { sum / (cnt as f32) } else { 0.0 }
+                                let (d, dep) = *drop_cache.entry((cx, vy, cz)).or_insert_with(|| {
+                                    water_corner_info(&sample, cx, vy, cz)
                                 });
+                                corner_drop[i] = d;
+                                corner_depth[i] = dep;
                             }
                         }
                         for i in 0..4 {
@@ -792,7 +840,9 @@ pub fn create_mesh_from_blocks(
                             verts[i] = [p[0] + vx as f32, p[1] + vy as f32, p[2] + vz as f32];
                             if is_w && p[1] > 0.5 { verts[i][1] -= corner_drop[i]; }
                             let br = shade * AO_CURVE[ao[i] as usize];
-                            cols[i] = [base[0] * br, base[1] * br, base[2] * br, base[3]];
+                            // น้ำลึกสีเข้มกว่า (corner_depth = 0 สำหรับบล็อกอื่น)
+                            let tint = 1.0 - WATER_DEPTH_DARKEN * corner_depth[i];
+                            cols[i] = [base[0] * br * tint, base[1] * br * tint, base[2] * br * tint, base[3]];
                             uvs[i] = face_uv(verts[i]);
                         }
                         let flip = (ao[0] as u32 + ao[2] as u32) < (ao[1] as u32 + ao[3] as u32);
@@ -1192,7 +1242,7 @@ pub fn create_water_mesh(
     let y_lo = y_min as i32;
     let y_hi = (y_max.min(CHUNK_HEIGHT - 1)) as i32;
 
-    let mut drop_cache: HashMap<(i32, i32, i32), f32> = HashMap::with_capacity(256);
+    let mut drop_cache: HashMap<(i32, i32, i32), (f32, f32)> = HashMap::with_capacity(256);
     let mut observed: Option<(usize, usize)> = None;
 
     let world_base_x = chunk_pos.x * CHUNK_WIDTH as i32;
@@ -1272,6 +1322,10 @@ pub fn create_water_mesh(
                     if !visible {
                         continue;
                     }
+                    // น้ำติดน้ำไม่วาดหน้าระหว่างกัน (ตรงกับ mesher เต็ม — parity test คุม)
+                    if n.is_water() {
+                        continue;
+                    }
 
                     // ตรงกับ branch วาดเดี่ยวของ mesher เต็ม (น้ำ: ao คงที่ [3;4])
                     let variant = texture_variant(
@@ -1287,43 +1341,17 @@ pub fn create_water_mesh(
                     let ao = [3u8; 4];
                     let (vx, vy, vz) = (c[0], c[1], c[2]);
 
+                    // กด/ไล่สีต่อมุมด้วย helper เดียวกับ mesher เต็ม (parity test คุม)
                     let mut corner_drop = [0f32; 4];
-                    if face_id != 5 {
-                        for i in 0..4 {
-                            let p = CUBE_POSITIONS[face_id][i];
-                            if p[1] < 0.5 { continue; }
-                            let (cx, cz) = (vx + p[0] as i32, vz + p[2] as i32);
-                            corner_drop[i] = *drop_cache.entry((cx, vy, cz)).or_insert_with(|| {
-                                for dx in -1..=0 {
-                                    for dz in -1..=0 {
-                                        if sample(cx + dx, vy + 1, cz + dz).is_water() {
-                                            return 0.0;
-                                        }
-                                    }
-                                }
-                                let mut sum = 0.0;
-                                let mut cnt = 0;
-                                for dx in -1..=0 {
-                                    for dz in -1..=0 {
-                                        let b = sample(cx + dx, vy, cz + dz);
-                                        if b.is_water() {
-                                            sum += match b {
-                                                BlockType::Water7 => 0.125,
-                                                BlockType::Water6 => 0.25,
-                                                BlockType::Water5 => 0.375,
-                                                BlockType::Water4 => 0.50,
-                                                BlockType::Water3 => 0.625,
-                                                BlockType::Water2 => 0.75,
-                                                BlockType::Water1 => 0.875,
-                                                _ => 0.0,
-                                            };
-                                            cnt += 1;
-                                        }
-                                    }
-                                }
-                                if cnt > 0 { sum / (cnt as f32) } else { 0.0 }
-                            });
-                        }
+                    let mut corner_depth = [0f32; 4];
+                    for i in 0..4 {
+                        let p = CUBE_POSITIONS[face_id][i];
+                        let (cx, cz) = (vx + p[0] as i32, vz + p[2] as i32);
+                        let (d, dep) = *drop_cache.entry((cx, vy, cz)).or_insert_with(|| {
+                            water_corner_info(&sample, cx, vy, cz)
+                        });
+                        corner_drop[i] = d;
+                        corner_depth[i] = dep;
                     }
 
                     let mut verts = [[0f32; 3]; 4];
@@ -1334,7 +1362,8 @@ pub fn create_water_mesh(
                         verts[i] = [p[0] + vx as f32, p[1] + vy as f32, p[2] + vz as f32];
                         if p[1] > 0.5 { verts[i][1] -= corner_drop[i]; }
                         let br = shade * AO_CURVE[ao[i] as usize];
-                        cols[i] = [base[0] * br, base[1] * br, base[2] * br, base[3]];
+                        let tint = 1.0 - WATER_DEPTH_DARKEN * corner_depth[i];
+                        cols[i] = [base[0] * br * tint, base[1] * br * tint, base[2] * br * tint, base[3]];
                         uvs[i] = face_uv(verts[i]);
                     }
                     let flip = (ao[0] as u32 + ao[2] as u32) < (ao[1] as u32 + ao[3] as u32);
