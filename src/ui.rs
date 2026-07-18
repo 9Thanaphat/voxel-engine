@@ -820,6 +820,16 @@ pub fn egui_settings_system(
 
         ui.separator();
 
+        ui.heading("Distant Terrain");
+        ui.checkbox(&mut settings.lod_enabled, "LOD (Distant Horizons style)");
+        ui.add(
+            bevy_egui::egui::Slider::new(&mut settings.lod_distance_m, 2_000.0..=35_000.0)
+                .logarithmic(true)
+                .text("LOD Distance (m)"),
+        );
+
+        ui.separator();
+
         ui.heading("Camera");
         if let Some(mut camera) = camera_query.iter_mut().next() {
             ui.add(bevy_egui::egui::Slider::new(&mut camera.speed, 10.0..=200.0).text("Fly Speed"));

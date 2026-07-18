@@ -249,6 +249,20 @@ pub fn setup_camera(
     commands.spawn((
         Camera3d::default(),
         transform,
+        // มองไกลถึงขอบ tile DEM (~33 กม.) — default 1000 มองไม่เห็น LOD ไกล
+        Projection::Perspective(PerspectiveProjection {
+            far: 50_000.0,
+            ..default()
+        }),
+        // หมอกระยะไกล: เนียนรอยต่อ LOD + ให้ภูเขาไกลจางแบบof จริง
+        bevy::pbr::DistanceFog {
+            color: Color::srgba(0.72, 0.80, 0.90, 1.0),
+            falloff: bevy::pbr::FogFalloff::Linear {
+                start: 4_000.0,
+                end: 35_000.0,
+            },
+            ..default()
+        },
         // SSAO ไม่รองรับ MSAA (DepthPrepass/NormalPrepass ถูกใส่ให้เองผ่าน required components)
         bevy::pbr::ScreenSpaceAmbientOcclusion::default(),
         Msaa::Off,

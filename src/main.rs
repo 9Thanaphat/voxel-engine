@@ -7,6 +7,7 @@ mod network;
 mod particles;
 mod dem;
 mod electricity;
+mod lod;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -50,6 +51,9 @@ pub struct GameSettings {
     /// ขนาด nuke หน่วย "บล็อก TNT เทียบเท่า" — รัศมี ∝ yield^⅓ ตามสูตรจริง
     pub nuke_yield: f32,
     pub nuke_fuse_seconds: f32,
+    /// ภูมิประเทศระยะไกล (LOD แบบ Distant Horizons)
+    pub lod_enabled: bool,
+    pub lod_distance_m: f32,
 }
 
 impl Default for GameSettings {
@@ -70,6 +74,8 @@ impl Default for GameSettings {
             show_tnt_rays: false,
             nuke_yield: 500.0,
             nuke_fuse_seconds: 5.0,
+            lod_enabled: true,
+            lod_distance_m: 33_000.0,
         }
     }
 }
@@ -191,6 +197,7 @@ fn main() {
             camera::setup_camera,
             ui::setup_ui,
             particles::setup_particles,
+            lod::setup_lod,
         ))
         .add_systems(Update, (
             particles::spawn_block_fx,
@@ -241,6 +248,7 @@ fn main() {
                 voxel::tnt_detonation_system.run_if(network::is_not_client),
                 voxel::nuke_apply_system.run_if(network::is_not_client),
                 voxel::explosion_debug_system,
+                lod::update_lod_tiles,
             ).run_if(in_state(GameState::InGame)),
         )
         // ---- Networking ----
