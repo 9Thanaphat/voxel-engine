@@ -63,6 +63,22 @@ pub struct ExplosionFlash {
     duration: f32,
     /// เพิ่ม AmbientLight ทั้งฉากตอนพีค (nuke — ทั้งโลกสว่างวาบ ไม่ใช่แค่จุดเดียว)
     ambient_boost: f32,
+    /// ใช้จำแนกเพื่อทำเอฟเฟกต์ Double Flash แบบ Trinity Test
+    is_nuke: bool,
+}
+
+#[derive(Component)]
+pub struct PlasmaDome {
+    age: f32,
+    duration: f32,
+    max_scale: f32,
+}
+
+#[derive(Component)]
+pub struct WilsonCloud {
+    age: f32,
+    duration: f32,
+    max_scale: f32,
 }
 
 #[derive(Resource)]
@@ -73,6 +89,7 @@ pub struct ParticleAssets {
     explosion: Handle<EffectAsset>,
     mushroom_column: Handle<EffectAsset>,
     mushroom_cap: Handle<EffectAsset>,
+    base_surge: Handle<EffectAsset>,
     /// texture ขาว 1x1 คู่กับ tint = สีบล็อก สำหรับบล็อกที่ยังไม่มี texture
     white: Handle<Image>,
 }
@@ -245,32 +262,32 @@ fn explosion_effect() -> EffectAsset {
     };
 
     let dir = (writer.rand(VectorType::VEC3F) * writer.lit(2.0) - writer.lit(1.0)).normalized();
-    let speed = writer.lit(2.0).uniform(writer.lit(6.0));
-    let vel = dir * speed + writer.lit(Vec3::Y * 1.5);
+    let speed = writer.lit(5.0).uniform(writer.lit(15.0)); // เร็วและพุ่งแรงขึ้นมาก
+    let vel = dir * speed + writer.lit(Vec3::Y * 2.0);
     let init_vel = SetAttributeModifier::new(Attribute::VELOCITY, vel.expr());
 
     let init_age = SetAttributeModifier::new(Attribute::AGE, writer.lit(0.0).expr());
-    let lifetime = writer.lit(0.6).uniform(writer.lit(1.5)).expr();
+    let lifetime = writer.lit(1.0).uniform(writer.lit(2.5)).expr(); // ควันอยู่นานขึ้น
     let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
 
     // ควันเบา: drag แรง + แรงลอยขึ้นอ่อนๆ แทน gravity
-    let update_accel = AccelModifier::new(writer.lit(Vec3::Y * 1.0).expr());
-    let update_drag = LinearDragModifier::new(writer.lit(2.5).expr());
+    let update_accel = AccelModifier::new(writer.lit(Vec3::Y * 1.5).expr());
+    let update_drag = LinearDragModifier::new(writer.lit(3.5).expr());
 
-    // แฟลชส้ม HDR ช่วงแรก → ควันเทา → จางหาย
+    // แฟลชส้มสว่างจ้ามาก (HDR) ช่วงแรก → ควันเทา → จางหาย
     let mut color = bevy_hanabi::Gradient::new();
-    color.add_key(0.0, Vec4::new(8.0, 4.0, 1.2, 1.0));
-    color.add_key(0.12, Vec4::new(3.0, 1.4, 0.5, 1.0));
-    color.add_key(0.35, Vec4::new(0.35, 0.33, 0.30, 0.85));
+    color.add_key(0.0, Vec4::new(15.0, 6.0, 1.5, 1.0));
+    color.add_key(0.1, Vec4::new(6.0, 2.0, 0.5, 1.0));
+    color.add_key(0.35, Vec4::new(0.35, 0.33, 0.30, 0.9));
     color.add_key(1.0, Vec4::new(0.18, 0.18, 0.18, 0.0));
 
     // ลูกไฟขยายเป็นควันก้อนใหญ่ขึ้นเรื่อยๆ
     let mut size = bevy_hanabi::Gradient::new();
-    size.add_key(0.0, Vec3::splat(0.35));
-    size.add_key(0.3, Vec3::splat(0.7));
-    size.add_key(1.0, Vec3::splat(1.1));
+    size.add_key(0.0, Vec3::splat(0.5));
+    size.add_key(0.3, Vec3::splat(1.5));
+    size.add_key(1.0, Vec3::splat(3.0));
 
-    EffectAsset::new(128, SpawnerSettings::once(70.0.into()), writer.finish())
+    EffectAsset::new(1024, SpawnerSettings::once(600.0.into()), writer.finish())
         .with_name("tnt_explosion")
         .init(init_pos)
         .init(init_vel)
@@ -301,29 +318,30 @@ fn mushroom_column_effect() -> EffectAsset {
 
     // พุ่งขึ้นแรง + ส่ายข้างเล็กน้อย — ต้องไต่ถึงระดับหัวเห็ด (~85 บล็อก)
     let xz = (writer.rand(VectorType::VEC3F) * writer.lit(2.0) - writer.lit(1.0))
-        * writer.lit(Vec3::new(2.0, 0.0, 2.0));
-    let up = writer.lit(Vec3::Y * 26.0) + writer.lit(Vec3::Y * 14.0) * writer.rand(ScalarType::Float);
+        * writer.lit(Vec3::new(3.5, 0.0, 3.5));
+    let up = writer.lit(Vec3::Y * 35.0) + writer.lit(Vec3::Y * 20.0) * writer.rand(ScalarType::Float);
     let init_vel = SetAttributeModifier::new(Attribute::VELOCITY, (xz + up).expr());
 
     let init_age = SetAttributeModifier::new(Attribute::AGE, writer.lit(0.0).expr());
-    let lifetime = writer.lit(12.0).uniform(writer.lit(20.0)).expr();
+    let lifetime = writer.lit(45.0).uniform(writer.lit(60.0)).expr(); // อยู่นานขึ้นมาก
     let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
 
     let update_drag = LinearDragModifier::new(writer.lit(0.35).expr());
 
-    // ร้อนจ้าช่วงสั้นๆ ที่โคน แล้วเป็นควันเทา จางตอนท้าย
+    // ร้อนจ้าช่วงสั้นๆ ที่โคน สว่างมากๆ แล้วเป็นควันเทา จางตอนท้าย
     let mut color = bevy_hanabi::Gradient::new();
-    color.add_key(0.0, Vec4::new(4.0, 2.0, 0.7, 0.95));
-    color.add_key(0.15, Vec4::new(0.45, 0.42, 0.38, 0.9));
-    color.add_key(0.8, Vec4::new(0.3, 0.3, 0.3, 0.7));
+    color.add_key(0.0, Vec4::new(30.0, 25.0, 20.0, 1.0)); // ขาวจ้า (White-hot)
+    color.add_key(0.1, Vec4::new(5.0, 2.0, 0.5, 0.95));
+    color.add_key(0.3, Vec4::new(0.45, 0.42, 0.38, 0.95));
+    color.add_key(0.8, Vec4::new(0.3, 0.3, 0.3, 0.8));
     color.add_key(1.0, Vec4::new(0.25, 0.25, 0.25, 0.0));
 
     let mut size = bevy_hanabi::Gradient::new();
-    size.add_key(0.0, Vec3::splat(3.0));
-    size.add_key(0.5, Vec3::splat(6.5));
-    size.add_key(1.0, Vec3::splat(9.0));
+    size.add_key(0.0, Vec3::splat(5.0));
+    size.add_key(0.5, Vec3::splat(12.0));
+    size.add_key(1.0, Vec3::splat(18.0));
 
-    EffectAsset::new(2048, SpawnerSettings::once(800.0.into()), writer.finish())
+    EffectAsset::new(4096, SpawnerSettings::once(2500.0.into()), writer.finish())
         .with_name("mushroom_column")
         .init(init_pos)
         .init(init_vel)
@@ -354,29 +372,85 @@ fn mushroom_cap_effect() -> EffectAsset {
 
     // แผ่ออกแนวนอน + ลอยขึ้นช้า
     let out = (writer.rand(VectorType::VEC3F) * writer.lit(2.0) - writer.lit(1.0))
-        * writer.lit(Vec3::new(5.5, 0.8, 5.5));
+        * writer.lit(Vec3::new(12.0, 2.0, 12.0)); // แผ่ออกกว้างขึ้นมาก
     let init_vel =
         SetAttributeModifier::new(Attribute::VELOCITY, (out + writer.lit(Vec3::Y * 2.5)).expr());
 
     let init_age = SetAttributeModifier::new(Attribute::AGE, writer.lit(0.0).expr());
-    let lifetime = writer.lit(15.0).uniform(writer.lit(24.0)).expr();
+    let lifetime = writer.lit(45.0).uniform(writer.lit(65.0)).expr(); // ให้นานพอๆ กับลำต้น
     let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
 
-    let update_drag = LinearDragModifier::new(writer.lit(0.5).expr());
+    let update_drag = LinearDragModifier::new(writer.lit(0.4).expr());
 
+    // มีสีไฟแทรกในควันหัวเห็ดนิดๆ ตอนเริ่มต้นให้ดูร้อนแรง
     let mut color = bevy_hanabi::Gradient::new();
-    color.add_key(0.0, Vec4::new(0.5, 0.45, 0.4, 0.0));
-    color.add_key(0.2, Vec4::new(0.5, 0.45, 0.4, 0.85));
-    color.add_key(0.8, Vec4::new(0.32, 0.32, 0.32, 0.7));
+    color.add_key(0.0, Vec4::new(8.0, 3.0, 0.8, 0.9));
+    color.add_key(0.1, Vec4::new(0.5, 0.45, 0.4, 0.95));
+    color.add_key(0.8, Vec4::new(0.32, 0.32, 0.32, 0.8));
     color.add_key(1.0, Vec4::new(0.28, 0.28, 0.28, 0.0));
 
     let mut size = bevy_hanabi::Gradient::new();
-    size.add_key(0.0, Vec3::splat(6.0));
-    size.add_key(0.5, Vec3::splat(14.0));
-    size.add_key(1.0, Vec3::splat(19.0));
+    size.add_key(0.0, Vec3::splat(10.0));
+    size.add_key(0.5, Vec3::splat(26.0));
+    size.add_key(1.0, Vec3::splat(38.0));
 
-    EffectAsset::new(2048, SpawnerSettings::once(900.0.into()), writer.finish())
+    EffectAsset::new(6144, SpawnerSettings::once(4500.0.into()), writer.finish())
         .with_name("mushroom_cap")
+        .init(init_pos)
+        .init(init_vel)
+        .init(init_age)
+        .init(init_lifetime)
+        .update(update_drag)
+        .render(ColorOverLifetimeModifier {
+            gradient: color,
+            blend: ColorBlendMode::Overwrite,
+            mask: ColorBlendMask::RGBA,
+        })
+        .render(SizeOverLifetimeModifier {
+            gradient: size,
+            screen_space_size: false,
+        })
+}
+
+/// ควันฐาน (Base Surge): กลุ่มฝุ่นและเศษดินหนาทึบที่แผ่ออกไปตามพื้นดินรอบๆ จุดระเบิด
+fn base_surge_effect() -> EffectAsset {
+    let writer = ExprWriter::new();
+
+    let init_pos = SetPositionSphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        radius: writer.lit(12.0).expr(), // เกิดในวงกว้าง
+        dimension: ShapeDimension::Volume,
+    };
+
+    // พุ่งออกด้านข้างแบบแบนๆ (XZ plane) อย่างรวดเร็ว
+    let flat_dir = ((writer.rand(VectorType::VEC3F) * writer.lit(2.0) - writer.lit(1.0))
+        * writer.lit(Vec3::new(1.0, 0.05, 1.0)))
+    .normalized();
+    
+    let speed = writer.lit(30.0).uniform(writer.lit(75.0));
+    let vel = flat_dir * speed;
+    let init_vel = SetAttributeModifier::new(Attribute::VELOCITY, vel.expr());
+
+    let init_age = SetAttributeModifier::new(Attribute::AGE, writer.lit(0.0).expr());
+    let lifetime = writer.lit(15.0).uniform(writer.lit(30.0)).expr();
+    let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
+
+    let update_drag = LinearDragModifier::new(writer.lit(1.5).expr());
+
+    let mut color = bevy_hanabi::Gradient::new();
+    // ควันทึบสีฝุ่น/โคลน
+    color.add_key(0.0, Vec4::new(0.35, 0.3, 0.25, 0.0));
+    color.add_key(0.05, Vec4::new(0.35, 0.3, 0.25, 1.0)); // ทึบแสง 100%
+    color.add_key(0.5, Vec4::new(0.28, 0.25, 0.22, 0.85));
+    color.add_key(1.0, Vec4::new(0.2, 0.2, 0.2, 0.0));
+
+    let mut size = bevy_hanabi::Gradient::new();
+    size.add_key(0.0, Vec3::splat(15.0));
+    size.add_key(0.3, Vec3::splat(30.0));
+    size.add_key(1.0, Vec3::splat(45.0));
+
+    EffectAsset::new(4096, SpawnerSettings::once(3500.0.into()), writer.finish())
+        .with_name("base_surge")
         .init(init_pos)
         .init(init_vel)
         .init(init_age)
@@ -423,6 +497,7 @@ pub fn setup_particles(
         explosion: effects.add(explosion_effect()),
         mushroom_column: effects.add(mushroom_column_effect()),
         mushroom_cap: effects.add(mushroom_cap_effect()),
+        base_surge: effects.add(base_surge_effect()),
         white,
     });
 }
@@ -477,6 +552,7 @@ pub fn spawn_explosion_fx(
     mut meshes: ResMut<Assets<Mesh>>,
     shock_mat: Res<ShockwaveMaterial>,
     mut waves: ResMut<ActiveShockwaves>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     for fx in msgs.read() {
         // shockwave: mesh เปล่าก่อน — update_shockwaves เติมหน้าคลื่นทุกเฟรม
@@ -505,9 +581,10 @@ pub fn spawn_explosion_fx(
         // nuke: ขาวจ้า แรง×20 ไกล×หลายเท่า และค้างนานแบบแฟลชนิวเคลียร์จริง
         let scale = fx.power / 10.0;
         let (color, intensity, range, duration, ambient_boost) = if fx.is_nuke {
-            (Color::srgb(1.0, 0.97, 0.9), 40_000_000.0 * scale, 90.0 + 40.0 * scale, 2.5, 25_000.0)
+            let nuke_duration = 2.5 + scale * 0.4; // ระยะเวลาแปรผันตามขนาด
+            (Color::srgb(1.0, 0.95, 0.8), 80_000_000.0 * scale, 150.0 + 80.0 * scale, nuke_duration, 45_000.0)
         } else {
-            (Color::srgb(1.0, 0.75, 0.45), 2_000_000.0 * scale, 25.0 + 15.0 * scale, 0.45, 0.0)
+            (Color::srgb(1.0, 0.65, 0.35), 4_000_000.0 * scale, 40.0 + 20.0 * scale, 0.6, 0.0)
         };
         commands.spawn((
             PointLight {
@@ -518,7 +595,7 @@ pub fn spawn_explosion_fx(
                 ..default()
             },
             Transform::from_translation(fx.center),
-            ExplosionFlash { age: 0.0, peak_intensity: intensity, duration, ambient_boost },
+            ExplosionFlash { age: 0.0, peak_intensity: intensity, duration, ambient_boost, is_nuke: fx.is_nuke },
         ));
 
         // ลูกไฟ + ควัน
@@ -528,17 +605,51 @@ pub fn spawn_explosion_fx(
             FxLifetime(Timer::from_seconds(2.5, TimerMode::Once)),
         ));
 
-        // nuke: เห็ดควัน (คอลัมน์ + หัวเห็ด — อายุยาว ลอยขึ้นช้าๆ)
+        // nuke: โดมพลาสม่า (Trinity fireball) + เห็ดควัน
         if fx.is_nuke {
+            commands.spawn((
+                Mesh3d(meshes.add(Sphere::new(1.0))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: Color::srgb(15.0, 10.0, 4.0),
+                    unlit: true,
+                    alpha_mode: bevy::prelude::AlphaMode::Blend,
+                    cull_mode: None,
+                    ..default()
+                })),
+                Transform::from_translation(fx.center),
+                PlasmaDome { age: 0.0, duration: duration * 0.7, max_scale: 85.0 * scale },
+            ));
+
+            // วงแหวนไอน้ำ (Wilson Cloud) ขยายตัวไวนำหน้าลูกไฟ
+            commands.spawn((
+                Mesh3d(meshes.add(Sphere::new(1.0))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: Color::srgba(0.95, 0.98, 1.0, 0.6),
+                    unlit: true,
+                    alpha_mode: bevy::prelude::AlphaMode::Blend,
+                    cull_mode: None,
+                    ..default()
+                })),
+                Transform::from_translation(fx.center),
+                WilsonCloud { age: 0.0, duration: duration * 0.45, max_scale: 250.0 * scale },
+            ));
+
             commands.spawn((
                 ParticleEffect::new(assets.mushroom_column.clone()),
                 Transform::from_translation(fx.center),
-                FxLifetime(Timer::from_seconds(25.0, TimerMode::Once)),
+                FxLifetime(Timer::from_seconds(60.0, TimerMode::Once)), // ปรับเวลา despawn ให้นานขึ้น
             ));
             commands.spawn((
                 ParticleEffect::new(assets.mushroom_cap.clone()),
                 Transform::from_translation(fx.center),
-                FxLifetime(Timer::from_seconds(30.0, TimerMode::Once)),
+                FxLifetime(Timer::from_seconds(65.0, TimerMode::Once)),
+            ));
+            
+            // ควันฐาน (Base Surge) กระจายทึบบนพื้น
+            commands.spawn((
+                ParticleEffect::new(assets.base_surge.clone()),
+                Transform::from_translation(fx.center),
+                FxLifetime(Timer::from_seconds(35.0, TimerMode::Once)),
             ));
         }
         // เศษหินกระเด็นเสริมด้วย debris เดิม (tint เทา)
@@ -658,9 +769,28 @@ pub fn update_explosion_flash(
             commands.entity(entity).despawn();
             continue;
         }
-        let t = 1.0 - flash.age / flash.duration;
-        light.intensity = flash.peak_intensity * t * t;
-        boost += flash.ambient_boost * t * t;
+        
+        let t = flash.age / flash.duration;
+        let mut multiplier = (1.0 - t) * (1.0 - t); // Default decay
+        
+        if flash.is_nuke {
+            // Double flash curve (Trinity Test)
+            let t_sec = flash.age;
+            if t_sec < 0.15 {
+                // First flash: extreme bright but very brief
+                multiplier = 1.0 - (t_sec / 0.15);
+            } else if t_sec < 0.35 {
+                // Minimum
+                multiplier = 0.1;
+            } else {
+                // Second flash: long and bright
+                let second_t = (t_sec - 0.35) / (flash.duration - 0.35);
+                multiplier = 0.8 * (1.0 - second_t) * (1.0 - second_t);
+            }
+        }
+        
+        light.intensity = flash.peak_intensity * multiplier;
+        boost += flash.ambient_boost * multiplier;
     }
     if let Ok(mut amb) = ambient.single_mut() {
         // ฐาน 400 ตาม setup_camera (camera.rs) — แฟลชยกชั่วคราวแล้วคืนเอง
@@ -704,5 +834,59 @@ pub fn attach_lamp_sparkles(
             ))
             .id();
         commands.entity(entity).add_child(child);
+    }
+}
+
+pub fn update_plasma_dome(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut PlasmaDome, &mut Transform, &MeshMaterial3d<StandardMaterial>)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (entity, mut dome, mut transform, mat) in &mut query {
+        dome.age += time.delta_secs();
+        if dome.age >= dome.duration {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        
+        // Fast expansion (ease out)
+        let t = dome.age / dome.duration;
+        let scale_t = 1.0 - (1.0 - t) * (1.0 - t); // Quad ease out
+        let scale = 1.0 + dome.max_scale * scale_t;
+        transform.scale = Vec3::splat(scale);
+        
+        // Fade out alpha smoothly
+        if let Some(mut material) = materials.get_mut(&mat.0) {
+            let fade = 1.0 - (t * t * t); 
+            material.base_color = Color::srgba(15.0, 8.0, 2.0, fade);
+        }
+    }
+}
+
+pub fn update_wilson_cloud(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut WilsonCloud, &mut Transform, &MeshMaterial3d<StandardMaterial>)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (entity, mut cloud, mut transform, mat) in &mut query {
+        cloud.age += time.delta_secs();
+        if cloud.age >= cloud.duration {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        
+        let t = cloud.age / cloud.duration;
+        let scale_t = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t); // Cubic ease out
+        let radius = 1.0 + cloud.max_scale * scale_t;
+        
+        // รูปทรงแบนราบเป็นแผ่นวงแหวนที่แผ่ออกด้านข้าง
+        transform.scale = Vec3::new(radius, radius * 0.05 + 1.0, radius);
+        
+        if let Some(mut material) = materials.get_mut(&mat.0) {
+            let fade = 0.5 * (1.0 - t); // เฟดหายไปอย่างรวดเร็ว
+            material.base_color = Color::srgba(0.95, 0.98, 1.0, fade);
+        }
     }
 }

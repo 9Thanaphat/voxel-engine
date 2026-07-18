@@ -163,6 +163,8 @@ fn main() {
             particles::spawn_explosion_fx,
             particles::update_shockwaves.after(particles::spawn_explosion_fx),
             particles::update_explosion_flash,
+            particles::update_plasma_dome,
+            particles::update_wilson_cloud,
             particles::trigger_screen_flash,
             ui::update_screen_flash.after(particles::trigger_screen_flash),
             particles::despawn_finished_fx,
