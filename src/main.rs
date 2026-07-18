@@ -5,6 +5,7 @@ mod voxel;
 mod ui;
 mod network;
 mod particles;
+mod dem;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -12,6 +13,14 @@ pub enum RenderMode {
     Full,
     /// สร้างเฉพาะ mesh ผิวโลกจาก noise ตรงๆ — ไว้ preview ตอนจูนค่า world gen
     SurfacePreview,
+}
+
+/// แหล่งภูมิประเทศ: noise เดิม หรือโลกจริงจาก DEM (1 บล็อก = 1 ม.)
+/// — serialize ได้เพราะต้อง sync ให้ client ตอน join (client generate chunk เอง)
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum TerrainSource {
+    Noise,
+    RealWorld,
 }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -25,6 +34,7 @@ pub struct NoiseParams {
 pub struct GameSettings {
     pub render_distance: i32,
     pub render_mode: RenderMode,
+    pub terrain_source: TerrainSource,
     pub noise: NoiseParams,
     /// เวลาในเกม หน่วยชั่วโมง 0-24 (6 = พระอาทิตย์ขึ้น, 12 = เที่ยง, 18 = ตก)
     pub time_of_day: f32,
@@ -46,6 +56,7 @@ impl Default for GameSettings {
         Self {
             render_distance: 8,
             render_mode: RenderMode::Full,
+            terrain_source: TerrainSource::Noise,
             noise: NoiseParams {
                 frequency: 0.015,
                 amplitude: 40.0,
@@ -105,6 +116,19 @@ fn asset_root() -> String {
 }
 
 fn main() {
+    // โหมดแปลง DEM: `voxel-game --convert-dem <ไฟล์.tif> [lat_top lon_left]` แล้วจบ
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--convert-dem") {
+        let Some(path) = args.get(i + 1) else {
+            eprintln!("ใช้: --convert-dem <ไฟล์.tif> [lat มุมบน] [lon มุมซ้าย]");
+            std::process::exit(1);
+        };
+        let lat = args.get(i + 2).and_then(|s| s.parse().ok());
+        let lon = args.get(i + 3).and_then(|s| s.parse().ok());
+        dem::convert_dem_cli(path, lat, lon);
+        return;
+    }
+
     App::new()
         .init_resource::<GameSettings>()
         .init_resource::<RegenerateWorld>()

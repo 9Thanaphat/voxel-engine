@@ -33,6 +33,8 @@ pub enum ServerMessage {
         /// ลำดับผู้เล่น (host = 1, client ตามลำดับ join = 2, 3, ...)
         player_number: u32,
         noise: crate::NoiseParams,
+        /// client generate chunk เองจากค่านี้ — RealWorld ต้องมีไฟล์ dem ตรงกัน
+        terrain: crate::TerrainSource,
         spawn_pos: [f32; 3],
         time_of_day: f32,
     },
@@ -167,8 +169,9 @@ pub struct ClientSync {
     /// ตั้งใจออกเอง (จาก pause menu) — watchdog จะพากลับ MainMenu เงียบๆ
     /// แทนที่จะเด้งไปหน้า multiplayer พร้อมข้อความ "หลุดจากเซิร์ฟเวอร์"
     pub leaving: bool,
-    /// noise เดิมของผู้เล่น ไว้คืนค่าตอน disconnect
+    /// noise/terrain เดิมของผู้เล่น ไว้คืนค่าตอน disconnect
     pub prev_noise: Option<crate::NoiseParams>,
+    pub prev_terrain: Option<crate::TerrainSource>,
     /// chunk cache จาก host — อยู่ข้าม unload/reload โดยไม่แตะ disk
     pub full_chunks: HashMap<IVec2, ReceivedChunk>,
     /// edit ที่มาถึงก่อน chunk จะโหลด
@@ -340,6 +343,7 @@ pub fn start_client(
     commands: &mut Commands,
     mp_ui: &mut MultiplayerUi,
     current_noise: crate::NoiseParams,
+    current_terrain: crate::TerrainSource,
 ) {
     let text = mp_ui.address.trim();
     let addr_text = if text.is_empty() {
@@ -385,6 +389,7 @@ pub fn start_client(
     commands.insert_resource(ClientSync {
         my_id: client_id,
         prev_noise: Some(current_noise),
+        prev_terrain: Some(current_terrain),
         ..Default::default()
     });
     mp_ui.status = "กำลังเชื่อมต่อ...".into();
@@ -570,6 +575,7 @@ pub fn on_server_event(
                 client_id,
                 player_number,
                 noise: settings.noise,
+                terrain: settings.terrain_source,
                 spawn_pos: spawn_pos.to_array(),
                 time_of_day: settings.time_of_day,
             };
@@ -801,9 +807,10 @@ pub fn client_receive_messages(
 ) {
     while let Some(bytes) = client.receive_message(DefaultChannel::ReliableOrdered) {
         match decode::<ServerMessage>(&bytes) {
-            Some(ServerMessage::Welcome { client_id: _, player_number, noise, spawn_pos, time_of_day }) => {
+            Some(ServerMessage::Welcome { client_id: _, player_number, noise, terrain, spawn_pos, time_of_day }) => {
                 client_sync.my_number = player_number;
                 settings.noise = noise;
+                settings.terrain_source = terrain;
                 settings.time_of_day = time_of_day;
                 if let Some(mut transform) = camera_query.iter_mut().next() {
                     transform.translation = Vec3::from_array(spawn_pos);
@@ -944,9 +951,12 @@ pub fn client_connection_watchdog(
         .unwrap_or_else(|| "connection lost".into());
 
     if client_sync.received_welcome {
-        // ออกจากเกม → คืนค่า noise เดิม ล้างโลกของ host ทิ้ง
+        // ออกจากเกม → คืนค่า noise/terrain เดิม ล้างโลกของ host ทิ้ง
         if let Some(prev) = client_sync.prev_noise {
             settings.noise = prev;
+        }
+        if let Some(prev) = client_sync.prev_terrain {
+            settings.terrain_source = prev;
         }
         regenerate.0 = true;
         if client_sync.leaving {
@@ -985,7 +995,7 @@ pub fn autostart_from_args(
     } else if let Some(i) = args.iter().position(|a| a == "--join") {
         mp_ui.address = args.get(i + 1).cloned().unwrap_or_else(|| "127.0.0.1".into());
         next_state.set(crate::GameState::MultiplayerMenu);
-        start_client(&mut commands, &mut mp_ui, settings.noise);
+        start_client(&mut commands, &mut mp_ui, settings.noise, settings.terrain_source);
     }
 }
 

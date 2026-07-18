@@ -1358,8 +1358,8 @@ impl TerrainSampler {
         self.cave.get([wx * 0.06, y as f64 * 0.06, wz * 0.06]) > 0.45
     }
 
-    pub fn surface_block(&self, height: i32, desert: bool) -> BlockType {
-        if desert || height <= SEA_LEVEL as i32 + 1 {
+    pub fn surface_block(&self, height: i32, desert: bool, sea_level: i32) -> BlockType {
+        if desert || height <= sea_level + 1 {
             BlockType::Sand
         } else {
             BlockType::Grass
@@ -1367,7 +1367,11 @@ impl TerrainSampler {
     }
 }
 
-fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> ChunkBlocks {
+fn generate_chunk_blocks(
+    chunk_pos: IVec2,
+    noise: crate::NoiseParams,
+    source: crate::TerrainSource,
+) -> ChunkBlocks {
     let sampler = TerrainSampler::new(noise);
     // เริ่มเป็นอากาศ uniform ทั้งคอลัมน์ — เขียนเฉพาะที่มีของ ฟ้าไม่เคยถูก
     // materialize; compact() ท้ายฟังก์ชันยุบใต้ดิน/น้ำที่บังเอิญล้วนกลับเป็น 1 byte
@@ -1376,6 +1380,17 @@ fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> ChunkBl
     let base_x = chunk_pos.x as f64 * CHUNK_WIDTH as f64;
     let base_z = chunk_pos.y as f64 * CHUNK_WIDTH as f64;
 
+    // โลกจริง: ความสูงจาก DEM (พิกัดบล็อก = เมตร), ทะเลจริงอยู่ y = DEM_SEA_LEVEL_Y
+    // (ไม่มีไฟล์ dem → โลกอากาศล้วน; UI กัน RealWorld ไว้แล้วถ้าไฟล์ไม่มี)
+    let dem_data = (source == crate::TerrainSource::RealWorld)
+        .then(crate::dem::dem)
+        .flatten();
+    let sea_level: i32 = if dem_data.is_some() {
+        crate::dem::DEM_SEA_LEVEL_Y
+    } else {
+        SEA_LEVEL as i32
+    };
+
     let mut heights = [[0i32; CHUNK_WIDTH]; CHUNK_WIDTH];
     let mut desert = [[false; CHUNK_WIDTH]; CHUNK_WIDTH];
 
@@ -1383,8 +1398,14 @@ fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> ChunkBl
         for x in 0..CHUNK_WIDTH {
             let wx = base_x + x as f64;
             let wz = base_z + z as f64;
-            heights[z][x] = sampler.height(wx, wz);
-            desert[z][x] = sampler.is_desert(wx, wz);
+            heights[z][x] = match dem_data {
+                Some(d) => (crate::dem::DEM_SEA_LEVEL_Y as f32 + d.elevation_at_block(wx, wz))
+                    .round()
+                    .clamp(3.0, (CHUNK_HEIGHT - 16) as f32) as i32,
+                None => sampler.height(wx, wz),
+            };
+            // โลกจริงไม่มี biome ทะเลทรายจาก noise (เชียงใหม่ไม่มีทะเลทราย)
+            desert[z][x] = dem_data.is_none() && sampler.is_desert(wx, wz);
         }
     }
 
@@ -1394,7 +1415,7 @@ fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> ChunkBl
             let wz = base_z + z as f64;
             let h = heights[z][x];
             let is_desert = desert[z][x];
-            let surface = sampler.surface_block(h, is_desert);
+            let surface = sampler.surface_block(h, is_desert, sea_level);
 
             for y in 0..CHUNK_HEIGHT {
                 let yi = y as i32;
@@ -1404,7 +1425,7 @@ fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> ChunkBl
                     if is_desert { BlockType::Sand } else { BlockType::Dirt }
                 } else if yi == h {
                     surface
-                } else if yi <= SEA_LEVEL as i32 {
+                } else if yi <= sea_level {
                     BlockType::Water
                 } else {
                     break; // เหนือนี้เป็นอากาศทั้งหมด
@@ -1436,7 +1457,7 @@ fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> ChunkBl
         let tx = 2 + (next() % 12) as usize;
         let tz = 2 + (next() % 12) as usize;
         let h = heights[tz][tx];
-        if desert[tz][tx] || h <= SEA_LEVEL as i32 + 1 || h + 7 >= CHUNK_HEIGHT as i32 {
+        if desert[tz][tx] || h <= sea_level + 1 || h + 7 >= CHUNK_HEIGHT as i32 {
             continue;
         }
 
@@ -1469,7 +1490,7 @@ fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> ChunkBl
         let gx = (next() % CHUNK_WIDTH as u64) as usize;
         let gz = (next() % CHUNK_WIDTH as u64) as usize;
         let h = heights[gz][gx];
-        if desert[gz][gx] || h <= SEA_LEVEL as i32 + 1 || h + 1 >= CHUNK_HEIGHT as i32 {
+        if desert[gz][gx] || h <= sea_level + 1 || h + 1 >= CHUNK_HEIGHT as i32 {
             continue;
         }
         if blocks.get(gx, h as usize, gz) == BlockType::Grass
@@ -1734,6 +1755,7 @@ impl Default for ChunkGenerator {
 pub fn spawn_block_generation_task(
     chunk_pos: IVec2,
     noise: crate::NoiseParams,
+    source: crate::TerrainSource,
     version: u32,
     sender: Sender<ChunkBlockData>,
     use_disk_save: bool,
@@ -1745,7 +1767,7 @@ pub fn spawn_block_generation_task(
         let blocks = use_disk_save
             .then(|| load_chunk(chunk_pos))
             .flatten()
-            .unwrap_or_else(|| generate_chunk_blocks(chunk_pos, noise));
+            .unwrap_or_else(|| generate_chunk_blocks(chunk_pos, noise, source));
         let _ = sender.send(ChunkBlockData {
             chunk_pos,
             blocks: Arc::new(blocks),
@@ -1813,7 +1835,8 @@ pub fn spawn_surface_preview_task(
             for x in 0..CHUNK_WIDTH as i32 {
                 let h = height_at(x, z);
                 let is_desert = sampler.is_desert(base_x + x as f64, base_z + z as f64);
-                let top = sampler.surface_block(h, is_desert);
+                // preview เป็นเครื่องมือจูน noise — ใช้ทะเล noise เสมอ
+                let top = sampler.surface_block(h, is_desert, SEA_LEVEL as i32);
                 let side = if is_desert { BlockType::Sand } else { BlockType::Dirt };
 
                 // หน้าบนของบล็อกผิว (บล็อก y = h กินพื้นที่ถึง y = h + 1)
@@ -2209,7 +2232,7 @@ pub fn world_generation_system(
                 });
             } else {
                 spawn_block_generation_task(
-                    chunk_pos, settings.noise, generator.version, sender,
+                    chunk_pos, settings.noise, settings.terrain_source, generator.version, sender,
                     client_sync.is_none(),
                 );
             }

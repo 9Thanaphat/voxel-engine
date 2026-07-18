@@ -87,9 +87,10 @@ pub struct ParticleAssets {
     splash: Handle<EffectAsset>,
     sparkle: Handle<EffectAsset>,
     explosion: Handle<EffectAsset>,
-    mushroom_column: Handle<EffectAsset>,
+    fireball: Handle<EffectAsset>,
     mushroom_cap: Handle<EffectAsset>,
     base_surge: Handle<EffectAsset>,
+    dynamic_updraft: Handle<EffectAsset>,
     /// texture ขาว 1x1 คู่กับ tint = สีบล็อก สำหรับบล็อกที่ยังไม่มี texture
     white: Handle<Image>,
 }
@@ -306,43 +307,92 @@ fn explosion_effect() -> EffectAsset {
         })
 }
 
-/// ลำต้นเห็ดควัน: ควันร้อนพวยพุ่งขึ้นจากจุดระเบิดเป็นคอลัมน์แคบ อายุยาว
-fn mushroom_column_effect() -> EffectAsset {
+/// ลูกไฟร้อนแรง (Additive Blend) ระเบิดสว่างวาบแล้วสลายไปอย่างรวดเร็ว
+fn fireball_effect() -> EffectAsset {
     let writer = ExprWriter::new();
 
     let init_pos = SetPositionSphereModifier {
         center: writer.lit(Vec3::ZERO).expr(),
-        radius: writer.lit(2.5).expr(),
+        radius: writer.lit(0.5).expr(),
         dimension: ShapeDimension::Volume,
     };
 
-    // พุ่งขึ้นแรง + ส่ายข้างเล็กน้อย — ต้องไต่ถึงระดับหัวเห็ด (~85 บล็อก)
+    let dir = (writer.rand(VectorType::VEC3F) * writer.lit(2.0) - writer.lit(1.0)).normalized();
+    let speed = writer.lit(3.0).uniform(writer.lit(15.0));
+    let vel = dir * speed;
+    let init_vel = SetAttributeModifier::new(Attribute::VELOCITY, vel.expr());
+
+    let init_age = SetAttributeModifier::new(Attribute::AGE, writer.lit(0.0).expr());
+    let lifetime = writer.lit(0.3).uniform(writer.lit(0.8)).expr(); // อายุสั้น
+    let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
+
+    let update_drag = LinearDragModifier::new(writer.lit(4.0).expr());
+
+    // สีส้มจ้า (HDR) เรืองแสงสว่าง
+    let mut color = bevy_hanabi::Gradient::new();
+    color.add_key(0.0, Vec4::new(25.0, 10.0, 2.0, 1.0));
+    color.add_key(0.2, Vec4::new(10.0, 4.0, 0.5, 1.0));
+    color.add_key(1.0, Vec4::new(2.0, 0.5, 0.1, 0.0));
+
+    let mut size = bevy_hanabi::Gradient::new();
+    size.add_key(0.0, Vec3::splat(1.0));
+    size.add_key(0.3, Vec3::splat(3.5));
+    size.add_key(1.0, Vec3::splat(0.5));
+
+    EffectAsset::new(2048, SpawnerSettings::once(250.0.into()), writer.finish())
+        .with_name("fireball_explosion")
+        .init(init_pos)
+        .init(init_vel)
+        .init(init_age)
+        .init(init_lifetime)
+        .update(update_drag)
+        .render(ColorOverLifetimeModifier {
+            gradient: color,
+            blend: ColorBlendMode::Add, // หัวใจหลักคือ Additive Blend ทำให้เรืองแสงจ้า
+            mask: ColorBlendMask::RGBA,
+        })
+        .render(SizeOverLifetimeModifier {
+            gradient: size,
+            screen_space_size: false,
+        })
+}
+
+/// หัวเห็ด: ก้อนควันหนาแผ่ออกด้านบน (เกิดสูงกว่าจุดระเบิด ~28 บล็อก)
+/// alpha ไต่ขึ้นช้าๆ ให้รู้สึกว่าหัวเห็ด "ก่อตัว" หลังคอลัมน์พุ่งขึ้นไปถึง
+fn dynamic_updraft_effect() -> EffectAsset {
+    let writer = ExprWriter::new();
+    let init_pos = SetPositionSphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        radius: writer.lit(1.0).expr(),
+        dimension: ShapeDimension::Volume,
+    };
+    // พุ่งขึ้นแรง + ส่ายข้างเล็กน้อย
     let xz = (writer.rand(VectorType::VEC3F) * writer.lit(2.0) - writer.lit(1.0))
-        * writer.lit(Vec3::new(3.5, 0.0, 3.5));
+        * writer.lit(Vec3::new(1.0, 0.0, 1.0));
     let up = writer.lit(Vec3::Y * 35.0) + writer.lit(Vec3::Y * 20.0) * writer.rand(ScalarType::Float);
     let init_vel = SetAttributeModifier::new(Attribute::VELOCITY, (xz + up).expr());
 
     let init_age = SetAttributeModifier::new(Attribute::AGE, writer.lit(0.0).expr());
-    let lifetime = writer.lit(45.0).uniform(writer.lit(60.0)).expr(); // อยู่นานขึ้นมาก
+    let lifetime = writer.lit(45.0).uniform(writer.lit(60.0)).expr();
     let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
 
     let update_drag = LinearDragModifier::new(writer.lit(0.35).expr());
 
-    // ร้อนจ้าช่วงสั้นๆ ที่โคน สว่างมากๆ แล้วเป็นควันเทา จางตอนท้าย
     let mut color = bevy_hanabi::Gradient::new();
-    color.add_key(0.0, Vec4::new(30.0, 25.0, 20.0, 1.0)); // ขาวจ้า (White-hot)
+    color.add_key(0.0, Vec4::new(30.0, 25.0, 20.0, 1.0));
     color.add_key(0.1, Vec4::new(5.0, 2.0, 0.5, 0.95));
     color.add_key(0.3, Vec4::new(0.45, 0.42, 0.38, 0.95));
     color.add_key(0.8, Vec4::new(0.3, 0.3, 0.3, 0.8));
     color.add_key(1.0, Vec4::new(0.25, 0.25, 0.25, 0.0));
 
     let mut size = bevy_hanabi::Gradient::new();
-    size.add_key(0.0, Vec3::splat(5.0));
-    size.add_key(0.5, Vec3::splat(12.0));
-    size.add_key(1.0, Vec3::splat(18.0));
+    size.add_key(0.0, Vec3::splat(4.0));
+    size.add_key(0.5, Vec3::splat(10.0));
+    size.add_key(1.0, Vec3::splat(16.0));
 
-    EffectAsset::new(4096, SpawnerSettings::once(2500.0.into()), writer.finish())
-        .with_name("mushroom_column")
+    // ใช้ SpawnerSettings::once จำนวนน้อยกว่าเพราะเกิดหลายจุดพร้อมกัน
+    EffectAsset::new(8192, SpawnerSettings::once(40.0.into()), writer.finish())
+        .with_name("dynamic_updraft")
         .init(init_pos)
         .init(init_vel)
         .init(init_age)
@@ -359,8 +409,6 @@ fn mushroom_column_effect() -> EffectAsset {
         })
 }
 
-/// หัวเห็ด: ก้อนควันหนาแผ่ออกด้านบน (เกิดสูงกว่าจุดระเบิด ~28 บล็อก)
-/// alpha ไต่ขึ้นช้าๆ ให้รู้สึกว่าหัวเห็ด "ก่อตัว" หลังคอลัมน์พุ่งขึ้นไปถึง
 fn mushroom_cap_effect() -> EffectAsset {
     let writer = ExprWriter::new();
 
@@ -495,9 +543,10 @@ pub fn setup_particles(
         splash: effects.add(splash_effect()),
         sparkle: effects.add(sparkle_effect()),
         explosion: effects.add(explosion_effect()),
-        mushroom_column: effects.add(mushroom_column_effect()),
+        fireball: effects.add(fireball_effect()),
         mushroom_cap: effects.add(mushroom_cap_effect()),
         base_surge: effects.add(base_surge_effect()),
+        dynamic_updraft: effects.add(dynamic_updraft_effect()),
         white,
     });
 }
@@ -604,6 +653,13 @@ pub fn spawn_explosion_fx(
             Transform::from_translation(fx.center),
             FxLifetime(Timer::from_seconds(2.5, TimerMode::Once)),
         ));
+        
+        // ลูกไฟสว่างวาบแบบเรืองแสง
+        commands.spawn((
+            ParticleEffect::new(assets.fireball.clone()),
+            Transform::from_translation(fx.center),
+            FxLifetime(Timer::from_seconds(1.0, TimerMode::Once)),
+        ));
 
         // nuke: โดมพลาสม่า (Trinity fireball) + เห็ดควัน
         if fx.is_nuke {
@@ -634,11 +690,29 @@ pub fn spawn_explosion_fx(
                 WilsonCloud { age: 0.0, duration: duration * 0.45, max_scale: 250.0 * scale },
             ));
 
-            commands.spawn((
-                ParticleEffect::new(assets.mushroom_column.clone()),
-                Transform::from_translation(fx.center),
-                FxLifetime(Timer::from_seconds(60.0, TimerMode::Once)), // ปรับเวลา despawn ให้นานขึ้น
-            ));
+            // สร้างก้านเห็ดตาม ray ที่สะท้อนพื้นดินจริง!
+            let mut ground_hits: Vec<Vec3> = fx.rays.iter()
+                .filter(|s| s.b.y < s.a.y && s.b.y < fx.center.y) // พุ่งลง
+                .map(|s| s.b)
+                .collect();
+            
+            if ground_hits.len() > 64 {
+                let step = ground_hits.len() as f32 / 64.0;
+                let mut subsampled = Vec::new();
+                for i in 0..64 {
+                    subsampled.push(ground_hits[(i as f32 * step) as usize]);
+                }
+                ground_hits = subsampled;
+            }
+
+            for hit_pos in ground_hits {
+                commands.spawn((
+                    ParticleEffect::new(assets.dynamic_updraft.clone()),
+                    Transform::from_translation(hit_pos),
+                    FxLifetime(Timer::from_seconds(60.0, TimerMode::Once)),
+                ));
+            }
+
             commands.spawn((
                 ParticleEffect::new(assets.mushroom_cap.clone()),
                 Transform::from_translation(fx.center),

@@ -421,7 +421,7 @@ pub fn multiplayer_menu_system(
 
                 let btn_size = bevy_egui::egui::vec2(200.0, 40.0);
                 if ui.add_enabled(!connecting, bevy_egui::egui::Button::new("Join").min_size(btn_size)).clicked() {
-                    crate::network::start_client(&mut commands, &mut mp_ui, settings.noise);
+                    crate::network::start_client(&mut commands, &mut mp_ui, settings.noise, settings.terrain_source);
                 }
                 if !mp_ui.status.is_empty() {
                     ui.add_space(6.0);
