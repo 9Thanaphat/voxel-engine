@@ -16,6 +16,14 @@ pub struct ModeText;
 #[derive(Component)]
 pub struct InGameUi;
 
+/// กรอบช่อง hotbar (index 0..9) — border เปลี่ยนสีตามช่องที่เลือก
+#[derive(Component)]
+pub struct HotbarSlotUi(pub usize);
+
+/// icon ข้างในช่อง — เป็น ImageNode (บล็อกมี texture) หรือสี่เหลี่ยมสี (ไม่มี)
+#[derive(Component)]
+pub struct HotbarSlotIcon(pub usize);
+
 pub fn setup_ui(mut commands: Commands) {
     // Crosshair
     commands.spawn((
@@ -37,6 +45,45 @@ pub fn setup_ui(mut commands: Commands) {
             },
             BackgroundColor(Color::WHITE),
         ));
+    });
+
+    // Hotbar 9 ช่อง ล่างกลางจอ — icon/กรอบเติมโดย update_hotbar_ui เฟรมแรก
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(10.0),
+            width: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            column_gap: Val::Px(4.0),
+            ..default()
+        },
+        InGameUi,
+        Visibility::Hidden,
+    )).with_children(|parent| {
+        for i in 0..9 {
+            parent.spawn((
+                Node {
+                    width: Val::Px(48.0),
+                    height: Val::Px(48.0),
+                    border: UiRect::all(Val::Px(3.0)),
+                    padding: UiRect::all(Val::Px(3.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+                BorderColor::all(Color::srgba(0.3, 0.3, 0.3, 0.8)),
+                HotbarSlotUi(i),
+            )).with_children(|slot| {
+                slot.spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::NONE),
+                    HotbarSlotIcon(i),
+                ));
+            });
+        }
     });
 
     // Debug Menu (F3 Style Panel)
@@ -104,6 +151,131 @@ pub fn setup_ui(mut commands: Commands) {
                 TextColor(Color::WHITE),
                 ModeText,
             ));
+        });
+}
+
+/// อัปเดตกรอบ+icon ของ hotbar — ทำงานเฉพาะตอน Hotbar เปลี่ยน (รวมเฟรมแรก)
+/// เลี่ยงปัญหาลำดับ Startup: FACE_TEXTURES ถูก init ใน setup_voxel ซึ่งเสร็จ
+/// ก่อน Update เฟรมแรกแน่นอน
+pub fn update_hotbar_ui(
+    hotbar: Res<crate::voxel::Hotbar>,
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut slot_query: Query<(&HotbarSlotUi, &mut BorderColor)>,
+    mut icon_query: Query<(Entity, &HotbarSlotIcon, &mut BackgroundColor)>,
+) {
+    if !hotbar.is_changed() {
+        return;
+    }
+
+    for (slot, mut border) in &mut slot_query {
+        *border = if slot.0 == hotbar.selected {
+            BorderColor::all(Color::WHITE)
+        } else {
+            BorderColor::all(Color::srgba(0.3, 0.3, 0.3, 0.8))
+        };
+    }
+
+    for (entity, icon, mut bg) in &mut icon_query {
+        match hotbar.slots[icon.0] {
+            Some(stack) => {
+                if let Some(tex) = crate::voxel::hotbar_icon_texture(stack.block) {
+                    commands.entity(entity).insert(ImageNode::new(asset_server.load(tex)));
+                    bg.0 = Color::NONE;
+                } else {
+                    commands.entity(entity).remove::<ImageNode>();
+                    let c = crate::voxel::block_color(stack.block);
+                    bg.0 = Color::srgba(c[0], c[1], c[2], c[3]);
+                }
+            }
+            None => {
+                commands.entity(entity).remove::<ImageNode>();
+                bg.0 = Color::NONE;
+            }
+        }
+    }
+}
+
+/// หน้าต่างเลือกบล็อกลงช่อง hotbar — E เปิด/ปิด, ESC ปิด (pause_menu_system
+/// ต้องรันก่อนระบบนี้ ให้เห็นว่า picker ยังเปิดอยู่แล้วไม่เปิด pause ทับ)
+pub fn block_picker_system(
+    mut contexts: bevy_egui::EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut picker: ResMut<crate::voxel::BlockPickerOpen>,
+    mut hotbar: ResMut<crate::voxel::Hotbar>,
+    paused: Res<crate::Paused>,
+    mut cursor_query: Query<&mut bevy::window::CursorOptions, With<bevy::window::PrimaryWindow>>,
+) {
+    if keyboard.just_pressed(KeyCode::KeyE) && !paused.0 {
+        picker.0 = !picker.0;
+        if picker.0 {
+            // ปล่อยเมาส์ให้คลิกหน้าต่างได้ — ล็อคกลับด้วยคลิกซ้ายตามเดิม (cursor_grab_system)
+            if let Ok(mut cursor) = cursor_query.single_mut() {
+                cursor.grab_mode = bevy::window::CursorGrabMode::None;
+                cursor.visible = true;
+            }
+        }
+    }
+    if picker.0 && keyboard.just_pressed(KeyCode::Escape) {
+        picker.0 = false;
+    }
+    if !picker.0 {
+        return;
+    }
+
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    let ctx = ctx.clone();
+
+    bevy_egui::egui::Window::new("Block Picker")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .anchor(bevy_egui::egui::Align2::CENTER_CENTER, bevy_egui::egui::vec2(0.0, 0.0))
+        .show(&ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(14.0);
+                ui.heading(bevy_egui::egui::RichText::new("SELECT BLOCK").size(24.0).strong());
+                ui.label(format!("ใส่ลงช่อง {} (กด 1-9 เปลี่ยนช่องได้)", hotbar.selected + 1));
+                ui.add_space(10.0);
+            });
+
+            bevy_egui::egui::Grid::new("block_picker_grid").spacing([6.0, 6.0]).show(ui, |ui| {
+                for (n, &block) in crate::voxel::PLACEABLE_BLOCKS.iter().enumerate() {
+                    let c = crate::voxel::block_color(block);
+                    let fill = bevy_egui::egui::Color32::from_rgb(
+                        (c[0] * 255.0) as u8,
+                        (c[1] * 255.0) as u8,
+                        (c[2] * 255.0) as u8,
+                    );
+                    // ตัวหนังสือขาว/ดำตามความสว่างพื้นปุ่ม ให้อ่านออกทุกสี
+                    let luma = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+                    let text_color = if luma > 0.5 {
+                        bevy_egui::egui::Color32::BLACK
+                    } else {
+                        bevy_egui::egui::Color32::WHITE
+                    };
+                    let btn = bevy_egui::egui::Button::new(
+                        bevy_egui::egui::RichText::new(crate::voxel::block_name(block)).color(text_color),
+                    )
+                    .fill(fill)
+                    .min_size(bevy_egui::egui::vec2(96.0, 40.0));
+
+                    if ui.add(btn).clicked() {
+                        let sel = hotbar.selected;
+                        hotbar.slots[sel] =
+                            Some(crate::voxel::ItemStack { block, count: None });
+                    }
+                    if n % 4 == 3 {
+                        ui.end_row();
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| {
+                ui.label("E / ESC: ปิด");
+                ui.add_space(6.0);
+            });
         });
 }
 
@@ -234,8 +406,10 @@ pub fn pause_menu_system(
     mut server: Option<ResMut<bevy_renet::RenetServer>>,
     mut client: Option<ResMut<bevy_renet::RenetClient>>,
     mut client_sync: Option<ResMut<crate::network::ClientSync>>,
+    picker: Res<crate::voxel::BlockPickerOpen>,
 ) {
-    if keyboard.just_pressed(KeyCode::Escape) {
+    // picker เปิดอยู่ ESC เป็นการปิด picker (block_picker_system รันถัดไปจัดการ)
+    if keyboard.just_pressed(KeyCode::Escape) && !picker.0 {
         paused.0 = !paused.0;
     }
     if !paused.0 {
@@ -329,7 +503,7 @@ pub fn update_block_target_text(
             None => "None",
         };
         text.0 = format!(
-            "Block: {} | Place [1-0,-]: {}",
+            "Block: {} | Place [1-9]: {}",
             looking_at,
             crate::voxel::block_name(selected.0)
         );
@@ -532,6 +706,7 @@ pub fn egui_settings_system(
         ui.checkbox(&mut wireframe_config.global, "Wireframe");
 
         ui.separator();
-        ui.label("ESC: unlock mouse | F: fly/walk | 1-0,-,=,T: select block");
+        ui.label("ESC: unlock mouse | F: fly/walk | 1-9/scroll: hotbar slot");
+        ui.label("Middle click: pick block | E: block picker | T: subvoxel mode");
     });
 }

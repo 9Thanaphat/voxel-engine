@@ -95,6 +95,8 @@ fn main() {
         .init_resource::<RegenerateWorld>()
         .init_resource::<voxel::TargetedBlock>()
         .init_resource::<voxel::SelectedBlock>()
+        .init_resource::<voxel::Hotbar>()
+        .init_resource::<voxel::BlockPickerOpen>()
         .init_resource::<voxel::InteractionMode>()
         .init_resource::<voxel::ActiveFluids>()
         .init_resource::<voxel::ActivePools>()
@@ -139,7 +141,9 @@ fn main() {
                     camera::camera_movement_system,
                     camera::camera_look_system,
                     camera::cursor_grab_system,
+                    voxel::hotbar_input_system,
                 ).run_if(unpaused),
+                ui::update_hotbar_ui,
                 ui::update_coordinate_ui_system,
                 ui::update_fps_text,
                 ui::update_block_target_text,
@@ -202,7 +206,11 @@ fn main() {
             bevy_egui::EguiPrimaryContextPass,
             (
                 ui::egui_settings_system.run_if(in_state(GameState::InGame)),
-                ui::pause_menu_system.run_if(in_state(GameState::InGame)),
+                // pause ต้องรันก่อน picker: ESC ตอน picker เปิด = ปิด picker ไม่ใช่เปิด pause
+                ui::pause_menu_system
+                    .run_if(in_state(GameState::InGame))
+                    .before(ui::block_picker_system),
+                ui::block_picker_system.run_if(in_state(GameState::InGame)),
                 ui::main_menu_system.run_if(in_state(GameState::MainMenu)),
                 ui::multiplayer_menu_system.run_if(in_state(GameState::MultiplayerMenu)),
             ),

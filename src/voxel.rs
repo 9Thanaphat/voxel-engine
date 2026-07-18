@@ -2413,13 +2413,124 @@ pub struct TargetHit {
 #[derive(Resource, Default)]
 pub struct TargetedBlock(pub Option<TargetHit>);
 
-/// บล็อกที่เลือกไว้สำหรับวาง (กด 1-0 และ -)
+/// บล็อกที่เลือกไว้สำหรับวาง — sync มาจากช่อง hotbar ที่เลือกอยู่
+/// (ยังเป็น source of truth ของโค้ดวางบล็อก/network — Air = ช่องว่าง วางไม่ได้)
 #[derive(Resource)]
 pub struct SelectedBlock(pub BlockType);
 
 impl Default for SelectedBlock {
     fn default() -> Self {
         Self(BlockType::Dirt)
+    }
+}
+
+// --------------------------------------------------------
+// Hotbar — 9 ช่องแบบ Minecraft
+// โครงเป็น ItemStack มี count เผื่ออนาคตทำ survival (ตอนนี้ count = None
+// คือ creative วางไม่จำกัด) — UI อยู่ ui.rs, ที่นี่คือ state + input
+// --------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct ItemStack {
+    pub block: BlockType,
+    /// None = วางไม่จำกัด (creative) — survival ค่อยใส่จำนวนจริงแล้ว render เลขบนช่อง
+    pub count: Option<u32>,
+}
+
+#[derive(Resource)]
+pub struct Hotbar {
+    pub slots: [Option<ItemStack>; 9],
+    /// index ช่องที่เลือกอยู่ (0..9)
+    pub selected: usize,
+}
+
+impl Default for Hotbar {
+    fn default() -> Self {
+        const DEFAULTS: [BlockType; 9] = [
+            BlockType::Dirt, BlockType::Grass, BlockType::Stone,
+            BlockType::Wood, BlockType::Leaves, BlockType::Sand,
+            BlockType::Water8, BlockType::Glowstone, BlockType::Glass,
+        ];
+        Self {
+            slots: DEFAULTS.map(|block| Some(ItemStack { block, count: None })),
+            selected: 0,
+        }
+    }
+}
+
+/// หน้าต่างเลือกบล็อก (กด E) เปิดอยู่ไหม — ตอนเปิด block_interaction หยุดรับคลิก
+#[derive(Resource, Default)]
+pub struct BlockPickerOpen(pub bool);
+
+/// บล็อกทั้งหมดที่เลือกวางได้ (รายการในหน้าต่างกด E)
+pub const PLACEABLE_BLOCKS: [BlockType; 13] = [
+    BlockType::Dirt, BlockType::Grass, BlockType::Stone, BlockType::Wood,
+    BlockType::Leaves, BlockType::Sand, BlockType::Water8, BlockType::Glowstone,
+    BlockType::LampRed, BlockType::LampGreen, BlockType::LampBlue, BlockType::Glass,
+    BlockType::TallGrass,
+];
+
+/// texture ที่ใช้เป็น icon บนช่อง hotbar — เอาหน้าข้างก่อน (grass เห็นเป็น
+/// บล็อกหญ้าชัดกว่าหน้าบน) ไม่มีค่อย fallback หน้าบน / สีพื้นใน ui.rs
+pub fn hotbar_icon_texture(block: BlockType) -> Option<&'static str> {
+    face_texture(block, 2, 0).or_else(|| face_texture(block, 0, 0))
+}
+
+/// input ของ hotbar: 1-9 เลือกช่อง, scroll เลื่อนช่อง (วนรอบ), คลิกกลาง pick block
+/// จบด้วย sync บล็อกของช่องที่เลือกลง SelectedBlock ให้ระบบวางบล็อกใช้ต่อ
+pub fn hotbar_input_system(
+    mut hotbar: ResMut<Hotbar>,
+    mut selected: ResMut<SelectedBlock>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    target: Res<TargetedBlock>,
+    mut q_egui: Query<&mut bevy_egui::EguiContext, With<bevy::window::PrimaryWindow>>,
+) {
+    const SLOT_KEYS: [KeyCode; 9] = [
+        KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3,
+        KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6,
+        KeyCode::Digit7, KeyCode::Digit8, KeyCode::Digit9,
+    ];
+    for (i, key) in SLOT_KEYS.iter().enumerate() {
+        if keyboard.just_pressed(*key) {
+            hotbar.selected = i;
+        }
+    }
+
+    // เมาส์อยู่บน egui = กำลังใช้เมนู — scroll/คลิกกลางเป็นของเมนู ไม่ใช่ hotbar
+    let over_egui = q_egui.iter_mut().next().map_or(false, |mut ctx| {
+        ctx.get_mut().egui_wants_pointer_input() || ctx.get_mut().is_pointer_over_egui()
+    });
+
+    let mut scroll = 0.0f32;
+    for ev in wheel.read() {
+        scroll += ev.y;
+    }
+    if scroll != 0.0 && !over_egui {
+        let dir = if scroll < 0.0 { 1 } else { -1 }; // scroll ลง = ช่องถัดไปทางขวา
+        hotbar.selected = (hotbar.selected as i32 + dir).rem_euclid(9) as usize;
+    }
+
+    // pick block: มีในแถบอยู่แล้วก็เลือกช่องนั้น ไม่งั้นใส่ทับช่องปัจจุบัน (แบบ Minecraft)
+    if mouse.just_pressed(MouseButton::Middle) && !over_egui {
+        if let Some(hit) = target.0 {
+            // น้ำระดับไหนก็ตาม pick ได้เป็นน้ำเต็มบล็อก
+            let block = if hit.block.is_water() { BlockType::Water8 } else { hit.block };
+            if block != BlockType::Air {
+                if let Some(i) = hotbar.slots.iter().position(|s| s.map(|s| s.block) == Some(block)) {
+                    hotbar.selected = i;
+                } else {
+                    let sel = hotbar.selected;
+                    hotbar.slots[sel] = Some(ItemStack { block, count: None });
+                }
+            }
+        }
+    }
+
+    let block = hotbar.slots[hotbar.selected].map_or(BlockType::Air, |s| s.block);
+    if selected.0 != block {
+        selected.0 = block;
     }
 }
 
@@ -2862,7 +2973,8 @@ pub fn block_interaction_system(
     mut commands: Commands,
     mut world: ResMut<VoxelWorld>,
     target: Res<TargetedBlock>,
-    mut selected: ResMut<SelectedBlock>,
+    selected: Res<SelectedBlock>,
+    picker: Res<BlockPickerOpen>,
     mut interaction_mode: ResMut<InteractionMode>,
     (mouse_input, keyboard): (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>),
     mut mp: MeshingParams,
@@ -2876,26 +2988,9 @@ pub fn block_interaction_system(
     ),
     mut pools: ResMut<ActivePools>,
 ) {
-    // Hotbar: กด 1-0, -, = และ T เลือกบล็อก
-    const HOTBAR: [(KeyCode, BlockType); 13] = [
-        (KeyCode::Digit1, BlockType::Dirt),
-        (KeyCode::Digit2, BlockType::Grass),
-        (KeyCode::Digit3, BlockType::Stone),
-        (KeyCode::Digit4, BlockType::Wood),
-        (KeyCode::Digit5, BlockType::Leaves),
-        (KeyCode::Digit6, BlockType::Sand),
-        (KeyCode::Digit7, BlockType::Water8),
-        (KeyCode::Digit8, BlockType::Glowstone),
-        (KeyCode::Digit9, BlockType::LampRed),
-        (KeyCode::Digit0, BlockType::LampGreen),
-        (KeyCode::Minus, BlockType::LampBlue),
-        (KeyCode::Equal, BlockType::Glass),
-        (KeyCode::KeyY, BlockType::TallGrass),
-    ];
-    for (key, block) in HOTBAR {
-        if keyboard.just_pressed(key) {
-            selected.0 = block;
-        }
+    // หน้าต่างเลือกบล็อกเปิดอยู่ — คลิกเป็นของหน้าต่าง ไม่ใช่การขุด/วาง
+    if picker.0 {
+        return;
     }
 
     // Toggle Interaction Mode
@@ -2932,7 +3027,7 @@ pub fn block_interaction_system(
                     sub: [sub_pos.x as u8, sub_pos.y as u8, sub_pos.z as u8],
                     val: 0,
                 });
-            } else if place_pressed {
+            } else if place_pressed && selected.0 != BlockType::Air {
                 let adj_sub = sub_pos + hit.normal;
                 let (mut target_macro, mut target_sub) = (hit.pos, adj_sub);
 
@@ -2958,7 +3053,7 @@ pub fn block_interaction_system(
                 pos: hit.pos.to_array(),
                 block: BlockType::Air as u8,
             });
-        } else if place_pressed {
+        } else if place_pressed && selected.0 != BlockType::Air {
             let p = hit.pos + hit.normal;
 
             let mut blocked = false;
