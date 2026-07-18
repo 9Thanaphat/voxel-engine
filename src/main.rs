@@ -6,6 +6,7 @@ mod ui;
 mod network;
 mod particles;
 mod dem;
+mod electricity;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -89,6 +90,14 @@ fn reset_paused(mut paused: ResMut<Paused>) {
     paused.0 = false;
 }
 
+/// `--realworld`: เข้าโลก DEM ตั้งแต่เริ่ม (ใช้คู่ --host ไว้เทสอัตโนมัติ)
+fn apply_cli_world_flags(mut settings: ResMut<GameSettings>) {
+    if std::env::args().any(|a| a == "--realworld") {
+        settings.terrain_source = TerrainSource::RealWorld;
+        voxel::DEM_SAVE_DIR.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 #[derive(Clone, Copy, Default, Eq, PartialEq, Debug, Hash, States)]
 pub enum GameState {
     #[default]
@@ -166,6 +175,7 @@ fn main() {
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
             bevy::diagnostic::EntityCountDiagnosticsPlugin::default(),
             bevy_egui::EguiPlugin::default(),
+            electricity::ElectricityPlugin,
             // renet: plugins ทำงานเฉพาะตอนมี RenetServer/RenetClient resource
             bevy_renet::RenetServerPlugin,
             bevy_renet::RenetClientPlugin,
@@ -211,7 +221,10 @@ fn main() {
                 ui::update_mode_text,
             ).run_if(in_state(GameState::InGame)),
         )
-        .add_systems(OnEnter(GameState::InGame), reset_paused)
+        .add_systems(
+            OnEnter(GameState::InGame),
+            (reset_paused, voxel::position_player_for_terrain),
+        )
         .add_systems(
             Update,
             (
@@ -266,6 +279,7 @@ fn main() {
             network::auto_host_system,
             network::nameplate_system,
         ))
+        .add_systems(Startup, apply_cli_world_flags.before(network::autostart_from_args))
         .add_systems(Startup, network::autostart_from_args)
         .add_systems(
             bevy_egui::EguiPrimaryContextPass,

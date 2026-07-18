@@ -336,9 +336,27 @@ pub fn toggle_ingame_ui(
     }
 }
 
+/// สลับชนิดโลก: ต่างจากเดิม = ล้างโลก generate ใหม่ + ชี้โฟลเดอร์เซฟให้ถูกโลก
+pub fn select_terrain(
+    settings: &mut crate::GameSettings,
+    regenerate: &mut crate::RegenerateWorld,
+    source: crate::TerrainSource,
+) {
+    if settings.terrain_source != source {
+        settings.terrain_source = source;
+        regenerate.0 = true;
+    }
+    crate::voxel::DEM_SAVE_DIR.store(
+        source == crate::TerrainSource::RealWorld,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 pub fn main_menu_system(
     mut contexts: bevy_egui::EguiContexts,
     mut next_state: ResMut<NextState<crate::GameState>>,
+    mut settings: ResMut<crate::GameSettings>,
+    mut regenerate: ResMut<crate::RegenerateWorld>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let ctx = ctx.clone(); // In egui 0.35 Context is easily cloned to avoid mutability issues
@@ -363,6 +381,22 @@ pub fn main_menu_system(
             let btn_size = bevy_egui::egui::vec2(200.0, 40.0);
 
             if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Singleplayer")).clicked() {
+                select_terrain(&mut settings, &mut regenerate, crate::TerrainSource::Noise);
+                next_state.set(crate::GameState::InGame);
+            }
+            ui.add_space(10.0);
+
+            // โลกจริง 1 บล็อก = 1 ม. — ต้องมีไฟล์ assets/dem/ (สร้างด้วย --convert-dem)
+            let has_dem = crate::dem::dem().is_some();
+            let rw_btn = ui.add_enabled(
+                has_dem,
+                bevy_egui::egui::Button::new("Real World (Chiang Mai)").min_size(btn_size),
+            );
+            if !has_dem {
+                rw_btn.clone().on_disabled_hover_text("ไม่พบ assets/dem/ — รัน --convert-dem ก่อน");
+            }
+            if rw_btn.clicked() {
+                select_terrain(&mut settings, &mut regenerate, crate::TerrainSource::RealWorld);
                 next_state.set(crate::GameState::InGame);
             }
             ui.add_space(10.0);
@@ -515,12 +549,24 @@ pub fn pause_menu_system(
 pub fn update_coordinate_ui_system(
     camera_query: Query<&Transform, With<FreeCamera>>,
     mut text_query: Query<&mut Text, With<CoordinateText>>,
+    settings: Res<crate::GameSettings>,
 ) {
     if let Ok(camera_transform) = camera_query.single() {
         if let Ok(mut text) = text_query.single_mut() {
             let pos = camera_transform.translation;
             // อัปเดตข้อความบนจอ
             text.0 = format!("X: {:.2}, Y: {:.2}, Z: {:.2}", pos.x, pos.y, pos.z);
+            // โลกจริง: โชว์พิกัด GPS + ความสูงจากระดับน้ำทะเลจริง (เทียบแผนที่ได้เลย)
+            if settings.terrain_source == crate::TerrainSource::RealWorld {
+                if let Some(d) = crate::dem::dem() {
+                    let (lat, lon) = d.block_to_latlon(pos.x as f64, pos.z as f64);
+                    let elev = pos.y - crate::dem::DEM_SEA_LEVEL_Y as f32;
+                    text.0.push_str(&format!(
+                        "\nGPS: {:.5}°N {:.5}°E  elev {:.0} m",
+                        lat, lon, elev
+                    ));
+                }
+            }
         }
     }
 }
@@ -683,6 +729,19 @@ pub fn egui_settings_system(
         ui.heading("World Generation");
         ui.add(bevy_egui::egui::Slider::new(&mut settings.render_distance, 2..=32).text("Render Distance"));
 
+        // สลับชนิดโลกกลางเกมได้ (ล้างโลกใหม่ + สลับโฟลเดอร์เซฟให้เอง)
+        let mut src = settings.terrain_source;
+        ui.horizontal(|ui| {
+            ui.label("Terrain:");
+            ui.radio_value(&mut src, crate::TerrainSource::Noise, "Noise");
+            ui.add_enabled_ui(crate::dem::dem().is_some(), |ui| {
+                ui.radio_value(&mut src, crate::TerrainSource::RealWorld, "Real World");
+            });
+        });
+        if src != settings.terrain_source {
+            select_terrain(&mut settings, &mut regenerate, src);
+        }
+
         let mut regen = false;
 
         ui.horizontal(|ui| {
@@ -711,8 +770,9 @@ pub fn egui_settings_system(
                 regen = true;
             }
             // chunk ที่เซฟไว้จะ override การ generate เสมอ — ปุ่มนี้ล้างเซฟทิ้ง
+            // (เฉพาะโฟลเดอร์ของโลกที่กำลังเล่น — โลกอีกชนิดไม่โดน)
             if ui.button("Clear Saved Edits").clicked() {
-                let _ = std::fs::remove_dir_all(crate::voxel::project_root().join("saves"));
+                let _ = std::fs::remove_dir_all(crate::voxel::active_save_dir());
                 regen = true;
             }
         });

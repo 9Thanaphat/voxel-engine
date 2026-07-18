@@ -49,6 +49,10 @@ pub enum BlockType {
     Nuke = 26,
     /// Nuke ที่จุดชนวนแล้ว — แพทเทิร์นเดียวกับ TntLit (sync ผ่าน SetBlock + emission)
     NukeLit = 27,
+    SwitchOff = 28,
+    SmartLamp = 29,
+    SmartLampOn = 30,
+    SwitchOn = 31,
 }
 
 impl BlockType {
@@ -81,6 +85,10 @@ impl BlockType {
             25 => BlockType::IronBlock,
             26 => BlockType::Nuke,
             27 => BlockType::NukeLit,
+            28 => BlockType::SwitchOff,
+            29 => BlockType::SmartLamp,
+            30 => BlockType::SmartLampOn,
+            31 => BlockType::SwitchOn,
             _ => BlockType::Air,
         }
     }
@@ -132,7 +140,7 @@ pub struct BlockDef {
     pub overlay_side: &'static [&'static str],
 }
 
-pub const BLOCK_DEFS: [BlockDef; 28] = [
+pub const BLOCK_DEFS: [BlockDef; 32] = [
     BlockDef { name: "Air", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None, hardness: 0.0,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
     BlockDef { name: "Dirt", color: [0.4, 0.2, 0.0, 1.0], solid: true, transparent: false, emission: None, hardness: 1.0,
@@ -213,6 +221,14 @@ pub const BLOCK_DEFS: [BlockDef; 28] = [
     BlockDef { name: "Nuke (armed)", color: [1.0, 0.7, 0.2, 1.0], solid: true, transparent: false, emission: Some([2.0, 0.9, 0.3]), hardness: 999.0,
         tex_top: &["textures/nuke.png"], tex_side: &["textures/nuke.png"], tex_bottom: &["textures/nuke.png"],
         overlay_side: &[] },
+    BlockDef { name: "Switch (OFF)", color: [0.6, 0.6, 0.6, 1.0], solid: true, transparent: false, emission: None, hardness: 1.0,
+        tex_top: &["textures/switch-off.png"], tex_side: &["textures/switch-off.png"], tex_bottom: &["textures/switch-off.png"], overlay_side: &[] },
+    BlockDef { name: "SmartLamp (OFF)", color: [0.2, 0.2, 0.2, 1.0], solid: true, transparent: false, emission: None, hardness: 1.0,
+        tex_top: &["textures/lamp-off.png"], tex_side: &["textures/lamp-off.png"], tex_bottom: &["textures/lamp-off.png"], overlay_side: &[] },
+    BlockDef { name: "SmartLamp (ON)", color: [0.9, 0.9, 0.9, 1.0], solid: true, transparent: false, emission: Some([1.5, 1.5, 1.5]), hardness: 1.0,
+        tex_top: &["textures/lamp-on.png"], tex_side: &["textures/lamp-on.png"], tex_bottom: &["textures/lamp-on.png"], overlay_side: &[] },
+    BlockDef { name: "Switch (ON)", color: [0.3, 0.9, 0.3, 1.0], solid: true, transparent: false, emission: None, hardness: 1.0,
+        tex_top: &["textures/switch-on.png"], tex_side: &["textures/switch-on.png"], tex_bottom: &["textures/switch-on.png"], overlay_side: &[] },
 ];
 
 pub fn block_def(block: BlockType) -> &'static BlockDef {
@@ -551,6 +567,7 @@ pub enum InteractionMode {
     #[default]
     Normal,
     SubVoxel,
+    Wiring,
 }
 
 #[derive(Resource, Default)]
@@ -1678,12 +1695,27 @@ pub fn project_root() -> std::path::PathBuf {
     }
 }
 
+/// โลกจริง (DEM) เซฟแยกโฟลเดอร์จากโลก noise — พิกัด chunk ชนกันตรงๆ
+/// ห้ามให้เซฟข้ามโลกโหลดปนกัน; ตั้งค่าโดย UI ตอนเลือกโลก/สลับ radio
+pub static DEM_SAVE_DIR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// โฟลเดอร์เซฟของโลกที่กำลังเล่น (saves/ หรือ saves_dem/)
+pub fn active_save_dir() -> std::path::PathBuf {
+    let dir = if DEM_SAVE_DIR.load(std::sync::atomic::Ordering::Relaxed) {
+        "saves_dem"
+    } else {
+        "saves"
+    };
+    project_root().join(dir)
+}
+
 fn chunk_save_path(chunk_pos: IVec2) -> std::path::PathBuf {
-    project_root().join(format!("saves/chunk_{}_{}.bin", chunk_pos.x, chunk_pos.y))
+    active_save_dir().join(format!("chunk_{}_{}.bin", chunk_pos.x, chunk_pos.y))
 }
 
 pub fn save_chunk(chunk_pos: IVec2, blocks: &ChunkBlocks) {
-    let _ = std::fs::create_dir_all(project_root().join("saves"));
+    let _ = std::fs::create_dir_all(active_save_dir());
     // v2: compact ก่อนเซฟให้ section ที่ล้วนกลับกลายเป็น 1 byte (clone ถูก —
     // ส่วนใหญ่เป็น Uniform อยู่แล้ว)
     let mut compacted = blocks.clone();
@@ -2021,13 +2053,29 @@ pub fn setup_voxel(
 
     // บล็อกเรืองแสง: emissive เกิน 1.0 เพื่อให้ bloom ฟุ้ง
     let mut lamp_materials = HashMap::new();
-    for block in [BlockType::Glowstone, BlockType::LampRed, BlockType::LampGreen, BlockType::LampBlue] {
-        let color = lamp_emission(block).unwrap();
-        lamp_materials.insert(block, materials.add(StandardMaterial {
-            base_color: color,
-            emissive: color.to_linear() * 4.0,
-            ..default()
-        }));
+    for i in 0..BLOCK_DEFS.len() {
+        let block = BlockType::from_u8(i as u8);
+        if let Some(color) = lamp_emission(block) {
+            let def = block_def(block);
+            let tex = def.tex_top.first().copied();
+            
+            let mut base_color = color;
+            let mut handle = None;
+            if let Some(path) = tex {
+                if project_root().join("assets").join(path).exists() {
+                    handle = Some(asset_server.load(path));
+                    base_color = Color::WHITE;
+                }
+            }
+            
+            lamp_materials.insert(block, materials.add(StandardMaterial {
+                base_color,
+                base_color_texture: handle.clone(),
+                emissive: color.to_linear() * 4.0,
+                emissive_texture: handle,
+                ..default()
+            }));
+        }
     }
     commands.insert_resource(LampMaterials(lamp_materials));
 
@@ -2758,11 +2806,12 @@ impl Default for Hotbar {
 pub struct BlockPickerOpen(pub bool);
 
 /// บล็อกทั้งหมดที่เลือกวางได้ (รายการในหน้าต่างกด E)
-pub const PLACEABLE_BLOCKS: [BlockType; 16] = [
+pub const PLACEABLE_BLOCKS: [BlockType; 18] = [
     BlockType::Dirt, BlockType::Grass, BlockType::Stone, BlockType::Wood,
     BlockType::Leaves, BlockType::Sand, BlockType::Water8, BlockType::Glowstone,
     BlockType::LampRed, BlockType::LampGreen, BlockType::LampBlue, BlockType::Glass,
     BlockType::TallGrass, BlockType::Tnt, BlockType::IronBlock, BlockType::Nuke,
+    BlockType::SwitchOff, BlockType::SmartLamp,
 ];
 
 /// texture ที่ใช้เป็น icon บนช่อง hotbar — เอาหน้าข้างก่อน (grass เห็นเป็น
@@ -2821,6 +2870,12 @@ pub fn hotbar_input_system(
                 }
             }
         }
+    }
+
+    // กด Q เพื่อเคลียร์ช่องให้เป็นมือเปล่า
+    if keyboard.just_pressed(KeyCode::KeyQ) && !over_egui {
+        let sel = hotbar.selected;
+        hotbar.slots[sel] = None;
     }
 
     let block = hotbar.slots[hotbar.selected].map_or(BlockType::Air, |s| s.block);
@@ -3294,7 +3349,8 @@ pub fn block_interaction_system(
     if keyboard.just_pressed(KeyCode::KeyT) {
         *interaction_mode = match *interaction_mode {
             InteractionMode::Normal => InteractionMode::SubVoxel,
-            InteractionMode::SubVoxel => InteractionMode::Normal,
+            InteractionMode::SubVoxel => InteractionMode::Wiring,
+            InteractionMode::Wiring => InteractionMode::Normal,
         };
     }
 
@@ -3372,6 +3428,30 @@ pub fn block_interaction_system(
                 placed: BlockType::Air,
                 replaced: hit.block,
             });
+        } else if place_pressed && selected.0 == BlockType::Air {
+            // Interact! (กดคลิกขวาด้วยมือเปล่า)
+            let current = world.get_block(hit.pos.x, hit.pos.y, hit.pos.z);
+            if current == BlockType::SwitchOff {
+                edit = Some(BlockEdit::SetBlock {
+                    pos: hit.pos.to_array(),
+                    block: BlockType::SwitchOn as u8,
+                });
+                fx = Some(crate::particles::BlockFx {
+                    pos: hit.pos,
+                    placed: BlockType::SwitchOn,
+                    replaced: BlockType::SwitchOff,
+                });
+            } else if current == BlockType::SwitchOn {
+                edit = Some(BlockEdit::SetBlock {
+                    pos: hit.pos.to_array(),
+                    block: BlockType::SwitchOff as u8,
+                });
+                fx = Some(crate::particles::BlockFx {
+                    pos: hit.pos,
+                    placed: BlockType::SwitchOff,
+                    replaced: BlockType::SwitchOn,
+                });
+            }
         } else if place_pressed && selected.0 != BlockType::Air {
             let p = hit.pos + hit.normal;
 
@@ -4075,6 +4155,30 @@ pub fn nuke_apply_system(
         }
         !app.pending.is_empty()
     });
+}
+
+/// เข้าโลกจริงครั้งแรก (โลกว่างหรือกำลังจะ regenerate) — วางผู้เล่นกลาง tile
+/// เหนือผิวจริง; client multiplayer ไม่ยุ่ง (host ส่ง spawn_pos มาใน Welcome แล้ว)
+pub fn position_player_for_terrain(
+    settings: Res<crate::GameSettings>,
+    regen: Res<crate::RegenerateWorld>,
+    world: Res<VoxelWorld>,
+    client: Option<Res<bevy_renet::RenetClient>>,
+    mut camera: Query<&mut Transform, With<crate::camera::FreeCamera>>,
+) {
+    if settings.terrain_source != crate::TerrainSource::RealWorld || client.is_some() {
+        return;
+    }
+    if !regen.0 && !world.chunks.is_empty() {
+        return; // กลับเข้าโลกเดิมที่ยังอยู่ใน memory — อยู่ที่เดิมต่อ
+    }
+    let Some(d) = crate::dem::dem() else { return };
+    let (cx, cz) = d.center_block();
+    let h = crate::dem::DEM_SEA_LEVEL_Y as f32 + d.elevation_at_block(cx, cz);
+    if let Some(mut t) = camera.iter_mut().next() {
+        t.translation = Vec3::new(cx as f32, h + 20.0, cz as f32);
+        info!("spawn โลกจริง: บล็อก ({:.0}, {:.0}) ผิวสูง {:.0} ม.", cx, cz, h);
+    }
 }
 
 /// มองเห็นกันไหม (ไม่มีบล็อกทึบขวาง) — ใช้คำนวณแสงจ้าเข้าตาตอนระเบิด
