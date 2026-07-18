@@ -285,12 +285,216 @@ fn side_overlay_pick(block: BlockType, face_id: usize, wx: i32, wy: i32, wz: i32
 }
 
 pub const CHUNK_WIDTH: usize = 16;
-pub const CHUNK_HEIGHT: usize = 512;
+/// 3072 = เผื่อภูมิประเทศจริง 1 บล็อก = 1 ม. (ดอยอินทนนท์ 2,565 ม. + ทะเล + ฟ้า)
+/// — section storage ทำให้คอลัมน์สูงแบกได้ (ฟ้า/หินตันเก็บ 1 byte ต่อ 16 ชั้น)
+pub const CHUNK_HEIGHT: usize = 3072;
 pub const CHUNK_VOLUME: usize = CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_WIDTH;
 pub const SEA_LEVEL: usize = 200;
 
+// --------------------------------------------------------
+// Section storage — คอลัมน์ซอยเป็นชั้นละ 16 (แนว Minecraft):
+// ชั้นที่เป็นชนิดเดียวล้วน (ฟ้าโล่ง/หินตัน) เก็บ 1 byte แทน 4KB
+// โลกยัง key ด้วย IVec2 เหมือนเดิม — ไม่ใช่ 3D chunks
+// --------------------------------------------------------
+
+pub const SECTION_H: usize = 16;
+pub const SECTION_VOLUME: usize = CHUNK_WIDTH * SECTION_H * CHUNK_WIDTH;
+pub const SECTIONS_PER_CHUNK: usize = CHUNK_HEIGHT / SECTION_H;
+
+#[derive(Clone)]
+pub enum Section {
+    /// ทั้ง 16×16×16 เป็นชนิดเดียว
+    Uniform(BlockType),
+    Dense(Box<[BlockType; SECTION_VOLUME]>),
+}
+
+impl Section {
+    /// layout ภายใน section: x + y_local*W + z*W*SECTION_H
+    #[inline]
+    fn idx(x: usize, y_local: usize, z: usize) -> usize {
+        x + y_local * CHUNK_WIDTH + z * CHUNK_WIDTH * SECTION_H
+    }
+}
+
+#[derive(Clone)]
+pub struct ChunkBlocks {
+    sections: Vec<Section>,
+}
+
+impl ChunkBlocks {
+    pub fn new_uniform(block: BlockType) -> Self {
+        Self { sections: vec![Section::Uniform(block); SECTIONS_PER_CHUNK] }
+    }
+
+    #[inline]
+    pub fn get(&self, x: usize, y: usize, z: usize) -> BlockType {
+        match &self.sections[y / SECTION_H] {
+            Section::Uniform(b) => *b,
+            Section::Dense(a) => a[Section::idx(x, y % SECTION_H, z)],
+        }
+    }
+
+    /// อ่านด้วย flat index แบบเดิม (x + y*W + z*W*H) — สำหรับโค้ดที่ยังคิดเป็น index
+    #[inline]
+    pub fn get_idx(&self, i: usize) -> BlockType {
+        let x = i % CHUNK_WIDTH;
+        let y = (i / CHUNK_WIDTH) % CHUNK_HEIGHT;
+        let z = i / (CHUNK_WIDTH * CHUNK_HEIGHT);
+        self.get(x, y, z)
+    }
+
+    pub fn set(&mut self, x: usize, y: usize, z: usize, block: BlockType) {
+        let si = y / SECTION_H;
+        let section = &mut self.sections[si];
+        if let Section::Uniform(b) = section {
+            if *b == block {
+                return; // เขียนค่าเดิมลง uniform — ไม่ต้อง materialize
+            }
+            *section = Section::Dense(Box::new([*b; SECTION_VOLUME]));
+        }
+        if let Section::Dense(a) = section {
+            a[Section::idx(x, y % SECTION_H, z)] = block;
+        }
+    }
+
+    /// ยุบ Dense ที่กลายเป็นชนิดเดียวล้วนกลับเป็น Uniform (เรียกตอนเซฟ/หลัง gen)
+    pub fn compact(&mut self) {
+        for section in &mut self.sections {
+            if let Section::Dense(a) = section {
+                let first = a[0];
+                if a.iter().all(|b| *b == first) {
+                    *section = Section::Uniform(first);
+                }
+            }
+        }
+    }
+
+    /// ไล่ทุกบล็อกตามลำดับ flat index เดิม (x เร็วสุด, แล้ว y, แล้ว z)
+    /// — ให้ RLE network / โค้ด enumerate เดิมใช้แทน blocks.iter()
+    pub fn iter_all(&self) -> impl Iterator<Item = BlockType> + '_ {
+        (0..CHUNK_VOLUME).map(move |i| self.get_idx(i))
+    }
+
+    /// ช่วง section ที่ "อาจมีของ" (ไม่ใช่ Uniform(Air)) เป็นช่วง y inclusive —
+    /// ให้ mesher/สแกนต่างๆ ข้ามฟ้าโล่งทั้งแถบ; None = ทั้งคอลัมน์เป็นอากาศ
+    pub fn y_bounds_non_air(&self) -> Option<(usize, usize)> {
+        let first = self.sections.iter().position(|s| !matches!(s, Section::Uniform(BlockType::Air)))?;
+        let last = self.sections.iter().rposition(|s| !matches!(s, Section::Uniform(BlockType::Air)))?;
+        Some((first * SECTION_H, last * SECTION_H + SECTION_H - 1))
+    }
+
+    /// section ตรง y นี้เป็น Uniform(Air) ไหม — fast path ให้ลูปสแกนกระโดดข้าม
+    #[inline]
+    pub fn section_is_air(&self, y: usize) -> bool {
+        matches!(self.sections[y / SECTION_H], Section::Uniform(BlockType::Air))
+    }
+
+    /// เข้าถึง section ตรงๆ สำหรับลูปสแกนที่อยากได้ fast path ต่อ section
+    pub fn sections_ref(&self) -> &[Section] {
+        &self.sections
+    }
+
+    /// เรียก f(x, y, z, block) เฉพาะบล็อกที่ filter ผ่าน — section Uniform ที่
+    /// filter ไม่ผ่านถูกข้ามทั้งก้อน 4096 cell (หัวใจของสแกนคอลัมน์สูงให้ยังถูก)
+    pub fn for_each_matching(
+        &self,
+        filter: impl Fn(BlockType) -> bool,
+        mut f: impl FnMut(usize, usize, usize, BlockType),
+    ) {
+        for (si, section) in self.sections.iter().enumerate() {
+            match section {
+                Section::Uniform(b) => {
+                    if filter(*b) {
+                        for z in 0..CHUNK_WIDTH {
+                            for yl in 0..SECTION_H {
+                                for x in 0..CHUNK_WIDTH {
+                                    f(x, si * SECTION_H + yl, z, *b);
+                                }
+                            }
+                        }
+                    }
+                }
+                Section::Dense(a) => {
+                    for z in 0..CHUNK_WIDTH {
+                        for yl in 0..SECTION_H {
+                            for x in 0..CHUNK_WIDTH {
+                                let b = a[Section::idx(x, yl, z)];
+                                if filter(b) {
+                                    f(x, si * SECTION_H + yl, z, b);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// สร้างจาก byte ต่อบล็อกตามลำดับ flat เดิม (เส้นทาง network/แปลงของเก่า)
+    pub fn from_dense_bytes(bytes: &[u8]) -> Self {
+        let mut cb = Self::new_uniform(BlockType::Air);
+        for (i, b) in bytes.iter().enumerate().take(CHUNK_VOLUME) {
+            let block = BlockType::from_u8(*b);
+            if block != BlockType::Air {
+                let x = i % CHUNK_WIDTH;
+                let y = (i / CHUNK_WIDTH) % CHUNK_HEIGHT;
+                let z = i / (CHUNK_WIDTH * CHUNK_HEIGHT);
+                cb.set(x, y, z, block);
+            }
+        }
+        cb.compact();
+        cb
+    }
+
+    // ---- save format v2: [b"CHK2"] แล้วต่อด้วย 192 sections:
+    // tag 0 = Uniform ตามด้วย id 1 byte / tag 1 = Dense ตามด้วย 4096 bytes ----
+
+    pub fn to_save_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + self.sections.len() * 8);
+        out.extend_from_slice(b"CHK2");
+        for section in &self.sections {
+            match section {
+                Section::Uniform(b) => {
+                    out.push(0);
+                    out.push(*b as u8);
+                }
+                Section::Dense(a) => {
+                    out.push(1);
+                    out.extend(a.iter().map(|b| *b as u8));
+                }
+            }
+        }
+        out
+    }
+
+    pub fn from_save_bytes(bytes: &[u8]) -> Option<Self> {
+        let rest = bytes.strip_prefix(b"CHK2")?;
+        let mut sections = Vec::with_capacity(SECTIONS_PER_CHUNK);
+        let mut i = 0usize;
+        for _ in 0..SECTIONS_PER_CHUNK {
+            match rest.get(i)? {
+                0 => {
+                    sections.push(Section::Uniform(BlockType::from_u8(*rest.get(i + 1)?)));
+                    i += 2;
+                }
+                1 => {
+                    let data = rest.get(i + 1..i + 1 + SECTION_VOLUME)?;
+                    let mut a = Box::new([BlockType::Air; SECTION_VOLUME]);
+                    for (j, b) in data.iter().enumerate() {
+                        a[j] = BlockType::from_u8(*b);
+                    }
+                    sections.push(Section::Dense(a));
+                    i += 1 + SECTION_VOLUME;
+                }
+                _ => return None,
+            }
+        }
+        Some(Self { sections })
+    }
+}
+
 pub struct ChunkData {
-    pub blocks: Arc<[BlockType; CHUNK_VOLUME]>,
+    pub blocks: Arc<ChunkBlocks>,
     pub chiseled_blocks: HashMap<usize, Box<[u8; 4096]>>,
     pub num_vertices: usize,
     pub num_indices: usize,
@@ -310,25 +514,33 @@ impl ChunkData {
     }
 }
 
-/// สแกนหาแถบ y ที่มีน้ำทั้ง chunk (ใช้ครั้งเดียวตอน insert — ~131k cells, ราวๆ 0.1ms)
-pub fn scan_water_bounds(blocks: &[BlockType; CHUNK_VOLUME]) -> (usize, usize) {
+/// สแกนหาแถบ y ที่มีน้ำทั้ง chunk (ใช้ครั้งเดียวตอน insert) — ข้าม section
+/// ที่เป็น Uniform ชนิดไม่ใช่น้ำได้ทั้งแถบ
+pub fn scan_water_bounds(blocks: &ChunkBlocks) -> (usize, usize) {
     let mut min_y = CHUNK_HEIGHT;
     let mut max_y = 0usize;
-    for y in 0..CHUNK_HEIGHT {
-        let mut has_water = false;
-        for z in 0..CHUNK_WIDTH {
-            let base = y * CHUNK_WIDTH + z * CHUNK_WIDTH * CHUNK_HEIGHT;
-            for x in 0..CHUNK_WIDTH {
-                if blocks[base + x].is_water() {
-                    has_water = true;
-                    break;
+    for (si, section) in blocks.sections_ref().iter().enumerate() {
+        match section {
+            Section::Uniform(b) => {
+                if b.is_water() {
+                    min_y = min_y.min(si * SECTION_H);
+                    max_y = max_y.max(si * SECTION_H + SECTION_H - 1);
                 }
             }
-            if has_water { break; }
-        }
-        if has_water {
-            min_y = min_y.min(y);
-            max_y = max_y.max(y);
+            Section::Dense(a) => {
+                for y_local in 0..SECTION_H {
+                    let y = si * SECTION_H + y_local;
+                    'row: for z in 0..CHUNK_WIDTH {
+                        for x in 0..CHUNK_WIDTH {
+                            if a[Section::idx(x, y_local, z)].is_water() {
+                                min_y = min_y.min(y);
+                                max_y = max_y.max(y);
+                                break 'row;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     (min_y, max_y)
@@ -368,7 +580,7 @@ impl VoxelWorld {
             let local_x = x.rem_euclid(CHUNK_WIDTH as i32) as usize;
             let local_y = y as usize;
             let local_z = z.rem_euclid(CHUNK_WIDTH as i32) as usize;
-            chunk.blocks[ChunkData::get_index(local_x, local_y, local_z)]
+            chunk.blocks.get(local_x, local_y, local_z)
         } else {
             BlockType::Air
         }
@@ -407,8 +619,7 @@ impl VoxelWorld {
         let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
         if let Some(chunk) = self.chunks.get_mut(&IVec2::new(cx, cz)) {
             let idx = ChunkData::get_index(lx, y as usize, lz);
-            let blocks_mut = Arc::make_mut(&mut chunk.blocks);
-            blocks_mut[idx] = BlockType::Chiseled;
+            Arc::make_mut(&mut chunk.blocks).set(lx, y as usize, lz, BlockType::Chiseled);
             let mut data = Box::new([0u8; 4096]);
             data.fill(block as u8);
             chunk.chiseled_blocks.insert(idx, data);
@@ -428,8 +639,9 @@ impl VoxelWorld {
             let local_y = y as usize;
             let local_z = z.rem_euclid(CHUNK_WIDTH as i32) as usize;
 
-            let blocks_mut = Arc::make_mut(&mut chunk.blocks);
-            blocks_mut[ChunkData::get_index(local_x, local_y, local_z)] = block_type;
+            // make_mut ตอนนี้ clone แค่ Vec<Section> + section เดียวที่โดนเขียน (~4KB)
+            // — เดิม clone ทั้งคอลัมน์ 128KB ต่อ write แรกหลัง share ให้ mesh task
+            Arc::make_mut(&mut chunk.blocks).set(local_x, local_y, local_z, block_type);
             // ขยายแถบน้ำแบบ grow-only (tighten ทีเดียวตอน rebuild mesh น้ำ)
             if block_type.is_water() {
                 chunk.water_y_min = chunk.water_y_min.min(local_y);
@@ -663,8 +875,8 @@ fn water_corner_info(
 
 pub fn create_mesh_from_blocks(
     chunk_pos: IVec2,
-    blocks: &[BlockType; CHUNK_VOLUME],
-    neighbors: &[Arc<[BlockType; CHUNK_VOLUME]>; 8],
+    blocks: &ChunkBlocks,
+    neighbors: &[Arc<ChunkBlocks>; 8],
     chiseled_blocks: Option<&HashMap<usize, Box<[u8; 4096]>>>,
 ) -> ChunkMeshSet {
     // ต่อมุมผิวน้ำ: (ระยะกดผิวลง, ความลึกน้ำ normalize 0..1) — แชร์ข้ามหน้า/บล็อก
@@ -684,7 +896,7 @@ pub fn create_mesh_from_blocks(
         let w = CHUNK_WIDTH as i32;
         let lx = x.rem_euclid(w) as usize;
         let lz = z.rem_euclid(w) as usize;
-        let src: &[BlockType; CHUNK_VOLUME] = match (x.div_euclid(w), z.div_euclid(w)) {
+        let src: &ChunkBlocks = match (x.div_euclid(w), z.div_euclid(w)) {
             (0, 0) => blocks,
             (1, 0) => &neighbors[0],
             (-1, 0) => &neighbors[1],
@@ -696,7 +908,7 @@ pub fn create_mesh_from_blocks(
             (-1, -1) => &neighbors[7],
             _ => return BlockType::Air,
         };
-        src[ChunkData::get_index(lx, y as usize, lz)]
+        src.get(lx, y as usize, lz)
     };
 
     // Vertex AO: แต่ละมุมของหน้า เช็คบล็อกข้าง 2 + มุม 1 บนระนาบนอกหน้า
@@ -741,6 +953,13 @@ pub fn create_mesh_from_blocks(
 
     let axis_len = [CHUNK_WIDTH as i32, CHUNK_HEIGHT as i32, CHUNK_WIDTH as i32];
 
+    // แถบ y ที่มีของจริง — ข้ามฟ้า Uniform(Air) ทั้งแถบ (หัวใจของคอลัมน์สูง:
+    // หน้าของ chunk นี้เกิดจากบล็อกของ chunk นี้เท่านั้น จึงใช้ bounds ตัวเองพอ)
+    let (y_lo, y_hi) = match blocks.y_bounds_non_air() {
+        Some((lo, hi)) => (lo as i32, hi as i32),
+        None => (0, -1), // อากาศล้วน — ทุกลูปกลายเป็นช่วงว่าง
+    };
+
     for face_id in 0..6 {
         let norm = FACE_OFFSETS[face_id];
         let a = if norm[0] != 0 { 0 } else if norm[1] != 0 { 1 } else { 2 };
@@ -751,6 +970,14 @@ pub fn create_mesh_from_blocks(
         };
         let (la, lu, lv) = (axis_len[a], axis_len[ua], axis_len[va]);
         let midx = |ui: i32, vi: i32| (vi * lu + ui) as usize;
+
+        // มิติไหนคือแกน y (index 1) ตัดช่วง loop ตามแถบ y — นอกแถบเป็นอากาศแน่นอน
+        let dim_range = |dim: usize, len: i32| -> (i32, i32) {
+            if dim == 1 { (y_lo, y_hi + 1) } else { (0, len) }
+        };
+        let (s0, s1) = dim_range(a, la);
+        let (u0, u1) = dim_range(ua, lu);
+        let (v0, v1) = dim_range(va, lv);
 
         // UV จากพิกัดบนระนาบของหน้า (1 บล็อก = 1 tile) — sampler แบบ Repeat
         // ทำให้ texture ปูซ้ำข้าม quad ที่ greedy merge แล้วได้เอง
@@ -767,19 +994,22 @@ pub fn create_mesh_from_blocks(
         // ลายอยู่ใน key ด้วย — หน้าที่ลายต่างกัน merge รวมกันไม่ได้
         let mut mask: Vec<Option<(BlockType, u8, u8)>> = vec![None; (lu * lv) as usize];
 
-        for s in 0..la {
-            for m in mask.iter_mut() {
-                *m = None;
+        for s in s0..s1 {
+            // ล้างเฉพาะแถบที่ใช้ — นอกแถบไม่เคยถูกเขียน เป็น None ตลอด
+            for vi in v0..v1 {
+                for ui in u0..u1 {
+                    mask[midx(ui, vi)] = None;
+                }
             }
 
-            for vi in 0..lv {
-                for ui in 0..lu {
+            for vi in v0..v1 {
+                for ui in u0..u1 {
                     let mut c = [0i32; 3];
                     c[a] = s;
                     c[ua] = ui;
                     c[va] = vi;
 
-                    let block = blocks[ChunkData::get_index(c[0] as usize, c[1] as usize, c[2] as usize)];
+                    let block = blocks.get(c[0] as usize, c[1] as usize, c[2] as usize);
                     // TallGrass ไม่ใช่ลูกบาศก์ — วาดแยกเป็นกากบาทท้ายฟังก์ชัน
                     // Chiseled ข้ามไปก่อน วาดแยกทีหลัง
                     if block == BlockType::Air || block == BlockType::TallGrass || block == BlockType::Chiseled {
@@ -901,8 +1131,9 @@ pub fn create_mesh_from_blocks(
             }
 
             // greedy merge: ขยายความกว้างก่อน แล้วขยายความสูงทั้งแถบ
-            for vi in 0..lv {
-                for ui in 0..lu {
+            // (สแกนเฉพาะแถบ — นอกแถบเป็น None เสมอ)
+            for vi in v0..v1 {
+                for ui in u0..u1 {
                     let Some(key) = mask[midx(ui, vi)] else { continue };
 
                     let mut w = 1;
@@ -975,13 +1206,8 @@ pub fn create_mesh_from_blocks(
         ];
         const CROSS_UVS: [[f32; 2]; 4] = [[0., 1.], [1., 1.], [1., 0.], [0., 0.]];
 
-        for (i, block) in blocks.iter().enumerate() {
-            if *block != BlockType::TallGrass {
-                continue;
-            }
-            let x = (i % CHUNK_WIDTH) as f32;
-            let y = ((i / CHUNK_WIDTH) % CHUNK_HEIGHT) as f32;
-            let z = (i / (CHUNK_WIDTH * CHUNK_HEIGHT)) as f32;
+        blocks.for_each_matching(|b| b == BlockType::TallGrass, |xi, yi, zi, _| {
+            let (x, y, z) = (xi as f32, yi as f32, zi as f32);
 
             for quad in CROSS_QUADS {
                 let mut verts = [[0f32; 3]; 4];
@@ -991,21 +1217,16 @@ pub fn create_mesh_from_blocks(
                 texture_buf(&mut set.deco, sprite)
                     .push_quad(verts, [0., 1., 0.], [[1.0; 4]; 4], CROSS_UVS, false);
             }
-        }
+        });
     }
 
     if let Some(chiseled_map) = chiseled_blocks {
-        for (i, block) in blocks.iter().enumerate() {
-            if *block != BlockType::Chiseled {
-                continue;
+        blocks.for_each_matching(|b| b == BlockType::Chiseled, |x, y, z, _| {
+            // map ของ sub-voxel ยัง key ด้วย flat index เดิม
+            if let Some(chiseled_data) = chiseled_map.get(&ChunkData::get_index(x, y, z)) {
+                generate_chiseled_mesh_into(&mut set, x as f32, y as f32, z as f32, chiseled_data);
             }
-            if let Some(chiseled_data) = chiseled_map.get(&i) {
-                let x = (i % CHUNK_WIDTH) as f32;
-                let y = ((i / CHUNK_WIDTH) % CHUNK_HEIGHT) as f32;
-                let z = (i / (CHUNK_WIDTH * CHUNK_HEIGHT)) as f32;
-                generate_chiseled_mesh_into(&mut set, x, y, z, chiseled_data);
-            }
-        }
+        });
     }
 
     set
@@ -1146,9 +1367,11 @@ impl TerrainSampler {
     }
 }
 
-fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> Box<[BlockType; CHUNK_VOLUME]> {
+fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> ChunkBlocks {
     let sampler = TerrainSampler::new(noise);
-    let mut blocks = Box::new([BlockType::Air; CHUNK_VOLUME]);
+    // เริ่มเป็นอากาศ uniform ทั้งคอลัมน์ — เขียนเฉพาะที่มีของ ฟ้าไม่เคยถูก
+    // materialize; compact() ท้ายฟังก์ชันยุบใต้ดิน/น้ำที่บังเอิญล้วนกลับเป็น 1 byte
+    let mut blocks = ChunkBlocks::new_uniform(BlockType::Air);
 
     let base_x = chunk_pos.x as f64 * CHUNK_WIDTH as f64;
     let base_z = chunk_pos.y as f64 * CHUNK_WIDTH as f64;
@@ -1191,7 +1414,7 @@ fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> Box<[Bl
                 if block.is_solid() && yi < h - 4 && yi > 2 && sampler.is_cave(wx, yi, wz) {
                     continue;
                 }
-                blocks[ChunkData::get_index(x, y, z)] = block;
+                blocks.set(x, y, z, block);
             }
         }
     }
@@ -1218,7 +1441,7 @@ fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> Box<[Bl
         }
 
         for ty in (h + 1)..=(h + 5) {
-            blocks[ChunkData::get_index(tx, ty as usize, tz)] = BlockType::Wood;
+            blocks.set(tx, ty as usize, tz, BlockType::Wood);
         }
         for ly in (h + 3)..=(h + 6) {
             let r: i32 = if ly <= h + 4 { 2 } else { 1 };
@@ -1232,9 +1455,8 @@ fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> Box<[Bl
                     }
                     let lx = (tx as i32 + dx) as usize;
                     let lz = (tz as i32 + dz) as usize;
-                    let idx = ChunkData::get_index(lx, ly as usize, lz);
-                    if blocks[idx] == BlockType::Air {
-                        blocks[idx] = BlockType::Leaves;
+                    if blocks.get(lx, ly as usize, lz) == BlockType::Air {
+                        blocks.set(lx, ly as usize, lz, BlockType::Leaves);
                     }
                 }
             }
@@ -1250,13 +1472,14 @@ fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> Box<[Bl
         if desert[gz][gx] || h <= SEA_LEVEL as i32 + 1 || h + 1 >= CHUNK_HEIGHT as i32 {
             continue;
         }
-        let surface_idx = ChunkData::get_index(gx, h as usize, gz);
-        let above_idx = ChunkData::get_index(gx, (h + 1) as usize, gz);
-        if blocks[surface_idx] == BlockType::Grass && blocks[above_idx] == BlockType::Air {
-            blocks[above_idx] = BlockType::TallGrass;
+        if blocks.get(gx, h as usize, gz) == BlockType::Grass
+            && blocks.get(gx, (h + 1) as usize, gz) == BlockType::Air
+        {
+            blocks.set(gx, (h + 1) as usize, gz, BlockType::TallGrass);
         }
     }
 
+    blocks.compact();
     blocks
 }
 
@@ -1272,8 +1495,8 @@ fn generate_chunk_blocks(chunk_pos: IVec2, noise: crate::NoiseParams) -> Box<[Bl
 /// ไม่ใช่การมี face (น้ำจมไร้หน้าก็ยังต้องอยู่ใน band ไม่งั้นรูโผล่ตอน seam เปลี่ยน)
 pub fn create_water_mesh(
     chunk_pos: IVec2,
-    blocks: &[BlockType; CHUNK_VOLUME],
-    neighbors: &[Arc<[BlockType; CHUNK_VOLUME]>; 8],
+    blocks: &ChunkBlocks,
+    neighbors: &[Arc<ChunkBlocks>; 8],
     y_min: usize,
     y_max: usize,
 ) -> (MeshBuf, Option<(usize, usize)>) {
@@ -1298,7 +1521,7 @@ pub fn create_water_mesh(
         let w = CHUNK_WIDTH as i32;
         let lx = x.rem_euclid(w) as usize;
         let lz = z.rem_euclid(w) as usize;
-        let src: &[BlockType; CHUNK_VOLUME] = match (x.div_euclid(w), z.div_euclid(w)) {
+        let src: &ChunkBlocks = match (x.div_euclid(w), z.div_euclid(w)) {
             (0, 0) => blocks,
             (1, 0) => &neighbors[0],
             (-1, 0) => &neighbors[1],
@@ -1310,7 +1533,7 @@ pub fn create_water_mesh(
             (-1, -1) => &neighbors[7],
             _ => return BlockType::Air,
         };
-        src[ChunkData::get_index(lx, y as usize, lz)]
+        src.get(lx, y as usize, lz)
     };
 
     let axis_len = [CHUNK_WIDTH as i32, CHUNK_HEIGHT as i32, CHUNK_WIDTH as i32];
@@ -1347,7 +1570,7 @@ pub fn create_water_mesh(
                     c[ua] = ui;
                     c[va] = vi;
 
-                    let block = blocks[ChunkData::get_index(c[0] as usize, c[1] as usize, c[2] as usize)];
+                    let block = blocks.get(c[0] as usize, c[1] as usize, c[2] as usize);
                     if !block.is_water() {
                         continue;
                     }
@@ -1438,31 +1661,28 @@ fn chunk_save_path(chunk_pos: IVec2) -> std::path::PathBuf {
     project_root().join(format!("saves/chunk_{}_{}.bin", chunk_pos.x, chunk_pos.y))
 }
 
-pub fn save_chunk(chunk_pos: IVec2, blocks: &[BlockType; CHUNK_VOLUME]) {
+pub fn save_chunk(chunk_pos: IVec2, blocks: &ChunkBlocks) {
     let _ = std::fs::create_dir_all(project_root().join("saves"));
-    let bytes: Vec<u8> = blocks.iter().map(|b| *b as u8).collect();
-    if let Err(e) = std::fs::write(chunk_save_path(chunk_pos), bytes) {
+    // v2: compact ก่อนเซฟให้ section ที่ล้วนกลับกลายเป็น 1 byte (clone ถูก —
+    // ส่วนใหญ่เป็น Uniform อยู่แล้ว)
+    let mut compacted = blocks.clone();
+    compacted.compact();
+    if let Err(e) = std::fs::write(chunk_save_path(chunk_pos), compacted.to_save_bytes()) {
         warn!("save chunk {:?} failed: {}", chunk_pos, e);
     }
 }
 
-/// อ่าน chunk จาก disk เป็น byte ดิบ (ให้ host ส่งต่อไปให้ client โดยไม่ต้องแปลง)
+/// อ่าน chunk จาก disk เป็น byte ต่อบล็อกแบบ flat (ให้ host ส่งต่อ client ผ่าน RLE)
 pub fn load_chunk_bytes(chunk_pos: IVec2) -> Option<Vec<u8>> {
-    let bytes = std::fs::read(chunk_save_path(chunk_pos)).ok()?;
-    (bytes.len() == CHUNK_VOLUME).then_some(bytes)
+    let blocks = load_chunk(chunk_pos)?;
+    Some(blocks.iter_all().map(|b| b as u8).collect())
 }
 
-fn load_chunk(chunk_pos: IVec2) -> Option<Box<[BlockType; CHUNK_VOLUME]>> {
+fn load_chunk(chunk_pos: IVec2) -> Option<ChunkBlocks> {
     let bytes = std::fs::read(chunk_save_path(chunk_pos)).ok()?;
-    // ขนาดไม่ตรง = เซฟจากโลกคนละขนาด (เช่นช่วงที่ CHUNK_HEIGHT ถูกแก้) — ทิ้ง
-    if bytes.len() != CHUNK_VOLUME {
-        return None;
-    }
-    let mut blocks = Box::new([BlockType::Air; CHUNK_VOLUME]);
-    for (i, b) in bytes.iter().enumerate() {
-        blocks[i] = BlockType::from_u8(*b);
-    }
-    Some(blocks)
+    // format ไม่ตรง (เซฟเก่าก่อนยุค section หรือคนละขนาดโลก) — ทิ้งตาม
+    // ปรัชญาเดิม แล้ว generate ใหม่
+    ChunkBlocks::from_save_bytes(&bytes)
 }
 
 // --------------------------------------------------------
@@ -1471,7 +1691,7 @@ fn load_chunk(chunk_pos: IVec2) -> Option<Box<[BlockType; CHUNK_VOLUME]>> {
 
 pub struct ChunkBlockData {
     pub chunk_pos: IVec2,
-    pub blocks: Arc<[BlockType; CHUNK_VOLUME]>,
+    pub blocks: Arc<ChunkBlocks>,
     /// sub-voxel data ที่มากับ chunk (ตอนนี้ใช้เฉพาะ chunk ที่รับจาก network host)
     pub chiseled: HashMap<usize, Box<[u8; 4096]>>,
     pub version: u32,
@@ -1528,7 +1748,7 @@ pub fn spawn_block_generation_task(
             .unwrap_or_else(|| generate_chunk_blocks(chunk_pos, noise));
         let _ = sender.send(ChunkBlockData {
             chunk_pos,
-            blocks: Arc::from(*blocks),
+            blocks: Arc::new(blocks),
             chiseled: HashMap::new(),
             version,
         });
@@ -1537,8 +1757,8 @@ pub fn spawn_block_generation_task(
 
 pub fn spawn_mesh_generation_task(
     chunk_pos: IVec2,
-    blocks: Arc<[BlockType; CHUNK_VOLUME]>,
-    neighbors: [Arc<[BlockType; CHUNK_VOLUME]>; 8],
+    blocks: Arc<ChunkBlocks>,
+    neighbors: [Arc<ChunkBlocks>; 8],
     version: u32,
     sender: Sender<ChunkMeshData>,
 ) {
@@ -1981,13 +2201,9 @@ pub fn world_generation_system(
             let sender = generator.sender_blocks.lock().unwrap().clone();
             // network client: chunk ที่ host ส่งมา (มี edit) ใช้แทนการ generate
             if let Some(received) = client_sync.as_ref().and_then(|cs| cs.full_chunks.get(&chunk_pos)) {
-                let mut boxed = Box::new([BlockType::Air; CHUNK_VOLUME]);
-                for (i, b) in received.blocks.iter().enumerate() {
-                    boxed[i] = BlockType::from_u8(*b);
-                }
                 let _ = sender.send(ChunkBlockData {
                     chunk_pos,
-                    blocks: Arc::from(*boxed),
+                    blocks: Arc::new(ChunkBlocks::from_dense_bytes(&received.blocks)),
                     chiseled: received.chiseled.clone(),
                     version: generator.version,
                 });
@@ -2186,12 +2402,8 @@ pub fn refresh_chunk_lamp_lights(
     let base_z = (chunk_pos.y * CHUNK_WIDTH as i32) as f32;
 
     let mut lights = Vec::new();
-    for (i, block) in chunk.blocks.iter().enumerate() {
-        let Some(color) = lamp_emission(*block) else { continue };
-        // ถอดพิกัดกลับจาก index (x + y*W + z*W*H)
-        let x = i % CHUNK_WIDTH;
-        let y = (i / CHUNK_WIDTH) % CHUNK_HEIGHT;
-        let z = i / (CHUNK_WIDTH * CHUNK_HEIGHT);
+    chunk.blocks.for_each_matching(|b| lamp_emission(b).is_some(), |x, y, z, block| {
+        let Some(color) = lamp_emission(block) else { return };
 
         let entity = commands.spawn((
             PointLight {
@@ -2208,7 +2420,7 @@ pub fn refresh_chunk_lamp_lights(
             ),
         )).id();
         lights.push(entity);
-    }
+    });
     if !lights.is_empty() {
         world.lamp_lights.insert(chunk_pos, lights);
     }
@@ -2251,17 +2463,15 @@ pub fn process_generated_chunks_system(
         if client_sync.is_none() {
             let base_x = chunk_pos.x * CHUNK_WIDTH as i32;
             let base_z = chunk_pos.y * CHUNK_WIDTH as i32;
-            for (i, b) in block_data.blocks.iter().enumerate() {
-                if matches!(*b, BlockType::TntLit | BlockType::NukeLit) {
-                    let x = i % CHUNK_WIDTH;
-                    let y = (i / CHUNK_WIDTH) % CHUNK_HEIGHT;
-                    let z = i / (CHUNK_WIDTH * CHUNK_HEIGHT);
+            block_data.blocks.for_each_matching(
+                |b| matches!(b, BlockType::TntLit | BlockType::NukeLit),
+                |x, y, z, _| {
                     active_tnt.0.insert(
                         IVec3::new(base_x + x as i32, y as i32, base_z + z as i32),
                         Timer::from_seconds(1.0, TimerMode::Once),
                     );
-                }
-            }
+                },
+            );
         }
 
         let (water_y_min, water_y_max) = scan_water_bounds(&block_data.blocks);
@@ -2450,7 +2660,7 @@ pub fn chunk_unloading_system(
             if let Some(cs) = client_sync.as_mut() {
                 if cs.edited.remove(&pos) || cs.full_chunks.contains_key(&pos) {
                     cs.full_chunks.insert(pos, crate::network::ReceivedChunk {
-                        blocks: chunk_data.blocks.iter().map(|b| *b as u8).collect(),
+                        blocks: chunk_data.blocks.iter_all().map(|b| b as u8).collect(),
                         chiseled: chunk_data.chiseled_blocks.clone(),
                     });
                 }
@@ -3619,7 +3829,7 @@ const NUKE_MAX_RAYS: usize = 16_000;
 
 /// snapshot บล็อกรอบจุดระเบิด — clone แค่ Arc ต่อ chunk (ถูกมาก) ส่งเข้า task ได้
 pub struct WorldSnapshot {
-    chunks: std::collections::HashMap<IVec2, Arc<[BlockType; CHUNK_VOLUME]>>,
+    chunks: std::collections::HashMap<IVec2, Arc<ChunkBlocks>>,
 }
 
 impl WorldSnapshot {
@@ -3634,7 +3844,7 @@ impl WorldSnapshot {
             Some(blocks) => {
                 let lx = x.rem_euclid(CHUNK_WIDTH as i32) as usize;
                 let lz = z.rem_euclid(CHUNK_WIDTH as i32) as usize;
-                blocks[ChunkData::get_index(lx, y as usize, lz)]
+                blocks.get(lx, y as usize, lz)
             }
             None => BlockType::Air,
         }
@@ -4364,7 +4574,13 @@ fn tick_pools(
 
 /// เพดาน remesh น้ำต่อ tick — เส้นทางเฉพาะน้ำถูกกว่าตัวเต็มมาก (สแกนแค่แถบ y
 /// ที่มีน้ำ ไม่มี AO/greedy) เลยตั้งสูงกว่าเพดานเดิม 16 ได้สบาย
-const WATER_REMESH_CAP: usize = 64;
+/// จำนวน chunk น้ำที่ remesh ต่อ "เฟรม" (ระบายคิวเรื่อยๆ ไม่ยิงก้อนใหญ่ต่อ tick
+/// — เดิม 64/tick ทำเฟรมกระตุกเป็นจังหวะตอนน้ำทะลักลงหลุมระเบิด)
+const WATER_REMESH_PER_FRAME: usize = 8;
+/// งบ BFS หาทิศไหล (find_flow_dirs_finite) ต่อ tick — ตัวการหลักตอนน้ำท่วมหลุม:
+/// active 20k cells × BFS ~130 cells = ล้าน lookups ต่อ tick; เกินงบใช้
+/// การเทียบเพื่อนบ้านตรงๆ แทน (น้ำยังไหลตาม gradient แค่หาทางไกลไม่เก่งชั่วคราว)
+const FLOW_BFS_BUDGET: usize = 1500;
 
 fn queue_remesh(pos: IVec3, remesh_queue: &mut std::collections::HashSet<IVec2>) {
     // รวมเพื่อนบ้านเมื่อแตะขอบ chunk — ผิวน้ำเรียบ (drop smoothing) สุ่มมุมข้าม
@@ -4398,8 +4614,12 @@ pub fn wake_seam_water(world: &VoxelWorld, chunk_pos: IVec2, active_fluids: &mut
         for i in 0..w {
             let ((alx, alz), (blx, blz)) = map_locals(i);
             for y in 0..CHUNK_HEIGHT {
-                let a = chunk.blocks[ChunkData::get_index(alx, y, alz)];
-                let b = neighbor.blocks[ChunkData::get_index(blx, y, blz)];
+                // ทั้งสองฝั่ง section อากาศล้วน — ไม่มีน้ำให้ปลุกแน่ (เช็คถูกมาก)
+                if chunk.blocks.section_is_air(y) && neighbor.blocks.section_is_air(y) {
+                    continue;
+                }
+                let a = chunk.blocks.get(alx, y, alz);
+                let b = neighbor.blocks.get(blx, y, blz);
                 let (av, bv) = (get_water_vol(a), get_water_vol(b));
 
                 // ฝั่งเราไหลไปหาเขาได้ไหม
@@ -4537,6 +4757,18 @@ pub fn fluid_simulation_system(
     if active_fluids.0.is_empty() && remesh_queue.is_empty() && pools.0.is_empty() {
         return;
     }
+
+    // ระบายคิว remesh น้ำทีละนิด "ทุกเฟรม" — งานเกลี่ยเรียบ ไม่ spike ตอน tick
+    if !remesh_queue.is_empty() {
+        let mut chunks = remesh_queue.drain().collect::<Vec<_>>();
+        chunks.sort_by_key(|c| c.x * c.x + c.y * c.y);
+        let overflow = chunks.split_off(chunks.len().min(WATER_REMESH_PER_FRAME));
+        remesh_queue.extend(overflow);
+        // chunk ที่เพื่อนบ้านยังไม่โหลด remesh ไม่ได้ — คืนเข้าคิวไว้ลองใหม่
+        let skipped = remesh_water_only(&mut commands, &mut world, &mut mp, chunks);
+        remesh_queue.extend(skipped);
+    }
+
     // น้ำ simulate เป็นจังหวะคงที่ ไม่ใช่ทุกเฟรม — คาบปรับได้จาก settings UI
     // (ทุกเฟรมที่ 60fps น้ำจะแผ่ 60 บล็อก/วิ เร็วจนดูพัง แถม multiplayer
     // จะ broadcast delta ถี่เกินจน channel บวม)
@@ -4562,6 +4794,8 @@ pub fn fluid_simulation_system(
 
     // seed สำหรับลอง form pool ปลายเฟรม (cell ผิวน้ำลึกที่นิ่ง)
     let mut pool_seed: Option<IVec3> = None;
+    // งบ BFS หาทิศไหลของ tick นี้ — หมดแล้ว fallback เทียบเพื่อนบ้านตรงๆ
+    let mut bfs_budget = FLOW_BFS_BUDGET;
 
     // Process fluids
     for pos in current_active.into_iter() {
@@ -4620,7 +4854,15 @@ pub fn fluid_simulation_system(
             // หยดสุดท้าย: ปกตินอนเป็นคราบ แต่ถ้า BFS เจอที่ให้ตกในระยะค้นหา
             // ให้ย้ายทั้งหยดเดินตามทิศนั้น — เข้าใกล้จุดตกทุก tick เลยไม่ ping-pong
             // (ไม่มีทิศ = เป็นแอ่งจริง นอนนิ่งตามเดิม)
-            for dir in find_flow_dirs_finite(pos, &world, current_vol) {
+            // งบ BFS หมด = นอนรอ tick หน้า (โหลดหนักอยู่ — เดี๋ยวถึงคิว)
+            let dirs = if bfs_budget > 0 {
+                bfs_budget -= 1;
+                find_flow_dirs_finite(pos, &world, current_vol)
+            } else {
+                next_active.insert(pos);
+                Vec::new()
+            };
+            for dir in dirs {
                 let n_pos = pos + dir;
                 // เดินเข้าเขตสระ = ถูกดูดเข้าบัญชี
                 if let Some(pi) = pools.member_of(n_pos) {
@@ -4652,7 +4894,13 @@ pub fn fluid_simulation_system(
             }
         }
         if current_vol > 1 && !moved {
-            let preferred_dirs = find_flow_dirs_finite(pos, &world, current_vol);
+            // เกินงบ BFS → ใช้ 4 ทิศตรงๆ (เส้นทาง fallback เดิม gradient ยังพาไหลถูกทาง)
+            let preferred_dirs = if bfs_budget > 0 {
+                bfs_budget -= 1;
+                find_flow_dirs_finite(pos, &world, current_vol)
+            } else {
+                Vec::new()
+            };
             let check_dirs = if preferred_dirs.is_empty() {
                 vec![IVec3::new(1, 0, 0), IVec3::new(-1, 0, 0), IVec3::new(0, 0, 1), IVec3::new(0, 0, -1)]
             } else {
@@ -4761,25 +5009,15 @@ pub fn fluid_simulation_system(
         &mut pools, &mut world, &mut active_fluids,
         &mut remesh_queue, &mut net_out, is_host,
     );
-
-    // Meshing Limit (ที่เหลือรอ tick ถัดไป) — ใช้เส้นทาง remesh เฉพาะชั้นน้ำ:
-    // fluid sim เขียนแค่ Air↔WaterN จึงไม่กระทบ mesh ชั้นอื่นโดยพิสูจน์แล้ว
-    let mut chunks = remesh_queue.drain().collect::<Vec<_>>();
-    chunks.sort_by_key(|c| c.x * c.x + c.y * c.y);
-    let overflow = chunks.split_off(chunks.len().min(WATER_REMESH_CAP));
-    remesh_queue.extend(overflow);
-
-    // chunk ที่เพื่อนบ้านยังไม่โหลด remesh ไม่ได้ — คืนเข้าคิวไว้ลองใหม่
-    let skipped = remesh_water_only(&mut commands, &mut world, &mut mp, chunks);
-    remesh_queue.extend(skipped);
+    // remesh ชั้นน้ำถูกระบายรายเฟรมที่หัวฟังก์ชัน (ไม่ยิงก้อนใหญ่ท้าย tick แล้ว)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn set(blocks: &mut [BlockType; CHUNK_VOLUME], x: usize, y: usize, z: usize, b: BlockType) {
-        blocks[ChunkData::get_index(x, y, z)] = b;
+    fn set(blocks: &mut ChunkBlocks, x: usize, y: usize, z: usize, b: BlockType) {
+        blocks.set(x, y, z, b);
     }
 
     /// คณิตบัญชีสระ: ความจุสะสม + solve ระดับผิวจากปริมาตร ต้อง invertible
@@ -4822,7 +5060,7 @@ mod tests {
     /// เพื่อนบ้านตรง + ทแยง (drop smoothing ข้ามมุม)
     #[test]
     fn water_mesh_parity_with_full_mesher() {
-        let mut main = Box::new([BlockType::Air; CHUNK_VOLUME]);
+        let mut main = ChunkBlocks::new_uniform(BlockType::Air);
         // พื้นหิน
         for z in 0..CHUNK_WIDTH {
             for x in 0..CHUNK_WIDTH {
@@ -4852,21 +5090,21 @@ mod tests {
         set(&mut main, 2, 20, 2, BlockType::Water5);
 
         // เพื่อนบ้าน +X: น้ำ vol ต่างชิดขอบ (หน้าระหว่าง vol ต่างต้องวาด)
-        let mut nx = Box::new([BlockType::Air; CHUNK_VOLUME]);
+        let mut nx = ChunkBlocks::new_uniform(BlockType::Air);
         for z in 0..CHUNK_WIDTH {
             set(&mut nx, 0, 10, z, BlockType::Water6);
         }
         // เพื่อนบ้านทแยง +X+Z: น้ำที่มุม (ทดสอบ drop_cache ข้ามทแยง)
-        let mut nxz = Box::new([BlockType::Air; CHUNK_VOLUME]);
+        let mut nxz = ChunkBlocks::new_uniform(BlockType::Air);
         set(&mut nxz, 0, 10, 0, BlockType::Water3);
 
-        let air: Arc<[BlockType; CHUNK_VOLUME]> = Arc::from(*Box::new([BlockType::Air; CHUNK_VOLUME]));
-        let neighbors: [Arc<[BlockType; CHUNK_VOLUME]>; 8] = [
-            Arc::from(*nx),
+        let air: Arc<ChunkBlocks> = Arc::new(ChunkBlocks::new_uniform(BlockType::Air));
+        let neighbors: [Arc<ChunkBlocks>; 8] = [
+            Arc::new(nx),
             air.clone(),
             air.clone(),
             air.clone(),
-            Arc::from(*nxz),
+            Arc::new(nxz),
             air.clone(),
             air.clone(),
             air.clone(),

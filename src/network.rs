@@ -703,7 +703,7 @@ pub fn host_send_queued_chunks(
                 break;
             };
             let msg = if let Some(chunk) = world.chunks.get(&chunk_pos) {
-                let bytes: Vec<u8> = chunk.blocks.iter().map(|b| *b as u8).collect();
+                let bytes: Vec<u8> = chunk.blocks.iter_all().map(|b| b as u8).collect();
                 ServerMessage::ChunkData {
                     chunk_pos: chunk_pos.to_array(),
                     blocks_rle: rle_encode(&bytes),
@@ -832,11 +832,8 @@ pub fn client_receive_messages(
 
                 // chunk โหลดอยู่แล้ว → เขียนทับทันที + remesh
                 if let Some(chunk) = world.chunks.get_mut(&pos) {
-                    let mut boxed = Box::new([BlockType::Air; CHUNK_VOLUME]);
-                    for (i, b) in blocks.iter().enumerate() {
-                        boxed[i] = BlockType::from_u8(*b);
-                    }
-                    chunk.blocks = std::sync::Arc::from(*boxed);
+                    chunk.blocks =
+                        std::sync::Arc::new(crate::voxel::ChunkBlocks::from_dense_bytes(&blocks));
                     chunk.chiseled_blocks = chiseled_map.clone();
                     chunk_remesh.0.push(pos);
                 }
@@ -1121,7 +1118,9 @@ mod tests {
     fn rle_roundtrip_uniform() {
         let data = vec![7u8; CHUNK_VOLUME];
         let encoded = rle_encode(&data);
-        assert!(encoded.len() < 32);
+        // run length เป็น u16 — uniform ทั้งคอลัมน์ใช้ ~CHUNK_VOLUME/65535 runs
+        let max_runs = CHUNK_VOLUME / (u16::MAX as usize) + 2;
+        assert!(encoded.len() <= max_runs * 4, "encoded {} bytes", encoded.len());
         assert_eq!(rle_decode(&encoded).unwrap(), data);
     }
 
