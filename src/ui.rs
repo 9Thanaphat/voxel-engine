@@ -24,6 +24,18 @@ pub struct HotbarSlotUi(pub usize);
 #[derive(Component)]
 pub struct HotbarSlotIcon(pub usize);
 
+/// จอขาววาบตอนมองระเบิด — alpha ตาม ScreenFlash.intensity
+#[derive(Component)]
+pub struct ScreenFlashOverlay;
+
+/// ความจ้าที่ค้างอยู่บนจอ (ตั้งโดยระบบ trigger ใน particles.rs, decay ที่นี่)
+#[derive(Resource, Default)]
+pub struct ScreenFlash {
+    pub intensity: f32,
+    /// อัตรา decay แบบ exponential ต่อวินาที (TNT เร็ว / nuke ช้า = ตาพร่านาน)
+    pub decay: f32,
+}
+
 pub fn setup_ui(mut commands: Commands) {
     // Crosshair
     commands.spawn((
@@ -46,6 +58,21 @@ pub fn setup_ui(mut commands: Commands) {
             BackgroundColor(Color::WHITE),
         ));
     });
+
+    // จอขาววาบตอนมองระเบิด — ทับทุกอย่าง (GlobalZIndex สูง) เริ่มโปร่งใสสนิท
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.0)),
+        bevy::ui::GlobalZIndex(100),
+        ScreenFlashOverlay,
+        InGameUi,
+        Visibility::Hidden,
+    ));
 
     // Hotbar 9 ช่อง ล่างกลางจอ — icon/กรอบเติมโดย update_hotbar_ui เฟรมแรก
     commands.spawn((
@@ -277,6 +304,24 @@ pub fn block_picker_system(
                 ui.add_space(6.0);
             });
         });
+}
+
+/// decay ความจ้า + อัปเดต alpha ของ overlay (จ้าเกิน 1.0 = ขาวสนิทค้างไว้ก่อน)
+pub fn update_screen_flash(
+    time: Res<Time>,
+    mut flash: ResMut<ScreenFlash>,
+    mut query: Query<&mut BackgroundColor, With<ScreenFlashOverlay>>,
+) {
+    if flash.intensity <= 0.0 {
+        return;
+    }
+    flash.intensity *= (-flash.decay * time.delta_secs()).exp();
+    if flash.intensity < 0.01 {
+        flash.intensity = 0.0;
+    }
+    for mut bg in &mut query {
+        bg.0 = Color::srgba(1.0, 1.0, 1.0, flash.intensity.clamp(0.0, 1.0));
+    }
 }
 
 pub fn toggle_ingame_ui(
@@ -587,6 +632,7 @@ pub fn egui_settings_system(
     mut settings: ResMut<crate::GameSettings>,
     mut regenerate: ResMut<crate::RegenerateWorld>,
     mut camera_query: Query<&mut crate::camera::FreeCamera>,
+    mut proj_query: Query<&mut Projection, With<crate::camera::FreeCamera>>,
     mut wireframe_config: ResMut<bevy::pbr::wireframe::WireframeConfig>,
     (mut server, mut client, lan_info, world, mut mp_ui): (
         Option<ResMut<bevy_renet::RenetServer>>,
@@ -693,17 +739,44 @@ pub fn egui_settings_system(
 
         ui.separator();
 
+        ui.heading("Explosion");
+        // มีผลเฉพาะ host/single (client ส่งจุดชนวนไปให้ host คำนวณ)
+        ui.add(bevy_egui::egui::Slider::new(&mut settings.tnt_power, 4.0..=25.0).text("TNT Power"));
+        ui.add(bevy_egui::egui::Slider::new(&mut settings.tnt_fuse_seconds, 0.5..=5.0).text("TNT Fuse (s)"));
+        ui.add(
+            bevy_egui::egui::Slider::new(&mut settings.nuke_yield, 100.0..=4000.0)
+                .logarithmic(true)
+                .text("Nuke Yield (TNT)"),
+        );
+        // รัศมีโดยประมาณจากสูตร: ray วิ่งได้ไกลสุด = พลังงาน/แรงตกต่อบล็อก
+        let nuke_reach = settings.tnt_power * settings.nuke_yield.cbrt() / 0.25;
+        ui.label(format!("  ≈ blast reach {:.0} blocks", nuke_reach));
+        ui.add(bevy_egui::egui::Slider::new(&mut settings.nuke_fuse_seconds, 1.0..=15.0).text("Nuke Fuse (s)"));
+
+        ui.separator();
+
         ui.heading("Camera");
         if let Some(mut camera) = camera_query.iter_mut().next() {
             ui.add(bevy_egui::egui::Slider::new(&mut camera.speed, 10.0..=200.0).text("Fly Speed"));
             let mode = if camera.fly { "Fly" } else { "Walk" };
             ui.label(format!("Mode: {} (press F to toggle)", mode));
         }
+        // FOV: แก้ที่ Projection ของกล้องตรงๆ ไม่เก็บซ้ำใน GameSettings
+        if let Some(mut projection) = proj_query.iter_mut().next() {
+            if let Projection::Perspective(p) = &mut *projection {
+                let mut fov_deg = p.fov.to_degrees();
+                if ui.add(bevy_egui::egui::Slider::new(&mut fov_deg, 30.0..=110.0).text("FOV (deg)")).changed() {
+                    p.fov = fov_deg.to_radians();
+                }
+            }
+        }
 
         ui.separator();
 
         ui.heading("Debug");
         ui.checkbox(&mut wireframe_config.global, "Wireframe");
+        // มีผลเฉพาะ host/single (ray คำนวณที่นั่น) — เปิดก่อนจุด TNT
+        ui.checkbox(&mut settings.show_tnt_rays, "Show TNT Rays");
 
         ui.separator();
         ui.label("ESC: unlock mouse | F: fly/walk | 1-9/scroll: hotbar slot");

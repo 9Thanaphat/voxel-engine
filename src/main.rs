@@ -4,6 +4,7 @@ mod camera;
 mod voxel;
 mod ui;
 mod network;
+mod particles;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -29,6 +30,15 @@ pub struct GameSettings {
     pub time_of_day: f32,
     /// คาบ tick ของ fluid sim (วินาที) — น้อย = น้ำไหลเร็ว, มาก = ช้า/เบาเครื่อง
     pub fluid_tick_seconds: f32,
+    /// พลังงานต่อ ray ของระเบิด TNT (มีผลฝั่ง host/single — ผล broadcast เป็น edit)
+    pub tnt_power: f32,
+    /// เวลานับถอยหลังหลังจุดชนวน TNT (วินาที)
+    pub tnt_fuse_seconds: f32,
+    /// debug: วาดเส้น ray ของระเบิดค้างไว้ให้ดู
+    pub show_tnt_rays: bool,
+    /// ขนาด nuke หน่วย "บล็อก TNT เทียบเท่า" — รัศมี ∝ yield^⅓ ตามสูตรจริง
+    pub nuke_yield: f32,
+    pub nuke_fuse_seconds: f32,
 }
 
 impl Default for GameSettings {
@@ -43,6 +53,11 @@ impl Default for GameSettings {
             },
             time_of_day: 10.0,
             fluid_tick_seconds: 0.1,
+            tnt_power: 10.0,
+            tnt_fuse_seconds: 2.0,
+            show_tnt_rays: false,
+            nuke_yield: 500.0,
+            nuke_fuse_seconds: 5.0,
         }
     }
 }
@@ -99,6 +114,12 @@ fn main() {
         .init_resource::<voxel::BlockPickerOpen>()
         .init_resource::<voxel::InteractionMode>()
         .init_resource::<voxel::ActiveFluids>()
+        .init_resource::<voxel::ActiveTnt>()
+        .init_resource::<voxel::ExplosionDebug>()
+        .init_resource::<particles::ActiveShockwaves>()
+        .init_resource::<voxel::NukeJobs>()
+        .init_resource::<voxel::NukeApplication>()
+        .init_resource::<ui::ScreenFlash>()
         .init_resource::<voxel::ActivePools>()
         .init_resource::<Paused>()
         .init_resource::<network::MultiplayerUi>()
@@ -126,12 +147,26 @@ fn main() {
             bevy_renet::RenetClientPlugin,
             bevy_renet::netcode::NetcodeServerPlugin,
             bevy_renet::netcode::NetcodeClientPlugin,
+            bevy_hanabi::HanabiPlugin,
         ))
         .init_state::<GameState>()
+        .add_message::<particles::BlockFx>()
+        .add_message::<particles::ExplosionFx>()
         .add_systems(Startup, (
             voxel::setup_voxel,
             camera::setup_camera,
-            ui::setup_ui
+            ui::setup_ui,
+            particles::setup_particles,
+        ))
+        .add_systems(Update, (
+            particles::spawn_block_fx,
+            particles::spawn_explosion_fx,
+            particles::update_shockwaves.after(particles::spawn_explosion_fx),
+            particles::update_explosion_flash,
+            particles::trigger_screen_flash,
+            ui::update_screen_flash.after(particles::trigger_screen_flash),
+            particles::despawn_finished_fx,
+            particles::attach_lamp_sparkles,
         ))
         .add_systems(
             Update,
@@ -163,6 +198,10 @@ fn main() {
                 voxel::update_sun_system,
                 // น้ำ simulate เฉพาะ single player กับ host — client รับ delta จาก host แทน
                 voxel::fluid_simulation_system.run_if(network::is_not_client),
+                // TNT fuse/ระเบิดก็เป็นของ host/single เช่นกัน (ผล broadcast เป็น edit)
+                voxel::tnt_detonation_system.run_if(network::is_not_client),
+                voxel::nuke_apply_system.run_if(network::is_not_client),
+                voxel::explosion_debug_system,
             ).run_if(in_state(GameState::InGame)),
         )
         // ---- Networking ----

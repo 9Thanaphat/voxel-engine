@@ -679,6 +679,16 @@ pub fn host_receive_client_messages(
     }
 }
 
+/// ส่ง chunk ทั้งก้อนให้ client ทุกคน — ใช้ตอน nuke ที่แก้บล็อกเป็นแสน
+/// (ยิงราย edit จะล้นท่อ reliable; RLE ทั้ง chunk ถูกกว่ามาก)
+pub fn queue_chunk_to_all_clients(server: &RenetServer, host_sync: &mut HostSync, chunk: IVec2) {
+    // ทำเครื่องหมาย dirty ให้คน join ทีหลังได้ chunk นี้ด้วย
+    host_sync.dirty.insert(chunk);
+    for client_id in server.clients_id() {
+        host_sync.chunk_send_queues.entry(client_id).or_default().push(chunk);
+    }
+}
+
 pub fn host_send_queued_chunks(
     mut server: ResMut<RenetServer>,
     mut host_sync: ResMut<HostSync>,
@@ -1010,6 +1020,7 @@ pub fn apply_incoming_net_edits(
     mut active_fluids: ResMut<crate::voxel::ActiveFluids>,
     mut pools: ResMut<crate::voxel::ActivePools>,
     mut mp: crate::voxel::MeshingParams,
+    (mut active_tnt, settings): (ResMut<crate::voxel::ActiveTnt>, Res<crate::GameSettings>),
 ) {
     if incoming.0.is_empty() && chunk_remesh.0.is_empty() {
         return;
@@ -1054,6 +1065,24 @@ pub fn apply_incoming_net_edits(
             cs.edited.insert(cp);
         }
         if is_host {
+            // client จุดชนวน TNT/Nuke (ส่ง SetBlock *Lit มา) — host เป็นคนนับ fuse
+            if let BlockEdit::SetBlock { block, .. } = &edit {
+                match crate::voxel::BlockType::from_u8(*block) {
+                    crate::voxel::BlockType::TntLit => {
+                        active_tnt.0.insert(
+                            tp,
+                            Timer::from_seconds(settings.tnt_fuse_seconds, TimerMode::Once),
+                        );
+                    }
+                    crate::voxel::BlockType::NukeLit => {
+                        active_tnt.0.insert(
+                            tp,
+                            Timer::from_seconds(settings.nuke_fuse_seconds, TimerMode::Once),
+                        );
+                    }
+                    _ => {}
+                }
+            }
             // host เป็นเจ้าของ simulation: ปลุกน้ำ + เซฟเหมือน edit ในเครื่อง
             active_fluids.0.insert(tp);
             for dir in [

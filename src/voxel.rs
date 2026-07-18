@@ -41,6 +41,14 @@ pub enum BlockType {
     Water6 = 20,
     Water7 = 21,
     Water8 = 22,
+    Tnt = 23,
+    /// TNT ที่จุดชนวนแล้ว (นับถอยหลังใน ActiveTnt) — แยกชนิดเพื่อให้ sync
+    /// ผ่าน SetBlock ธรรมดาได้ และ emission ทำให้ไฟ/ประกายติดผ่านระบบ lamp เดิม
+    TntLit = 24,
+    IronBlock = 25,
+    Nuke = 26,
+    /// Nuke ที่จุดชนวนแล้ว — แพทเทิร์นเดียวกับ TntLit (sync ผ่าน SetBlock + emission)
+    NukeLit = 27,
 }
 
 impl BlockType {
@@ -68,6 +76,11 @@ impl BlockType {
             20 => BlockType::Water6,
             21 => BlockType::Water7,
             22 => BlockType::Water8,
+            23 => BlockType::Tnt,
+            24 => BlockType::TntLit,
+            25 => BlockType::IronBlock,
+            26 => BlockType::Nuke,
+            27 => BlockType::NukeLit,
             _ => BlockType::Air,
         }
     }
@@ -107,6 +120,9 @@ pub struct BlockDef {
     pub transparent: bool,
     /// สีแสงของบล็อกเรืองแสง (None = บล็อกธรรมดา)
     pub emission: Option<[f32; 3]>,
+    /// ความแข็ง: พลังงานระเบิดที่ต้องจ่ายเพื่อทำลาย/ทะลุบล็อกนี้
+    /// (น้ำ = ค่าดูดซับพลังงานต่อระดับ — น้ำไม่ถูกระเบิดทำลาย ปริมาตรต้อง conserve)
+    pub hardness: f32,
     /// path ใต้ assets/ — ใส่ได้หลายลาย เกมจะสุ่มเลือกตามพิกัดบล็อก
     /// (deterministic) ให้ไม่ซ้ำกันเป็นแพทเทิร์น ไฟล์ไหนไม่มีจริงถูกข้าม
     pub tex_top: &'static [&'static str],
@@ -116,13 +132,13 @@ pub struct BlockDef {
     pub overlay_side: &'static [&'static str],
 }
 
-pub const BLOCK_DEFS: [BlockDef; 23] = [
-    BlockDef { name: "Air", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None,
+pub const BLOCK_DEFS: [BlockDef; 28] = [
+    BlockDef { name: "Air", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None, hardness: 0.0,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Dirt", color: [0.4, 0.2, 0.0, 1.0], solid: true, transparent: false, emission: None,
+    BlockDef { name: "Dirt", color: [0.4, 0.2, 0.0, 1.0], solid: true, transparent: false, emission: None, hardness: 1.0,
         tex_top: &["textures/dirt.png"], tex_side: &["textures/dirt.png"], tex_bottom: &["textures/dirt.png"],
         overlay_side: &[] },
-    BlockDef { name: "Grass", color: [0.2, 0.6, 0.2, 1.0], solid: true, transparent: false, emission: None,
+    BlockDef { name: "Grass", color: [0.2, 0.6, 0.2, 1.0], solid: true, transparent: false, emission: None, hardness: 1.2,
         tex_top: &["textures/grass_top.png"],
         // ด้านข้างมี 3 ลาย สุ่มตามพิกัดให้ไม่ซ้ำกันเป็นแพทเทิร์น
         tex_side: &["textures/grass_side_1.png", "textures/grass_side_2.png", "textures/grass_side_3.png"],
@@ -133,48 +149,70 @@ pub const BLOCK_DEFS: [BlockDef; 23] = [
             "textures/grass_side_overlay_2.png",
             "textures/grass_side_overlay_3.png",
         ] },
-    BlockDef { name: "Stone", color: [0.5, 0.5, 0.5, 1.0], solid: true, transparent: false, emission: None,
+    BlockDef { name: "Stone", color: [0.5, 0.5, 0.5, 1.0], solid: true, transparent: false, emission: None, hardness: 6.0,
         tex_top: &["textures/stone.png"], tex_side: &["textures/stone.png"], tex_bottom: &["textures/stone.png"],
         overlay_side: &[] },
-    BlockDef { name: "Water", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+    BlockDef { name: "Water", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 3.2,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Wood", color: [0.4, 0.3, 0.2, 1.0], solid: true, transparent: false, emission: None,
+    BlockDef { name: "Wood", color: [0.4, 0.3, 0.2, 1.0], solid: true, transparent: false, emission: None, hardness: 3.0,
+        tex_top: &["textures/wood_top.png"], tex_side: &["textures/wood_side.png"],
+        tex_bottom: &["textures/wood_top.png"], overlay_side: &[] },
+    BlockDef { name: "Leaves", color: [0.1, 0.5, 0.1, 1.0], solid: true, transparent: false, emission: None, hardness: 0.3,
+        tex_top: &["textures/leaves.png"], tex_side: &["textures/leaves.png"],
+        tex_bottom: &["textures/leaves.png"], overlay_side: &[] },
+    BlockDef { name: "Sand", color: [0.9, 0.8, 0.6, 1.0], solid: true, transparent: false, emission: None, hardness: 0.8,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Leaves", color: [0.1, 0.5, 0.1, 1.0], solid: true, transparent: false, emission: None,
+    BlockDef { name: "Glowstone", color: [1.0, 0.9, 0.5, 1.0], solid: true, transparent: false, emission: Some([1.0, 0.9, 0.5]), hardness: 1.5,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Sand", color: [0.9, 0.8, 0.6, 1.0], solid: true, transparent: false, emission: None,
+    BlockDef { name: "LampRed", color: [0.5, 0.1, 0.1, 1.0], solid: true, transparent: false, emission: Some([1.0, 0.2, 0.2]), hardness: 1.5,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Glowstone", color: [1.0, 0.9, 0.5, 1.0], solid: true, transparent: false, emission: Some([1.0, 0.9, 0.5]),
+    BlockDef { name: "LampGreen", color: [0.1, 0.5, 0.1, 1.0], solid: true, transparent: false, emission: Some([0.2, 1.0, 0.2]), hardness: 1.5,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "LampRed", color: [0.5, 0.1, 0.1, 1.0], solid: true, transparent: false, emission: Some([1.0, 0.2, 0.2]),
+    BlockDef { name: "LampBlue", color: [0.1, 0.1, 0.5, 1.0], solid: true, transparent: false, emission: Some([0.2, 0.2, 1.0]), hardness: 1.5,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "LampGreen", color: [0.1, 0.5, 0.1, 1.0], solid: true, transparent: false, emission: Some([0.2, 1.0, 0.2]),
+    BlockDef { name: "Glass", color: [0.80, 0.90, 1.0, 1.0], solid: true, transparent: true, emission: None, hardness: 0.4,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "LampBlue", color: [0.1, 0.1, 0.5, 1.0], solid: true, transparent: false, emission: Some([0.2, 0.2, 1.0]),
-        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Glass", color: [0.80, 0.90, 1.0, 1.0], solid: true, transparent: true, emission: None,
-        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Tall Grass", color: [0.25, 0.55, 0.53, 1.0], solid: false, transparent: true, emission: None,
+    BlockDef { name: "Tall Grass", color: [0.25, 0.55, 0.53, 1.0], solid: false, transparent: true, emission: None, hardness: 0.05,
         // ใช้ช่อง side เป็นรูป sprite ของกากบาท
         tex_top: &[], tex_side: &["textures/grass.png"], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Chiseled", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None,
+    BlockDef { name: "Chiseled", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None, hardness: 1.0,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water1", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+    BlockDef { name: "Water1", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 0.4,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water2", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+    BlockDef { name: "Water2", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 0.8,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water3", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+    BlockDef { name: "Water3", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 1.2,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water4", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+    BlockDef { name: "Water4", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 1.6,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water5", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+    BlockDef { name: "Water5", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 2.0,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water6", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+    BlockDef { name: "Water6", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 2.4,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water7", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+    BlockDef { name: "Water7", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 2.8,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water8", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None,
+    BlockDef { name: "Water8", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 3.2,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "TNT", color: [0.8, 0.2, 0.15, 1.0], solid: true, transparent: false, emission: None, hardness: 0.5,
+        tex_top: &["textures/tnt.png"], tex_side: &["textures/tnt.png"], tex_bottom: &["textures/tnt.png"],
+        overlay_side: &[] },
+    // emission ทำให้ TntLit ได้ PointLight + ประกายไฟจากระบบ lamp/sparkle เดิมฟรี
+    // hardness สูงมากกัน ray ระเบิดลูกอื่นทำลายก่อนถึงคิว chain
+    BlockDef { name: "TNT (lit)", color: [1.0, 0.5, 0.3, 1.0], solid: true, transparent: false, emission: Some([1.5, 0.6, 0.2]), hardness: 99.0,
+        tex_top: &["textures/tnt.png"], tex_side: &["textures/tnt.png"], tex_bottom: &["textures/tnt.png"],
+        overlay_side: &[] },
+    // ระเบิดทำลายไม่ได้ (ray สะท้อนอย่างเดียว) — วัสดุท่อปืนใหญ่ถาวร
+    BlockDef { name: "Iron", color: [0.85, 0.85, 0.88, 1.0], solid: true, transparent: false, emission: None, hardness: 999.0,
+        tex_top: &["textures/iron_block.png"], tex_side: &["textures/iron_block.png"], tex_bottom: &["textures/iron_block.png"],
+        overlay_side: &[] },
+    // hardness ต่ำโดยตั้งใจ (สมจริง): ระเบิดธรรมดาโดน = พังทิ้งเฉยๆ ไม่จุดนิวเคลียร์
+    BlockDef { name: "Nuke", color: [0.75, 0.75, 0.3, 1.0], solid: true, transparent: false, emission: None, hardness: 2.0,
+        tex_top: &["textures/nuke.png"], tex_side: &["textures/nuke.png"], tex_bottom: &["textures/nuke.png"],
+        overlay_side: &[] },
+    // จุดแล้ว: hardness สูงกันโดนคลื่นอื่นลบระหว่างรอ fuse, emission = ไฟเตือน
+    BlockDef { name: "Nuke (armed)", color: [1.0, 0.7, 0.2, 1.0], solid: true, transparent: false, emission: Some([2.0, 0.9, 0.3]), hardness: 999.0,
+        tex_top: &["textures/nuke.png"], tex_side: &["textures/nuke.png"], tex_bottom: &["textures/nuke.png"],
+        overlay_side: &[] },
 ];
 
 pub fn block_def(block: BlockType) -> &'static BlockDef {
@@ -187,6 +225,10 @@ pub fn block_name(block: BlockType) -> &'static str {
 
 pub fn block_color(block: BlockType) -> [f32; 4] {
     block_def(block).color
+}
+
+pub fn block_hardness(block: BlockType) -> f32 {
+    block_def(block).hardness
 }
 
 pub fn lamp_emission(block: BlockType) -> Option<Color> {
@@ -2185,6 +2227,7 @@ pub fn process_generated_chunks_system(
     block_materials: Res<BlockMaterials>,
     mut client_sync: Option<ResMut<crate::network::ClientSync>>,
     mut active_fluids: ResMut<ActiveFluids>,
+    mut active_tnt: ResMut<ActiveTnt>,
 ) {
     // Process Blocks
     let mut received_blocks = Vec::new();
@@ -2202,6 +2245,25 @@ pub fn process_generated_chunks_system(
             continue;
         }
         let chunk_pos = block_data.chunk_pos;
+
+        // TntLit/NukeLit ค้างจากเซฟ (จุดแล้วแต่ปิดเกมก่อนระเบิด) — re-arm fuse สั้นๆ
+        // เฉพาะเจ้าของ simulation (host/single) เหมือน fluid
+        if client_sync.is_none() {
+            let base_x = chunk_pos.x * CHUNK_WIDTH as i32;
+            let base_z = chunk_pos.y * CHUNK_WIDTH as i32;
+            for (i, b) in block_data.blocks.iter().enumerate() {
+                if matches!(*b, BlockType::TntLit | BlockType::NukeLit) {
+                    let x = i % CHUNK_WIDTH;
+                    let y = (i / CHUNK_WIDTH) % CHUNK_HEIGHT;
+                    let z = i / (CHUNK_WIDTH * CHUNK_HEIGHT);
+                    active_tnt.0.insert(
+                        IVec3::new(base_x + x as i32, y as i32, base_z + z as i32),
+                        Timer::from_seconds(1.0, TimerMode::Once),
+                    );
+                }
+            }
+        }
+
         let (water_y_min, water_y_max) = scan_water_bounds(&block_data.blocks);
         world.chunks.insert(chunk_pos, ChunkData {
             blocks: block_data.blocks,
@@ -2463,11 +2525,11 @@ impl Default for Hotbar {
 pub struct BlockPickerOpen(pub bool);
 
 /// บล็อกทั้งหมดที่เลือกวางได้ (รายการในหน้าต่างกด E)
-pub const PLACEABLE_BLOCKS: [BlockType; 13] = [
+pub const PLACEABLE_BLOCKS: [BlockType; 16] = [
     BlockType::Dirt, BlockType::Grass, BlockType::Stone, BlockType::Wood,
     BlockType::Leaves, BlockType::Sand, BlockType::Water8, BlockType::Glowstone,
     BlockType::LampRed, BlockType::LampGreen, BlockType::LampBlue, BlockType::Glass,
-    BlockType::TallGrass,
+    BlockType::TallGrass, BlockType::Tnt, BlockType::IronBlock, BlockType::Nuke,
 ];
 
 /// texture ที่ใช้เป็น icon บนช่อง hotbar — เอาหน้าข้างก่อน (grass เห็นเป็น
@@ -2987,6 +3049,8 @@ pub fn block_interaction_system(
         ResMut<crate::network::PendingNetEdits>,
     ),
     mut pools: ResMut<ActivePools>,
+    mut fx_writer: MessageWriter<crate::particles::BlockFx>,
+    (settings, mut active_tnt): (Res<crate::GameSettings>, ResMut<ActiveTnt>),
 ) {
     // หน้าต่างเลือกบล็อกเปิดอยู่ — คลิกเป็นของหน้าต่าง ไม่ใช่การขุด/วาง
     if picker.0 {
@@ -3018,6 +3082,8 @@ pub fn block_interaction_system(
 
     use crate::network::BlockEdit;
     let mut edit: Option<BlockEdit> = None;
+    // particle ของ edit นี้ (เก็บ block เก่าก่อน apply) — เฉพาะโหมด Normal
+    let mut fx: Option<crate::particles::BlockFx> = None;
 
     if *interaction_mode == InteractionMode::SubVoxel {
         if let Some(sub_pos) = hit.sub_pos {
@@ -3048,10 +3114,30 @@ pub fn block_interaction_system(
             }
         }
     } else {
-        if break_pressed {
+        if place_pressed && matches!(hit.block, BlockType::Tnt | BlockType::Nuke) {
+            // คลิกขวาบล็อกระเบิด = จุดชนวน (ไม่ใช่วางบล็อก) — sync เป็น SetBlock ปกติ
+            // fuse นับฝั่ง host/single เท่านั้น (client ส่ง edit ไป host เห็นแล้วนับเอง)
+            let (lit, fuse) = if hit.block == BlockType::Tnt {
+                (BlockType::TntLit, settings.tnt_fuse_seconds)
+            } else {
+                (BlockType::NukeLit, settings.nuke_fuse_seconds)
+            };
+            edit = Some(BlockEdit::SetBlock {
+                pos: hit.pos.to_array(),
+                block: lit as u8,
+            });
+            if net_client.is_none() {
+                active_tnt.0.insert(hit.pos, Timer::from_seconds(fuse, TimerMode::Once));
+            }
+        } else if break_pressed {
             edit = Some(BlockEdit::SetBlock {
                 pos: hit.pos.to_array(),
                 block: BlockType::Air as u8,
+            });
+            fx = Some(crate::particles::BlockFx {
+                pos: hit.pos,
+                placed: BlockType::Air,
+                replaced: hit.block,
             });
         } else if place_pressed && selected.0 != BlockType::Air {
             let p = hit.pos + hit.normal;
@@ -3075,12 +3161,21 @@ pub fn block_interaction_system(
                     pos: p.to_array(),
                     block: selected.0 as u8,
                 });
+                fx = Some(crate::particles::BlockFx {
+                    pos: p,
+                    placed: selected.0,
+                    replaced: world.get_block(p.x, p.y, p.z),
+                });
             }
         }
     }
 
     let Some(edit) = edit else { return };
     let Some(tp) = apply_block_edit(&mut world, &edit) else { return };
+
+    if let Some(fx) = fx {
+        fx_writer.write(fx);
+    }
 
     // แก้บล็อกแตะเขตสระ = โครงสร้างรอบน้ำเปลี่ยน บัญชีสระเชื่อไม่ได้แล้ว —
     // ทิ้งสระ (ถ้าน้ำยังขยับ เดี๋ยว form ใหม่ในรูปทรงใหม่เอง)
@@ -3122,6 +3217,675 @@ pub fn block_interaction_system(
 
 #[derive(Resource, Default)]
 pub struct ActiveFluids(pub std::collections::HashSet<IVec3>);
+
+// --------------------------------------------------------
+// TNT / ระเบิด — โมเดล ray แบกพลังงาน + สะท้อนบนหน้าบล็อก
+// จุดชนวน: คลิกขวาบล็อก Tnt → SetBlock เป็น TntLit (sync ผ่าน edit ปกติ)
+// host/single เป็นเจ้าของ fuse+detonation แบบเดียวกับ fluid sim
+// --------------------------------------------------------
+
+/// TNT ที่จุดแล้ว รอระเบิด (เฉพาะฝั่งที่รัน simulation — client เห็นแค่บล็อก TntLit)
+#[derive(Resource, Default)]
+pub struct ActiveTnt(pub std::collections::HashMap<IVec3, Timer>);
+
+/// จำนวน ray ต่อการระเบิด (fibonacci sphere)
+const EXPLOSION_RAYS: usize = 400;
+/// พลังงานที่เสียต่อ 1 บล็อกที่เดินผ่านในที่โล่ง — จำลองคลื่นกระจายตัว/เจือจาง
+const EXPLOSION_AIR_FALLOFF: f32 = 0.25;
+/// แรงตกต่อบล็อกตอนถูกบีบในที่แคบ (เพิ่งสะท้อนมาไม่เกิน CONFINE_WINDOW บล็อก)
+/// — ในท่อคลื่นไม่ได้กระจาย พลังงานวิ่งไกลเกือบเต็ม แล้วค่อยตกปกติเมื่อพ้นท่อ
+const EXPLOSION_CONFINED_FALLOFF: f32 = 0.05;
+const EXPLOSION_CONFINE_WINDOW: u32 = 4;
+/// สัดส่วนพลังงานที่เสียตอนสะท้อนแบบชนตั้งฉาก — ชนเฉียงเสียน้อยกว่าตามมุมตก
+/// (เลียบผนังท่อแทบไม่เสีย = แรงระเบิดถูกบีบไปออกปลายท่อ)
+const EXPLOSION_REFLECT_LOSS: f32 = 0.3;
+/// งบการสะท้อนรวมต่อ ray นับตามมุมตก (ชนตรง = 1.0 เต็ม, เฉียงกริบ ≈ 0)
+const EXPLOSION_BOUNCE_BUDGET: f32 = 6.0;
+/// กันลูปยาวผิดปกติ (พลังงานหมดก่อนเสมอในทางปฏิบัติ)
+const EXPLOSION_MAX_STEPS: usize = 400;
+
+/// ท่อนหนึ่งของเส้นทาง ray (ตัดท่อนใหม่ทุกการสะท้อน) — ใช้ทั้ง debug และ shockwave
+#[derive(Clone, Copy)]
+pub struct RaySeg {
+    pub a: Vec3,
+    pub b: Vec3,
+    /// พลังงานตอนต้น segment
+    pub energy: f32,
+    /// ระยะสะสมตามเส้นทาง ray ณ จุด a (นับจากจุดกำเนิด) — ไว้ขับหน้าคลื่น shockwave
+    pub dist0: f32,
+}
+
+pub struct ExplosionResult {
+    /// บล็อกที่ถูกทำลาย (ไม่รวมน้ำ — น้ำดูดซับอย่างเดียว ปริมาตร conserve)
+    pub destroyed: std::collections::HashSet<IVec3>,
+    /// Tnt/TntLit ลูกอื่นที่โดนแรงระเบิด → จุดต่อเป็นลูกโซ่
+    pub chain: std::collections::HashSet<IVec3>,
+    /// เส้นทาง ray ทุกเส้น — เก็บเสมอ (เล็กมาก) ใช้ขับ shockwave + debug
+    pub rays: Vec<RaySeg>,
+}
+
+/// เส้น ray ของระเบิดล่าสุดค้างไว้ให้ดู (เปิดผ่าน checkbox Show TNT Rays)
+#[derive(Resource, Default)]
+pub struct ExplosionDebug {
+    pub segments: Vec<RaySeg>,
+    pub ttl: f32,
+}
+
+/// คำนวณผลระเบิดของกอง TNT ที่จุดพร้อมกัน (pure — ผู้เรียกเป็นคน apply)
+/// - พลังต่อ ray โต ∝ N^⅓ (ฟิสิกส์จริง: รัศมีระเบิด ∝ มวล^⅓; N=1 เท่าระบบเดิมเป๊ะ)
+/// - จุดกำเนิด ray วนตามบล็อกในกอง → รูปทรงกองกำหนดรูประเบิดเอง
+///   (แถวยาว = ฟาดแนว, ก้อน = ทรงกลม, แผ่นแปะกำแพง = shaped charge)
+pub fn explode(world: &VoxelWorld, cluster: &[IVec3], power: f32) -> ExplosionResult {
+    let n = cluster.len().max(1);
+    let energy = power * (n as f32).cbrt();
+    let n_rays = (EXPLOSION_RAYS + 150 * (n - 1)).min(1600);
+    explode_rays(&|x, y, z| world.get_block(x, y, z), cluster, energy, n_rays)
+}
+
+/// แกนกลางของการระเบิด — อ่านบล็อกผ่าน closure ให้รันได้ทั้งบน &VoxelWorld
+/// (TNT, sync) และบน WorldSnapshot ใน background task (nuke, async)
+pub fn explode_rays(
+    sample: &dyn Fn(i32, i32, i32) -> BlockType,
+    cluster: &[IVec3],
+    energy: f32,
+    n_rays: usize,
+) -> ExplosionResult {
+    let mut result = ExplosionResult {
+        // seed ด้วยทั้งกอง: ray ทะลุผ่าน TNT ด้วยกันเอง (march เช็ค destroyed = โล่ง)
+        // และ Air edits ของกองออกจาก destroyed ชุดเดียว
+        destroyed: cluster.iter().copied().collect(),
+        chain: Default::default(),
+        rays: Vec::new(),
+    };
+    let n = cluster.len().max(1);
+    let golden = std::f32::consts::PI * (1.0 + 5.0_f32.sqrt());
+    for i in 0..n_rays {
+        // fibonacci sphere: กระจายทิศสม่ำเสมอทั้งทรงกลม
+        let k = i as f32 + 0.5;
+        let phi = (1.0 - 2.0 * k / n_rays as f32).acos();
+        let theta = golden * k;
+        let dir = Vec3::new(
+            phi.sin() * theta.cos(),
+            phi.cos(),
+            phi.sin() * theta.sin(),
+        );
+        let origin = cluster[i % n].as_vec3() + Vec3::splat(0.5);
+        march_explosion_ray(sample, origin, dir, energy, &mut result);
+    }
+    result
+}
+
+/// เดิน ray 1 เส้นด้วย DDA (โครงเดียวกับ raycast เล็งบล็อก) สะสมผลใน result
+/// - ทะลุได้: จ่าย hardness แล้ววิ่งต่อ
+/// - ทะลุไม่ไหว: สะท้อน specular ตามแกนของหน้าที่ชน เสียพลังงานส่วนหนึ่ง
+fn march_explosion_ray(
+    sample: &dyn Fn(i32, i32, i32) -> BlockType,
+    mut origin: Vec3,
+    mut dir: Vec3,
+    mut energy: f32,
+    result: &mut ExplosionResult,
+) {
+    let mut bounce_used = 0.0f32;
+    let mut steps = 0usize;
+    // นับบล็อกตั้งแต่สะท้อนครั้งล่าสุด — น้อย = ยังถูกบีบในที่แคบ (เริ่มแบบที่โล่ง)
+    let mut cells_since_bounce = u32::MAX;
+    // segment ปัจจุบัน (ตัดใหม่ทุกครั้งที่สะท้อน) + ระยะสะสมตามเส้นทาง
+    let mut seg_start = origin;
+    let mut seg_energy = energy;
+    let mut travelled = 0.0f32;
+
+    'restart: loop {
+        // DDA state จากจุดกำเนิด/ทิศปัจจุบัน (คำนวณใหม่ทุกครั้งหลังสะท้อน)
+        let mut map = IVec3::new(
+            origin.x.floor() as i32,
+            origin.y.floor() as i32,
+            origin.z.floor() as i32,
+        );
+        let delta = Vec3::new(
+            if dir.x == 0.0 { f32::INFINITY } else { (1.0 / dir.x).abs() },
+            if dir.y == 0.0 { f32::INFINITY } else { (1.0 / dir.y).abs() },
+            if dir.z == 0.0 { f32::INFINITY } else { (1.0 / dir.z).abs() },
+        );
+        let step = IVec3::new(
+            if dir.x < 0.0 { -1 } else { 1 },
+            if dir.y < 0.0 { -1 } else { 1 },
+            if dir.z < 0.0 { -1 } else { 1 },
+        );
+        let mut side_dist = Vec3::new(
+            if dir.x < 0.0 { (origin.x - map.x as f32) * delta.x } else { (map.x as f32 + 1.0 - origin.x) * delta.x },
+            if dir.y < 0.0 { (origin.y - map.y as f32) * delta.y } else { (map.y as f32 + 1.0 - origin.y) * delta.y },
+            if dir.z < 0.0 { (origin.z - map.z as f32) * delta.z } else { (map.z as f32 + 1.0 - origin.z) * delta.z },
+        );
+
+        loop {
+            steps += 1;
+
+            // ก้าวเข้า cell ถัดไป — จำแกนที่ข้าม (หน้าที่ชน) กับระยะ ณ จุดข้าม
+            let (axis, t_cross) = if side_dist.x < side_dist.y {
+                if side_dist.x < side_dist.z { (0, side_dist.x) } else { (2, side_dist.z) }
+            } else {
+                if side_dist.y < side_dist.z { (1, side_dist.y) } else { (2, side_dist.z) }
+            };
+            match axis {
+                0 => { side_dist.x += delta.x; map.x += step.x; }
+                1 => { side_dist.y += delta.y; map.y += step.y; }
+                _ => { side_dist.z += delta.z; map.z += step.z; }
+            }
+
+            if steps > EXPLOSION_MAX_STEPS {
+                let end = origin + dir * t_cross;
+                result.rays.push(RaySeg { a: seg_start, b: end, energy: seg_energy, dist0: travelled });
+                return;
+            }
+
+            // แรงตกตามระยะทาง: ที่แคบ (เพิ่งสะท้อน) ตกช้ากว่าที่โล่งมาก
+            let falloff = if cells_since_bounce < EXPLOSION_CONFINE_WINDOW {
+                EXPLOSION_CONFINED_FALLOFF
+            } else {
+                EXPLOSION_AIR_FALLOFF
+            };
+            cells_since_bounce = cells_since_bounce.saturating_add(1);
+            energy -= falloff;
+            if energy <= 0.0 {
+                let end = origin + dir * t_cross;
+                result.rays.push(RaySeg { a: seg_start, b: end, energy: seg_energy, dist0: travelled });
+                return;
+            }
+
+            if result.destroyed.contains(&map) {
+                continue; // กองตัวเอง / บล็อกที่ ray อื่นทำลายไปแล้ว = โล่ง
+            }
+            let block = sample(map.x, map.y, map.z);
+            match block {
+                BlockType::Air => {}
+                b if b.is_water() => {
+                    // น้ำดูดซับตามระดับ แต่ไม่ถูกทำลาย (ปริมาตรต้อง conserve)
+                    energy -= block_hardness(b);
+                    if energy <= 0.0 {
+                        let end = origin + dir * t_cross;
+                        result.rays.push(RaySeg { a: seg_start, b: end, energy: seg_energy, dist0: travelled });
+                        return;
+                    }
+                }
+                BlockType::Tnt | BlockType::TntLit => {
+                    result.chain.insert(map);
+                    energy -= block_hardness(BlockType::Tnt);
+                    if energy <= 0.0 {
+                        let end = origin + dir * t_cross;
+                        result.rays.push(RaySeg { a: seg_start, b: end, energy: seg_energy, dist0: travelled });
+                        return;
+                    }
+                }
+                b => {
+                    let h = block_hardness(b);
+                    if energy >= h {
+                        energy -= h;
+                        result.destroyed.insert(map);
+                    } else {
+                        // ทะลุไม่ไหว — สะท้อนออกจากหน้าที่ชน (นี่คือกลไกท่อ/ปืนใหญ่)
+                        // มุมตกยิ่งตรง (|dir·normal| → 1) ยิ่งเสียพลังงาน/งบสะท้อนมาก
+                        // เลียบผนังเฉียงๆ แทบไม่เสีย = แรงถูกบีบวิ่งไปออกปลายท่อ
+                        let incidence = match axis {
+                            0 => dir.x.abs(),
+                            1 => dir.y.abs(),
+                            _ => dir.z.abs(),
+                        };
+                        bounce_used += incidence;
+                        energy *= 1.0 - EXPLOSION_REFLECT_LOSS * incidence;
+                        let hit_point = origin + dir * t_cross;
+                        result.rays.push(RaySeg {
+                            a: seg_start,
+                            b: hit_point,
+                            energy: seg_energy,
+                            dist0: travelled,
+                        });
+                        travelled += seg_start.distance(hit_point);
+                        if bounce_used > EXPLOSION_BOUNCE_BUDGET {
+                            return;
+                        }
+                        match axis {
+                            0 => dir.x = -dir.x,
+                            1 => dir.y = -dir.y,
+                            _ => dir.z = -dir.z,
+                        }
+                        // ขยับออกจากผิวนิดเดียว กัน DDA รอบใหม่เข้า cell เดิมซ้ำ
+                        origin = hit_point + dir * 1e-3;
+                        seg_start = origin;
+                        seg_energy = energy;
+                        cells_since_bounce = 0;
+                        continue 'restart;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// นับถอยหลัง fuse แล้วระเบิด: ทำลายบล็อก + จุดลูกโซ่ + broadcast + remesh แบบ batch
+/// (bookkeeping ชุดเดียวกับท้าย block_interaction_system แต่รวบเป็นชุดใหญ่)
+pub fn tnt_detonation_system(
+    mut commands: Commands,
+    mut world: ResMut<VoxelWorld>,
+    time: Res<Time>,
+    settings: Res<crate::GameSettings>,
+    mut active_tnt: ResMut<ActiveTnt>,
+    mut mp: MeshingParams,
+    mut active_fluids: ResMut<ActiveFluids>,
+    mut pools: ResMut<ActivePools>,
+    (net_server, mut net_out): (
+        Option<Res<bevy_renet::RenetServer>>,
+        ResMut<crate::network::PendingNetEdits>,
+    ),
+    mut fx: MessageWriter<crate::particles::ExplosionFx>,
+    mut debug: ResMut<ExplosionDebug>,
+    jobs: Res<NukeJobs>,
+) {
+    if active_tnt.0.is_empty() {
+        return;
+    }
+    let mut exploding: Vec<IVec3> = Vec::new();
+    for (pos, timer) in active_tnt.0.iter_mut() {
+        if timer.tick(time.delta()).is_finished() {
+            exploding.push(*pos);
+        }
+    }
+    if exploding.is_empty() {
+        return;
+    }
+
+    use crate::network::BlockEdit;
+    let mut edits: Vec<BlockEdit> = Vec::new();
+    let mut chained: Vec<IVec3> = Vec::new();
+
+    // กันลูกที่ถูกกลืนโดยระเบิดอื่นในเฟรมเดียวกันระเบิดซ้ำ (edits ถูก apply หลังคำนวณครบ)
+    let mut consumed: std::collections::HashSet<IVec3> = Default::default();
+
+    for center in exploding {
+        active_tnt.0.remove(&center);
+        if consumed.contains(&center) {
+            continue;
+        }
+        let center_block = world.get_block(center.x, center.y, center.z);
+        // nuke: แยกเส้นทาง — คำนวณใน background task แล้ว nuke_apply_system รับช่วง
+        if center_block == BlockType::NukeLit {
+            start_nuke(&world, center, &settings, &jobs);
+            consumed.insert(center);
+            continue;
+        }
+        // โดนทุบทิ้งระหว่างรอ fuse = ปลดชนวนแล้ว
+        if center_block != BlockType::TntLit {
+            continue;
+        }
+
+        // flood-fill กอง TNT ที่ต่อเนื่องกัน (6 ทิศ) — detonation wave วิ่งผ่านก้อน
+        // ที่ติดกันแทบทันที = ระเบิดพร้อมกันเป็นลูกเดียว (cap กัน CPU/กองมหึมา)
+        const CLUSTER_CAP: usize = 64;
+        let mut cluster: Vec<IVec3> = vec![center];
+        let mut seen: std::collections::HashSet<IVec3> = [center].into_iter().collect();
+        let mut qi = 0;
+        while qi < cluster.len() && cluster.len() < CLUSTER_CAP {
+            let cur = cluster[qi];
+            qi += 1;
+            for d in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+                let p = cur + d;
+                if !seen.insert(p) || consumed.contains(&p) || cluster.len() >= CLUSTER_CAP {
+                    continue;
+                }
+                if matches!(world.get_block(p.x, p.y, p.z), BlockType::Tnt | BlockType::TntLit) {
+                    cluster.push(p);
+                }
+            }
+        }
+        for p in &cluster {
+            consumed.insert(*p);
+            // สมาชิกที่จุดไว้แล้วรอ fuse อยู่ — ถูกกลืนในลูกนี้แทน
+            active_tnt.0.remove(p);
+        }
+
+        let mut result = explode(&world, &cluster, settings.tnt_power);
+        let rays = std::mem::take(&mut result.rays);
+        if settings.show_tnt_rays {
+            debug.segments.extend(rays.iter().copied());
+            debug.ttl = 8.0;
+        }
+        // destroyed ครอบทั้งกอง (seed ใน explode) — Air edits ชุดเดียวจบ
+        for p in result.destroyed {
+            edits.push(BlockEdit::SetBlock { pos: p.to_array(), block: BlockType::Air as u8 });
+        }
+        for p in result.chain {
+            // จุดเฉพาะลูกที่ยังไม่ติดและยังไม่ถูกกลืน (TntLit อยู่ใน ActiveTnt แล้ว)
+            if !consumed.contains(&p) && world.get_block(p.x, p.y, p.z) == BlockType::Tnt {
+                edits.push(BlockEdit::SetBlock { pos: p.to_array(), block: BlockType::TntLit as u8 });
+                chained.push(p);
+            }
+        }
+        // เอฟเฟกต์ลูกเดียวที่กึ่งกลางมวลของกอง — rays ไปขับ shockwave ต่อ
+        let com = cluster.iter().map(|p| p.as_vec3()).sum::<Vec3>() / cluster.len() as f32
+            + Vec3::splat(0.5);
+        fx.write(crate::particles::ExplosionFx {
+            center: com,
+            rays,
+            power: settings.tnt_power * (cluster.len() as f32).cbrt(),
+            is_nuke: false,
+        });
+    }
+
+    let mut remesh: std::collections::HashSet<IVec2> = Default::default();
+    let mut edited_chunks: std::collections::HashSet<IVec2> = Default::default();
+    for edit in &edits {
+        let Some(tp) = apply_block_edit(&mut world, edit) else { continue };
+        pools.invalidate_touching(tp);
+        active_fluids.0.insert(tp);
+        for d in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+            active_fluids.0.insert(tp + d);
+        }
+        remesh.extend(edit_affected_chunks(tp));
+        edited_chunks.insert(IVec2::new(
+            tp.x.div_euclid(CHUNK_WIDTH as i32),
+            tp.z.div_euclid(CHUNK_WIDTH as i32),
+        ));
+        if net_server.is_some() {
+            net_out.0.push_back((None, edit.clone()));
+        }
+    }
+
+    // ลูกโซ่: fuse สั้นสุ่มตามพิกัด (deterministic) ให้ระเบิดไล่จังหวะสวยๆ
+    for p in chained {
+        let fuse = 0.15 + (pos_hash(p.x, p.y, p.z) % 300) as f32 / 1000.0;
+        active_tnt.0.insert(p, Timer::from_seconds(fuse, TimerMode::Once));
+    }
+
+    for cp in &edited_chunks {
+        if let Some(chunk) = world.chunks.get(cp) {
+            save_chunk(*cp, &chunk.blocks);
+        }
+    }
+    remesh_chunks(&mut commands, &mut world, &mut mp, remesh);
+    for cp in edited_chunks {
+        refresh_chunk_lamp_lights(&mut commands, &mut world, cp);
+    }
+}
+
+// --------------------------------------------------------
+// Nuke — yield ใหญ่: คำนวณบน snapshot ใน background task แล้วทยอย apply
+// ตามหน้าคลื่นทีละ chunk (บล็อกหลายแสน + remesh ร้อย chunk ห้ามทำเฟรมเดียว)
+// --------------------------------------------------------
+
+/// ความเร็วหน้าคลื่น nuke (บล็อก/วิ) — เร็วกว่า TNT ให้ฟีลระเบิดใหญ่
+pub const NUKE_WAVE_SPEED: f32 = 60.0;
+/// เพดาน chunk ที่ finalize ต่อเฟรม — กัน spike (remesh chunk ละหลาย ms)
+const NUKE_CHUNKS_PER_FRAME: usize = 2;
+const NUKE_MAX_RAYS: usize = 16_000;
+
+/// snapshot บล็อกรอบจุดระเบิด — clone แค่ Arc ต่อ chunk (ถูกมาก) ส่งเข้า task ได้
+pub struct WorldSnapshot {
+    chunks: std::collections::HashMap<IVec2, Arc<[BlockType; CHUNK_VOLUME]>>,
+}
+
+impl WorldSnapshot {
+    /// คณิตเดียวกับ VoxelWorld::get_block (voxel.rs:359)
+    pub fn get_block(&self, x: i32, y: i32, z: i32) -> BlockType {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 {
+            return BlockType::Air;
+        }
+        let cx = x.div_euclid(CHUNK_WIDTH as i32);
+        let cz = z.div_euclid(CHUNK_WIDTH as i32);
+        match self.chunks.get(&IVec2::new(cx, cz)) {
+            Some(blocks) => {
+                let lx = x.rem_euclid(CHUNK_WIDTH as i32) as usize;
+                let lz = z.rem_euclid(CHUNK_WIDTH as i32) as usize;
+                blocks[ChunkData::get_index(lx, y as usize, lz)]
+            }
+            None => BlockType::Air,
+        }
+    }
+}
+
+pub struct NukeResult {
+    pub center: IVec3,
+    /// พลังต่อ ray (หลังสเกล yield^⅓) — ไว้ normalize เอฟเฟกต์
+    pub energy: f32,
+    pub result: ExplosionResult,
+}
+
+/// channel รับผลจาก task (แพทเทิร์นเดียวกับ ChunkGenerator)
+#[derive(Resource)]
+pub struct NukeJobs {
+    pub sender: Mutex<Sender<NukeResult>>,
+    pub receiver: Mutex<Receiver<NukeResult>>,
+}
+
+impl Default for NukeJobs {
+    fn default() -> Self {
+        let (s, r) = mpsc::channel();
+        Self { sender: Mutex::new(s), receiver: Mutex::new(r) }
+    }
+}
+
+/// งานทยอยลบบล็อก: chunk เรียงตามระยะไกลสุดจากศูนย์กลาง finalize เมื่อคลื่นผ่าน
+pub struct NukeApply {
+    front: f32,
+    pending: std::collections::VecDeque<(f32, IVec2, Vec<IVec3>)>,
+}
+
+#[derive(Resource, Default)]
+pub struct NukeApplication(pub Vec<NukeApply>);
+
+/// spawn task คำนวณ nuke — สูตร scaling จริง: รัศมี ∝ yield^⅓ (Hopkinson–Cranz),
+/// จำนวน ray ∝ พื้นผิวคลื่น ∝ yield^⅔
+fn start_nuke(world: &VoxelWorld, center: IVec3, settings: &crate::GameSettings, jobs: &NukeJobs) {
+    let y = settings.nuke_yield.max(1.0);
+    let energy = settings.tnt_power * y.cbrt();
+    let n_rays = ((EXPLOSION_RAYS as f32 * y.powf(2.0 / 3.0)) as usize)
+        .clamp(EXPLOSION_RAYS, NUKE_MAX_RAYS);
+    // รัศมีไกลสุดที่ ray ไปถึงได้ (พลังงานหมดพอดี) — snapshot เผื่อขอบ
+    let reach = energy / EXPLOSION_AIR_FALLOFF + CHUNK_WIDTH as f32;
+
+    let mut chunks = std::collections::HashMap::new();
+    let c2 = Vec2::new(center.x as f32, center.z as f32);
+    for (pos, chunk) in world.chunks.iter() {
+        let cc = Vec2::new(
+            (pos.x * CHUNK_WIDTH as i32 + CHUNK_WIDTH as i32 / 2) as f32,
+            (pos.y * CHUNK_WIDTH as i32 + CHUNK_WIDTH as i32 / 2) as f32,
+        );
+        if cc.distance(c2) <= reach + CHUNK_WIDTH as f32 {
+            chunks.insert(*pos, chunk.blocks.clone());
+        }
+    }
+    let snapshot = WorldSnapshot { chunks };
+    let sender = jobs.sender.lock().unwrap().clone();
+    let cluster = vec![center];
+    AsyncComputeTaskPool::get()
+        .spawn(async move {
+            let result =
+                explode_rays(&|x, y, z| snapshot.get_block(x, y, z), &cluster, energy, n_rays);
+            let _ = sender.send(NukeResult { center, energy, result });
+        })
+        .detach();
+    info!("nuke: yield {y:.0} → energy/ray {energy:.1}, {n_rays} rays");
+}
+
+/// รับผลจาก task + เดินหน้าคลื่น finalize ทีละ chunk (host/single เท่านั้น)
+pub fn nuke_apply_system(
+    mut commands: Commands,
+    mut world: ResMut<VoxelWorld>,
+    time: Res<Time>,
+    settings: Res<crate::GameSettings>,
+    jobs: Res<NukeJobs>,
+    mut apps: ResMut<NukeApplication>,
+    mut mp: MeshingParams,
+    mut active_fluids: ResMut<ActiveFluids>,
+    mut pools: ResMut<ActivePools>,
+    mut active_tnt: ResMut<ActiveTnt>,
+    (net_server, mut host_sync, mut net_out): (
+        Option<Res<bevy_renet::RenetServer>>,
+        Option<ResMut<crate::network::HostSync>>,
+        ResMut<crate::network::PendingNetEdits>,
+    ),
+    mut fx: MessageWriter<crate::particles::ExplosionFx>,
+    mut debug: ResMut<ExplosionDebug>,
+) {
+    use crate::network::BlockEdit;
+
+    // ---- รับผลจาก task ----
+    loop {
+        let res = { jobs.receiver.lock().unwrap().try_recv() };
+        let Ok(res) = res else { break };
+        let centerf = res.center.as_vec3() + Vec3::splat(0.5);
+
+        // จัดกลุ่ม destroyed ตาม chunk พร้อมระยะไกลสุด เรียงใกล้→ไกล
+        let mut by_chunk: std::collections::HashMap<IVec2, (f32, Vec<IVec3>)> =
+            Default::default();
+        for p in res.result.destroyed.iter() {
+            let cp = IVec2::new(
+                p.x.div_euclid(CHUNK_WIDTH as i32),
+                p.z.div_euclid(CHUNK_WIDTH as i32),
+            );
+            let d = (p.as_vec3() + Vec3::splat(0.5)).distance(centerf);
+            let e = by_chunk.entry(cp).or_insert((0.0, Vec::new()));
+            e.0 = e.0.max(d);
+            e.1.push(*p);
+        }
+        let mut pending: Vec<(f32, IVec2, Vec<IVec3>)> =
+            by_chunk.into_iter().map(|(cp, (d, v))| (d, cp, v)).collect();
+        pending.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        // ลูกโซ่ TNT: จุดตอนนี้เลยด้วย fuse ตามระยะ — ตูมตอนคลื่นวิ่งไปถึงพอดี
+        for p in res.result.chain.iter() {
+            if world.get_block(p.x, p.y, p.z) != BlockType::Tnt {
+                continue;
+            }
+            let edit = BlockEdit::SetBlock { pos: p.to_array(), block: BlockType::TntLit as u8 };
+            if apply_block_edit(&mut world, &edit).is_some() {
+                remesh_chunks(&mut commands, &mut world, &mut mp, edit_affected_chunks(*p));
+                if net_server.is_some() {
+                    net_out.0.push_back((None, edit));
+                }
+                let d = (p.as_vec3() + Vec3::splat(0.5)).distance(centerf);
+                active_tnt
+                    .0
+                    .insert(*p, Timer::from_seconds(d / NUKE_WAVE_SPEED + 0.1, TimerMode::Once));
+            }
+        }
+
+        // debug เอาเต็ม / shockwave subsample กัน mesh หน้าคลื่นบวมเกิน
+        if settings.show_tnt_rays {
+            debug.segments.extend(res.result.rays.iter().copied());
+            debug.ttl = 10.0;
+        }
+        let fx_rays: Vec<RaySeg> = if res.result.rays.len() > 2000 {
+            let stride = res.result.rays.len().div_ceil(2000);
+            res.result.rays.iter().copied().step_by(stride).collect()
+        } else {
+            res.result.rays.clone()
+        };
+        fx.write(crate::particles::ExplosionFx {
+            center: centerf,
+            rays: fx_rays,
+            power: res.energy,
+            is_nuke: true,
+        });
+
+        apps.0.push(NukeApply { front: 0.0, pending: pending.into() });
+    }
+
+    // ---- เดินหน้าคลื่น + finalize chunk (จำกัดต่อเฟรมกัน spike) ----
+    if apps.0.is_empty() {
+        return;
+    }
+    let mut budget = NUKE_CHUNKS_PER_FRAME;
+    apps.0.retain_mut(|app| {
+        app.front += NUKE_WAVE_SPEED * time.delta_secs();
+        while budget > 0 {
+            let Some((d, _, _)) = app.pending.front() else { break };
+            if *d > app.front {
+                break;
+            }
+            let (_, cp, blocks) = app.pending.pop_front().unwrap();
+            budget -= 1;
+
+            let mut remesh: std::collections::HashSet<IVec2> = Default::default();
+            remesh.insert(cp);
+            for p in &blocks {
+                let edit = BlockEdit::SetBlock { pos: p.to_array(), block: BlockType::Air as u8 };
+                if apply_block_edit(&mut world, &edit).is_none() {
+                    continue;
+                }
+                // บล็อกริมขอบ chunk — เพื่อนบ้านต้อง remesh หน้าที่เพิ่งโผล่ด้วย
+                let lx = p.x.rem_euclid(CHUNK_WIDTH as i32);
+                let lz = p.z.rem_euclid(CHUNK_WIDTH as i32);
+                if lx == 0 || lx == CHUNK_WIDTH as i32 - 1 || lz == 0 || lz == CHUNK_WIDTH as i32 - 1 {
+                    remesh.extend(edit_affected_chunks(*p));
+                }
+                // ปลุกเฉพาะน้ำที่ติดหลุม (ปลุกทั้งหลุมแพงเปล่าๆ)
+                for dv in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+                    let n = *p + dv;
+                    if world.get_block(n.x, n.y, n.z).is_water() {
+                        active_fluids.0.insert(n);
+                    }
+                }
+            }
+            // pool แถวนี้เชื่อไม่ได้แล้ว — sample ห่างๆ พอ (pool ใหม่ form เองได้)
+            for p in blocks.iter().step_by(32) {
+                pools.invalidate_touching(*p);
+            }
+
+            if let Some(chunk) = world.chunks.get(&cp) {
+                save_chunk(cp, &chunk.blocks);
+            }
+            remesh_chunks(&mut commands, &mut world, &mut mp, remesh);
+            refresh_chunk_lamp_lights(&mut commands, &mut world, cp);
+            // multiplayer: ส่ง chunk ทั้งก้อน (ราย edit เป็นแสนจะล้นท่อ reliable)
+            if let (Some(server), Some(hs)) = (net_server.as_ref(), host_sync.as_mut()) {
+                crate::network::queue_chunk_to_all_clients(server, hs, cp);
+            }
+        }
+        !app.pending.is_empty()
+    });
+}
+
+/// มองเห็นกันไหม (ไม่มีบล็อกทึบขวาง) — ใช้คำนวณแสงจ้าเข้าตาตอนระเบิด
+/// เดินแบบ sampling ทีละครึ่งบล็อกพอ (เรียกครั้งเดียวต่อการระเบิด ไม่ต้อง DDA เป๊ะ)
+pub fn line_of_sight(world: &VoxelWorld, from: Vec3, to: Vec3) -> bool {
+    let delta = to - from;
+    let dist = delta.length();
+    if dist < 1.0 {
+        return true;
+    }
+    let dir = delta / dist;
+    let steps = (dist * 2.0) as i32;
+    for i in 1..steps {
+        let p = from + dir * (i as f32 * 0.5);
+        if world.get_block(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32).occludes() {
+            return false;
+        }
+    }
+    true
+}
+
+/// วาดเส้นทาง ray ของระเบิดล่าสุดค้างไว้ 8 วิ — สีบอกพลังงานตอนเริ่ม segment
+/// (เหลืองสว่าง = แรงมาก, แดงมืด = ใกล้หมด) เห็นการสะท้อนในท่อชัดๆ
+pub fn explosion_debug_system(
+    time: Res<Time>,
+    settings: Res<crate::GameSettings>,
+    mut debug: ResMut<ExplosionDebug>,
+    mut gizmos: Gizmos,
+) {
+    if debug.ttl <= 0.0 {
+        return;
+    }
+    debug.ttl -= time.delta_secs();
+    if debug.ttl <= 0.0 || !settings.show_tnt_rays {
+        debug.segments.clear();
+        debug.ttl = 0.0;
+        return;
+    }
+    let max_e = settings.tnt_power.max(0.1);
+    for seg in &debug.segments {
+        let f = (seg.energy / max_e).clamp(0.0, 1.0);
+        gizmos.line(seg.a, seg.b, Color::srgb(1.0, 0.1 + 0.9 * f, 0.05 + 0.35 * f));
+    }
+}
 
 // --------------------------------------------------------
 // Ephemeral pools — สระชั่วคราวสำหรับระบาย/เกลี่ยน้ำผืนใหญ่
