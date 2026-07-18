@@ -345,6 +345,11 @@ pub fn select_terrain(
     if settings.terrain_source != source {
         settings.terrain_source = source;
         regenerate.0 = true;
+        // ภูเขาจริง mesh หนักกว่าโลก noise หลายเท่า — เริ่มที่ระยะปลอดภัยก่อน
+        // (ปรับเพิ่มเองได้ใน settings ตามไหวของการ์ด)
+        if source == crate::TerrainSource::RealWorld && settings.render_distance > 6 {
+            settings.render_distance = 6;
+        }
     }
     crate::voxel::DEM_SAVE_DIR.store(
         source == crate::TerrainSource::RealWorld,
