@@ -6,3 +6,5 @@
 assets/dem/raw_*.tif
 saves/
 saves_dem/
+
+/screenshot/
