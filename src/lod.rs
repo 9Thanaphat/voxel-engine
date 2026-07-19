@@ -140,20 +140,13 @@ pub fn setup_lod(mut commands: Commands, mut materials: ResMut<Assets<StandardMa
     });
 }
 
-/// ความหนา (เมตร) ของแถบดินใต้ผิวก่อนถึงหิน — เหมือนบล็อกหญ้านั่งบนดินบนหิน
-/// ทำให้หน้าภูเขาไกลเป็นกำแพงดินคาดบน หินข้างล่าง (ไม่ใช่เทาล้วน)
-const SOIL_BAND_M: f32 = 8.0;
-
-// สีเฉลี่ยของ texture จริง (grass_top/dirt/stone.png) แปลงเป็น linear space —
-// โลกใกล้ render บล็อกพวกนี้ด้วย texture (ไม่ใช่ block_color fallback) และ
-// bevy ใช้ vertex color เป็น linear คูณกับ texture ที่ sample เป็น linear แล้ว
-// เพราะฉะนั้น LOD ต้องใช้ค่า linear เฉลี่ยของ texture ถึงจะสีตรงกับบล็อกใกล้
-// (grass_top จริงเป็นเขียวอมฟ้า ไม่ใช่ [0.2,0.6,0.2] ตาม registry) —
-// วัดด้วยการเฉลี่ยพิกเซลไฟล์ png; sand/water ไม่มี texture (ใช้ block_color อยู่
-// แล้วทั้งใกล้และ LOD จึงตรงกันเอง)
+// สีเฉลี่ยของ texture หญ้าจริง (grass_top.png) แปลงเป็น linear space —
+// โลกใกล้ render หญ้าด้วย texture (ไม่ใช่ block_color fallback) และ bevy ใช้
+// vertex color เป็น linear คูณกับ texture ที่ sample เป็น linear แล้ว เพราะฉะนั้น
+// LOD ต้องใช้ค่า linear เฉลี่ยของ texture ถึงสีตรงกับบล็อกใกล้ (grass_top จริง
+// เป็นเขียวอมฟ้า ไม่ใช่ [0.2,0.6,0.2] ตาม registry); sand/water ไม่มี texture
+// (ใช้ block_color อยู่แล้วทั้งใกล้และ LOD จึงตรงกันเอง)
 const LOD_GRASS: [f32; 4] = [0.053, 0.254, 0.241, 1.0];
-const LOD_DIRT: [f32; 4] = [0.129, 0.044, 0.021, 1.0];
-const LOD_STONE: [f32; 4] = [0.204, 0.204, 0.204, 1.0];
 /// เงาประจำทิศ — ค่าตรงกับ FACE_SHADE ใน voxel.rs (top 1.0, +X/-X 0.8, +Z/-Z 0.6)
 /// ให้ความสว่างหน้าบล็อก LOD เท่าบล็อกใกล้ตัว (บล็อกหยาบใช้ flat shade ต่อหน้า
 /// ไม่ใช่ normal ต่อเนื่อง ไม่งั้นเสียคาแรกเตอร์ "บล็อก")
@@ -256,8 +249,8 @@ fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> MeshBuf {
     buf
 }
 
-/// กำแพงตั้ง split เป็นดินคาดบน (SOIL_BAND_M ม.บนสุด) + หินข้างล่าง —
-/// ให้อ่านเป็นบล็อกหญ้านั่งบนดินบนหินแบบโลกจริง (แถบทราย = ทรายแทนดิน+หิน)
+/// กำแพงตั้งของ "บล็อก" — ใช้สีผิว (หญ้า/ทราย) ทั้งหน้า ให้ทั้งก้อนดูเป็นบล็อก
+/// หญ้าเต็มๆ (ด้านข้างสีเดียวกับหน้าบน แค่ shade ตามทิศ) ไม่ใช่ดิน/หินแบบเดิม
 fn push_riser_layered(
     buf: &mut MeshBuf,
     axis_x: bool,
@@ -270,13 +263,8 @@ fn push_riser_layered(
     shade_f: f32,
     sandy: bool,
 ) {
-    let soil = shade(if sandy { block_color(BlockType::Sand) } else { LOD_DIRT }, shade_f);
-    let stone = shade(if sandy { block_color(BlockType::Sand) } else { LOD_STONE }, shade_f);
-    let soil_bottom = (y_hi - SOIL_BAND_M).max(y_lo);
-    if soil_bottom > y_lo {
-        push_riser(buf, axis_x, pos, s0, s1, y_lo, soil_bottom, positive, stone);
-    }
-    push_riser(buf, axis_x, pos, s0, s1, soil_bottom, y_hi, positive, soil);
+    let col = shade(if sandy { block_color(BlockType::Sand) } else { LOD_GRASS }, shade_f);
+    push_riser(buf, axis_x, pos, s0, s1, y_lo, y_hi, positive, col);
 }
 
 fn shade(col: [f32; 4], f: f32) -> [f32; 4] {
