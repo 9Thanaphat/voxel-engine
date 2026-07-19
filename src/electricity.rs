@@ -67,6 +67,14 @@ pub struct WiringState {
 #[derive(Message)]
 pub struct PowerTopologyChanged;
 
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct WireGizmo;
+
+fn setup_wire_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
+    let (config, _) = config_store.config_mut::<WireGizmo>();
+    config.line.width = 4.0;
+}
+
 /// ปลั๊กอินของระบบไฟฟ้า
 pub struct ElectricityPlugin;
 
@@ -75,6 +83,8 @@ impl Plugin for ElectricityPlugin {
         app.init_resource::<ElectricalGrid>()
            .init_resource::<WiringState>()
            .add_message::<PowerTopologyChanged>()
+           .init_gizmo_group::<WireGizmo>()
+           .add_systems(Startup, setup_wire_gizmos)
            .add_systems(Update, (
                wiring_interaction_system,
                instant_power_update_system,
@@ -311,7 +321,7 @@ fn get_terminal_world_pos(target: &ConnectionTarget) -> Vec3 {
 }
 
 /// วาดสายไฟตกท้องช้างสมจริง (พาราโบลาจำลอง Catenary Curve)
-fn draw_catenary(gizmos: &mut Gizmos, p1: Vec3, p2: Vec3, color: Color) {
+fn draw_catenary(gizmos: &mut Gizmos<WireGizmo>, p1: Vec3, p2: Vec3, color: Color) {
     let segments = 15;
     let dx = p2.x - p1.x;
     let dz = p2.z - p1.z;
@@ -337,7 +347,7 @@ fn draw_catenary(gizmos: &mut Gizmos, p1: Vec3, p2: Vec3, color: Color) {
 }
 
 pub fn draw_wires_system(
-    mut gizmos: Gizmos,
+    mut gizmos: Gizmos<WireGizmo>,
     grid: Res<ElectricalGrid>,
     wiring_state: Res<WiringState>,
     target: Res<crate::voxel::TargetedBlock>,
