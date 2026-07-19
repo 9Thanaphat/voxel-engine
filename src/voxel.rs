@@ -1400,7 +1400,7 @@ fn generate_chunk_blocks(
     // โลกจริง: ความสูงจาก DEM (พิกัดบล็อก = เมตร), ทะเลจริงอยู่ y = DEM_SEA_LEVEL_Y
     // (ไม่มีไฟล์ dem → โลกอากาศล้วน; UI กัน RealWorld ไว้แล้วถ้าไฟล์ไม่มี)
     let dem_data = (source == crate::TerrainSource::RealWorld)
-        .then(crate::dem::dem)
+        .then(crate::dem::streamer)
         .flatten();
     let sea_level: i32 = if dem_data.is_some() {
         crate::dem::DEM_SEA_LEVEL_Y
@@ -2267,6 +2267,22 @@ pub fn world_generation_system(
                 mesh_budget -= 1;
             }
             continue;
+        }
+
+        // โลกจริง: อย่า generate chunk จนกว่า DEM tile ที่ครอบมันจะโหลดเสร็จ
+        // (ไม่งั้นได้ chunk ทะเลผิดๆ cache ค้าง) — ยังไม่พร้อม = ขอโหลด+ข้ามเฟรมนี้
+        // (client ไม่ gen เอง รับจาก host — ข้าม guard)
+        if settings.terrain_source == crate::TerrainSource::RealWorld
+            && client_sync.is_none()
+            && !world.chunks.contains_key(&chunk_pos)
+        {
+            if let Some(dem) = crate::dem::streamer() {
+                let bx0 = (cx * CHUNK_WIDTH as i32) as f64;
+                let bz0 = (cz * CHUNK_WIDTH as i32) as f64;
+                if !dem.ensure_ready(bx0, bz0, bx0 + CHUNK_WIDTH as f64, bz0 + CHUNK_WIDTH as f64) {
+                    continue; // tile ยังโหลดอยู่ — ลองใหม่เฟรมหน้า
+                }
+            }
         }
 
         // Phase 1: Block Generation
@@ -4178,8 +4194,17 @@ pub fn position_player_for_terrain(
     if !regen.0 && !world.chunks.is_empty() {
         return; // กลับเข้าโลกเดิมที่ยังอยู่ใน memory — อยู่ที่เดิมต่อ
     }
-    let Some(d) = crate::dem::dem() else { return };
-    let (cx, cz) = d.center_block();
+    let Some(d) = crate::dem::streamer() else { return };
+    // spawn ที่เชียงใหม่ (ดอยสุเทพ ~18.79N 98.98E) ถ้ามี tile นั้น; ไม่งั้น fallback
+    // ไป tile แรกที่มี — deterministic ไม่สุ่มจุดทุกครั้งแบบ center_block เดิม
+    let (cx, cz) = if d.has_tile_at(18.79, 98.98) {
+        crate::dem::latlon_to_block(18.79, 98.98)
+    } else {
+        d.center_block()
+    };
+    // โหลด tile ตรงจุด spawn แบบ blocking ก่อน ไม่งั้น elevation คืน 0 (ทะเล)
+    // เพราะ tile ยังโหลด async ไม่ทัน → ผู้เล่นโผล่ต่ำกว่าภูเขาจริง
+    d.load_blocking_at(cx, cz);
     let h = crate::dem::DEM_SEA_LEVEL_Y as f32 + d.elevation_at_block(cx, cz);
     if let Some((mut t, mut cam)) = camera.iter_mut().next() {
         t.translation = Vec3::new(cx as f32, h + 20.0, cz as f32);

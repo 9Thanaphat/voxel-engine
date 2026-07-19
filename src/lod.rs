@@ -49,14 +49,14 @@ impl HeightSourceSpec {
 /// แหล่งความสูงจริงที่ใช้ใน task (โหมดไหนก็หน้าตาเดียวกันต่อ mesher)
 enum HeightSource {
     Noise(TerrainSampler),
-    Dem(&'static crate::dem::DemData),
+    Dem(&'static crate::dem::DemStreamer),
 }
 
 impl HeightSource {
     fn build(spec: HeightSourceSpec) -> Option<Self> {
         match spec {
             HeightSourceSpec::Noise(params) => Some(Self::Noise(TerrainSampler::new(params))),
-            HeightSourceSpec::Dem => crate::dem::dem().map(Self::Dem),
+            HeightSourceSpec::Dem => crate::dem::streamer().map(Self::Dem),
         }
     }
 
@@ -327,61 +327,6 @@ mod debug_tests {
     use super::*;
 
     #[test]
-    fn dem_elevation_sanity() {
-        let Some(d) = crate::dem::dem() else {
-            eprintln!("no dem loaded");
-            return;
-        };
-        // จุดใกล้ spawn (52784, 55287) + จุดไกลออกไปตามรัศมี LOD แต่ละวง
-        for (label, x, z) in [
-            ("center", 52784.0, 55287.0),
-            ("+2500", 52784.0 + 2500.0, 55287.0),
-            ("+10000", 52784.0 + 10000.0, 55287.0),
-            ("+33000", 52784.0 + 33000.0, 55287.0),
-            ("-33000x", 52784.0 - 33000.0, 55287.0),
-        ] {
-            let elev = d.elevation_at_block(x, z);
-            let y = crate::dem::DEM_SEA_LEVEL_Y as f32 + elev;
-            eprintln!("{label}: elev={elev:.1}m  y={y:.1}");
-        }
-
-        // ตรงกับพิกัดมุมของ tile ring2 ตัวอย่างที่ log บอกว่า render (coord ~2..10)
-        for coord_x in [2, 6, 10] {
-            let origin_x = coord_x as f64 * 8192.0;
-            let origin_z = 6.0 * 8192.0;
-            let elev = d.elevation_at_block(origin_x, origin_z);
-            eprintln!("tile coord x={coord_x}: origin=({origin_x},{origin_z}) elev={elev:.1}");
-        }
-    }
-
-    #[test]
-    fn slope_distribution() {
-        let Some(source) = HeightSource::build(HeightSourceSpec::Dem) else {
-            eprintln!("no dem loaded");
-            return;
-        };
-        // ตัวอย่างพื้นที่ 8192m รอบ spawn ที่ cell 32m (ring1) — ดูว่า slope ทั่วไป
-        // ของภูเขาจริงเป็นเท่าไหร่ ไว้ตั้งเกณฑ์สีหินให้ตรงกับความชันจริง
-        let (cell, n): (f32, usize) = (32.0, 256);
-        let ox = 52784.0 - (n as f32 * cell) / 2.0;
-        let oz = 55287.0 - (n as f32 * cell) / 2.0;
-        let mut slopes = Vec::with_capacity(n * n);
-        let h = |i: usize, j: usize| source.height(ox as f64 + i as f64 * cell as f64, oz as f64 + j as f64 * cell as f64);
-        for j in 0..n {
-            for i in 0..n {
-                let (h00, h10, h01, h11) = (h(i, j), h(i + 1, j), h(i, j + 1), h(i + 1, j + 1));
-                slopes.push(((h00 - h11).abs().max((h10 - h01).abs())) / cell);
-            }
-        }
-        slopes.sort_by(|a, b| a.total_cmp(b));
-        let pct = |p: f32| slopes[((slopes.len() - 1) as f32 * p) as usize];
-        eprintln!(
-            "slope stats over {}x{} cells @ {}m: p50={:.2} p75={:.2} p90={:.2} p95={:.2} p99={:.2} max={:.2}",
-            n, n, cell, pct(0.5), pct(0.75), pct(0.9), pct(0.95), pct(0.99), slopes.last().unwrap()
-        );
-    }
-
-    #[test]
     fn ring_overlap_check() {
         // จำลอง desired-set logic แบบเดียวกับ update_lod_tiles ที่ camera x=54574,z=52250
         let cam = Vec2::new(54574.0, 52250.0);
@@ -548,6 +493,13 @@ pub fn update_lod_tiles(
         }
     }
 
+    // โลกจริง: อย่า build LOD tile จนกว่า DEM tile ที่ครอบมันจะพร้อม — ไม่งั้น
+    // LOD ที่ build ตอน tile ยังโหลดจะเป็นทะเลค้างถาวร (ไม่ rebuild เมื่อ tile มา)
+    // ตรงนี้ ensure_ready จะ request โหลดให้ด้วย แล้วค่อย build เฟรมถัดๆ ไป
+    let dem = (settings.terrain_source == crate::TerrainSource::RealWorld)
+        .then(crate::dem::streamer)
+        .flatten();
+
     // spawn task ที่ขาด (จำกัดงานคงค้าง)
     for key in desired {
         if lod.tiles.contains_key(&key)
@@ -556,10 +508,18 @@ pub fn update_lod_tiles(
         {
             continue;
         }
+        let (ring, coord) = key;
+        if let Some(dem) = dem {
+            let (_cell, tile_size, _) = LOD_RINGS[ring];
+            let (ox, oz) = ((coord.x * tile_size) as f64, (coord.y * tile_size) as f64);
+            let ts = tile_size as f64;
+            if !dem.ensure_ready(ox, oz, ox + ts, oz + ts) {
+                continue; // DEM tile ยังไม่พร้อม — ข้ามไปก่อน (request แล้ว)
+            }
+        }
         lod.pending.insert(key);
         let sender = lod.sender.lock().unwrap().clone();
         let version = lod.version;
-        let (ring, coord) = key;
         AsyncComputeTaskPool::get()
             .spawn(async move {
                 if let Some(source) = HeightSource::build(spec) {

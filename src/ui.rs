@@ -16,6 +16,12 @@ pub struct ModeText;
 #[derive(Component)]
 pub struct InGameUi;
 
+#[derive(Component)]
+pub struct DebugMenuUi;
+
+#[derive(Resource, Default)]
+pub struct ShowDebugMenu(pub bool);
+
 /// กรอบช่อง hotbar (index 0..9) — border เปลี่ยนสีตามช่องที่เลือก
 #[derive(Component)]
 pub struct HotbarSlotUi(pub usize);
@@ -57,13 +63,25 @@ pub fn setup_ui(mut commands: Commands) {
         InGameUi,
         Visibility::Hidden,
     )).with_children(|parent| {
+        // เส้นตั้ง
         parent.spawn((
             Node {
-                width: Val::Px(10.0),
-                height: Val::Px(10.0),
+                position_type: PositionType::Absolute,
+                width: Val::Px(2.0),
+                height: Val::Px(16.0),
                 ..default()
             },
-            BackgroundColor(Color::WHITE),
+            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
+        ));
+        // เส้นนอน
+        parent.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Px(16.0),
+                height: Val::Px(2.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
         ));
     });
 
@@ -98,14 +116,14 @@ pub fn setup_ui(mut commands: Commands) {
         for i in 0..9 {
             parent.spawn((
                 Node {
-                    width: Val::Px(48.0),
-                    height: Val::Px(48.0),
+                    width: Val::Px(52.0),
+                    height: Val::Px(52.0),
                     border: UiRect::all(Val::Px(3.0)),
-                    padding: UiRect::all(Val::Px(3.0)),
+                    padding: UiRect::all(Val::Px(4.0)),
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
-                BorderColor::all(Color::srgba(0.3, 0.3, 0.3, 0.8)),
+                BackgroundColor(Color::srgba(0.1, 0.1, 0.15, 0.7)),
+                BorderColor::all(Color::srgba(0.2, 0.2, 0.2, 0.6)),
                 HotbarSlotUi(i),
             )).with_children(|slot| {
                 slot.spawn((
@@ -134,8 +152,9 @@ pub fn setup_ui(mut commands: Commands) {
                 align_items: AlignItems::FlexEnd,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+            BackgroundColor(Color::srgba(0.05, 0.05, 0.05, 0.6)),
             InGameUi,
+            DebugMenuUi,
             Visibility::Hidden,
         ))
         .with_children(|parent| {
@@ -205,9 +224,10 @@ pub fn update_hotbar_ui(
 
     for (slot, mut border) in &mut slot_query {
         *border = if slot.0 == hotbar.selected {
-            BorderColor::all(Color::WHITE)
+            // ไฮไลต์สีเหลืองทองเวลาเลือก
+            BorderColor::all(Color::srgb(1.0, 0.85, 0.2))
         } else {
-            BorderColor::all(Color::srgba(0.3, 0.3, 0.3, 0.8))
+            BorderColor::all(Color::srgba(0.2, 0.2, 0.2, 0.6))
         };
     }
 
@@ -334,13 +354,27 @@ pub fn update_screen_flash(
 
 pub fn toggle_ingame_ui(
     state: Res<State<crate::GameState>>,
-    mut query: Query<&mut Visibility, With<InGameUi>>,
+    show_debug: Res<ShowDebugMenu>,
+    mut query: Query<(Entity, &mut Visibility, Option<&DebugMenuUi>), With<InGameUi>>,
 ) {
-    if state.is_changed() || state.is_added() {
+    if state.is_changed() || state.is_added() || show_debug.is_changed() {
         let is_ingame = *state.get() == crate::GameState::InGame;
-        for mut vis in &mut query {
-            *vis = if is_ingame { Visibility::Inherited } else { Visibility::Hidden };
+        for (_, mut vis, is_debug) in &mut query {
+            if is_debug.is_some() {
+                *vis = if is_ingame && show_debug.0 { Visibility::Inherited } else { Visibility::Hidden };
+            } else {
+                *vis = if is_ingame { Visibility::Inherited } else { Visibility::Hidden };
+            }
         }
+    }
+}
+
+pub fn handle_f3_system(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut show_debug: ResMut<ShowDebugMenu>,
+) {
+    if keyboard.just_pressed(KeyCode::F3) {
+        show_debug.0 = !show_debug.0;
     }
 }
 
@@ -400,7 +434,7 @@ pub fn main_menu_system(
             ui.add_space(10.0);
 
             // โลกจริง 1 บล็อก = 1 ม. — ต้องมีไฟล์ assets/dem/ (สร้างด้วย --convert-dem)
-            let has_dem = crate::dem::dem().is_some();
+            let has_dem = crate::dem::streamer().is_some();
             let rw_btn = ui.add_enabled(
                 has_dem,
                 bevy_egui::egui::Button::new("Real World (Chiang Mai)").min_size(btn_size),
@@ -570,9 +604,11 @@ pub fn update_coordinate_ui_system(
             // อัปเดตข้อความบนจอ
             text.0 = format!("X: {:.2}, Y: {:.2}, Z: {:.2}", pos.x, pos.y, pos.z);
             // โลกจริง: โชว์พิกัด GPS + ความสูงจากระดับน้ำทะเลจริง (เทียบแผนที่ได้เลย)
-            if settings.terrain_source == crate::TerrainSource::RealWorld {
-                if let Some(d) = crate::dem::dem() {
-                    let (lat, lon) = d.block_to_latlon(pos.x as f64, pos.z as f64);
+            if settings.terrain_source == crate::TerrainSource::RealWorld
+                && crate::dem::streamer().is_some()
+            {
+                {
+                    let (lat, lon) = crate::dem::block_to_latlon(pos.x as f64, pos.z as f64);
                     let elev = pos.y - crate::dem::DEM_SEA_LEVEL_Y as f32;
                     text.0.push_str(&format!(
                         "\nGPS: {:.5}°N {:.5}°E  elev {:.0} m",
@@ -749,7 +785,7 @@ pub fn egui_settings_system(
         ui.horizontal(|ui| {
             ui.label("Terrain:");
             ui.radio_value(&mut src, crate::TerrainSource::Noise, "Noise");
-            ui.add_enabled_ui(crate::dem::dem().is_some(), |ui| {
+            ui.add_enabled_ui(crate::dem::streamer().is_some(), |ui| {
                 ui.radio_value(&mut src, crate::TerrainSource::RealWorld, "Real World");
             });
         });
@@ -800,7 +836,7 @@ pub fn egui_settings_system(
         // Teleport ด้วยพิกัดจริง — เฉพาะโลกจริง (มีไฟล์ dem) ก๊อป lat/lon จาก
         // Google Maps มาวางแล้วไปโผล่ที่นั่นในเกมได้เลย
         if settings.terrain_source == crate::TerrainSource::RealWorld {
-            if let Some(dem) = crate::dem::dem() {
+            if let Some(dem) = crate::dem::streamer() {
                 ui.separator();
                 ui.heading("Teleport (GPS)");
                 ui.horizontal(|ui| {
@@ -811,8 +847,10 @@ pub fn egui_settings_system(
                 });
                 if ui.button("Go").clicked() {
                     match (teleport.lat.trim().parse::<f64>(), teleport.lon.trim().parse::<f64>()) {
-                        (Ok(lat), Ok(lon)) if dem.latlon_in_bounds(lat, lon) => {
-                            let (bx, bz) = dem.latlon_to_block(lat, lon);
+                        (Ok(lat), Ok(lon)) if dem.has_tile_at(lat, lon) => {
+                            let (bx, bz) = crate::dem::latlon_to_block(lat, lon);
+                            // โหลด tile ปลายทาง blocking ก่อน จะได้ความสูงถูก (ไม่ใช่ทะเล)
+                            dem.load_blocking_at(bx, bz);
                             let h = crate::dem::DEM_SEA_LEVEL_Y as f32 + dem.elevation_at_block(bx, bz);
                             if let Some(mut t) = cam_transform.iter_mut().next() {
                                 t.translation = Vec3::new(bx as f32, h + 20.0, bz as f32);

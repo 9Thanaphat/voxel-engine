@@ -131,16 +131,14 @@ fn asset_root() -> String {
 }
 
 fn main() {
-    // โหมดแปลง DEM: `voxel-game --convert-dem <ไฟล์.tif> [lat_top lon_left]` แล้วจบ
+    // โหมดโหลด DEM: `voxel-game --build-dem <lat0> <lat1> <lon0> <lon1>` แล้วจบ
     let args: Vec<String> = std::env::args().collect();
-    if let Some(i) = args.iter().position(|a| a == "--convert-dem") {
-        let Some(path) = args.get(i + 1) else {
-            eprintln!("ใช้: --convert-dem <ไฟล์.tif> [lat มุมบน] [lon มุมซ้าย]");
-            std::process::exit(1);
-        };
-        let lat = args.get(i + 2).and_then(|s| s.parse().ok());
-        let lon = args.get(i + 3).and_then(|s| s.parse().ok());
-        dem::convert_dem_cli(path, lat, lon);
+    if let Some(i) = args.iter().position(|a| a == "--build-dem") {
+        let lat0 = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let lat1 = args.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let lon0 = args.get(i + 3).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let lon1 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(0);
+        dem::build_dem_cli(lat0, lat1, lon0, lon1);
         return;
     }
 
@@ -160,6 +158,7 @@ fn main() {
         .init_resource::<voxel::NukeApplication>()
         .init_resource::<ui::ScreenFlash>()
         .init_resource::<ui::TeleportUi>()
+        .init_resource::<ui::ShowDebugMenu>()
         .init_resource::<voxel::ActivePools>()
         .init_resource::<Paused>()
         .init_resource::<network::MultiplayerUi>()
@@ -250,6 +249,7 @@ fn main() {
                 voxel::nuke_apply_system.run_if(network::is_not_client),
                 voxel::explosion_debug_system,
                 lod::update_lod_tiles,
+                dem::dem_stream_system,
             ).run_if(in_state(GameState::InGame)),
         )
         // ---- Networking ----
@@ -305,7 +305,7 @@ fn main() {
         )
         .add_systems(
             Update,
-            ui::toggle_ingame_ui,
+            (ui::toggle_ingame_ui, ui::handle_f3_system),
         )
         .run();
 }

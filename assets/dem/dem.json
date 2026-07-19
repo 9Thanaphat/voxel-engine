@@ -1,9 +1,0 @@
-{
-  "width": 3600,
-  "height": 3600,
-  "origin_lat": 19.0,
-  "origin_lon": 98.0,
-  "meters_per_px_x": 29.32427480487614,
-  "meters_per_px_z": 30.715,
-  "value_scale": 0.1
-}

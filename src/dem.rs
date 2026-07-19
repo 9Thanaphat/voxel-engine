@@ -1,223 +1,390 @@
 use bevy::prelude::*;
-use std::sync::OnceLock;
+use bevy::tasks::AsyncComputeTaskPool;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, RwLock};
 
 // --------------------------------------------------------
 // DEM (Digital Elevation Model) — ภูมิประเทศโลกจริง 1 บล็อก = 1 เมตร
-// ข้อมูล: Copernicus GLO-30 tile (GeoTIFF float32 เมตร) แปลงครั้งเดียวเป็น
-// heightmap.r16 (u16 LE, 1 หน่วย = 0.1 ม.) + dem.json ผ่าน `--convert-dem`
-// พิกัดเกม ↔ โลกจริง: ปักหมุดมุมซ้ายบนของ tile (origin_lat/lon) แล้วสเกลเมตรตรงๆ
+// ทั้งประเทศไทยแบบ streaming: แต่ละ tile = 1° Copernicus GLO-30 (3600×3600 px)
+// เก็บเป็นไฟล์ assets/dem/tiles/N##E###.r16 ต่อ tile + manifest.json (รายชื่อ tile ที่มี)
+//
+// พิกัดโลก (global equirectangular เชิงเส้น, ครอบไทย): block (0,0) = มุมบนซ้าย
+// (ORIGIN_LAT/LON) สเกล N-S คงที่, E-W ใช้ละติจูดอ้างอิง REF_LAT ให้ transform เป็น
+// เชิงเส้นทั้งแผนที่ (E-W เพี้ยน ~3% ที่ขอบเหนือ/ใต้ — ยอมรับได้บนระนาบแบน)
+//
+// f32: ไทยกว้างสุด ~1.7M บล็อก (N-S) < 16.7M ที่ f32 แม่นระดับ <1 บล็อก → ไม่ต้อง
+// floating origin (ต่างจากทั้งโลก 40M)
 // --------------------------------------------------------
 
-/// ระดับน้ำทะเลจริง (elevation 0 ม.) อยู่ที่ y นี้ในเกม — เผื่อใต้ทะเล/ขุดลง
+/// ระดับน้ำทะเลจริง (elevation 0 ม.) อยู่ที่ y นี้ในเกม
 pub const DEM_SEA_LEVEL_Y: i32 = 64;
 
+const ORIGIN_LAT: f64 = 21.0; // มุมบนของกล่องไทย
+const ORIGIN_LON: f64 = 97.0; // มุมซ้ายของกล่องไทย
+const REF_LAT: f64 = 13.0; // ละติจูดอ้างอิงสเกล E-W (กลางไทย)
+const M_PER_DEG_LAT: f64 = 110_574.0;
+fn m_per_deg_lon() -> f64 {
+    111_320.0 * REF_LAT.to_radians().cos()
+}
+
+// ---- พิกัดโลก ↔ lat/lon (free function — global projection ไม่ผูก tile) ----
+
+pub fn block_to_latlon(bx: f64, bz: f64) -> (f64, f64) {
+    let lat = ORIGIN_LAT - bz / M_PER_DEG_LAT;
+    let lon = ORIGIN_LON + bx / m_per_deg_lon();
+    (lat, lon)
+}
+
+pub fn latlon_to_block(lat: f64, lon: f64) -> (f64, f64) {
+    let bz = (ORIGIN_LAT - lat) * M_PER_DEG_LAT;
+    let bx = (lon - ORIGIN_LON) * m_per_deg_lon();
+    (bx, bz)
+}
+
+// ---- tile identity + ไฟล์ ----
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct TileId {
+    pub lat: i32, // floor latitude (ขอบล่างของ tile)
+    pub lon: i32, // floor longitude (ขอบซ้าย)
+}
+
+impl TileId {
+    /// ชื่อไฟล์แบบ Copernicus: N18E098 (มุมล่างซ้าย)
+    fn file_stem(&self) -> String {
+        let (ns, alat) = if self.lat < 0 { ('S', -self.lat) } else { ('N', self.lat) };
+        let (ew, alon) = if self.lon < 0 { ('W', -self.lon) } else { ('E', self.lon) };
+        format!("{ns}{alat:02}{ew}{alon:03}")
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
-pub struct DemMeta {
-    pub width: usize,
-    pub height: usize,
-    /// lat/lon ของพิกเซลมุมซ้ายบน (เหนือสุด-ตะวันตกสุด)
-    pub origin_lat: f64,
-    pub origin_lon: f64,
-    /// ระยะจริงต่อพิกเซล (เมตร) — แกน x = ตะวันออก, z = ใต้
-    pub meters_per_px_x: f64,
-    pub meters_per_px_z: f64,
-    /// เมตรต่อ 1 หน่วยของค่าใน r16 (0.1)
-    pub value_scale: f32,
+pub struct DemManifest {
+    pub tile_px: usize,   // 3600 (GLO-30 1°)
+    pub value_scale: f32, // เมตรต่อ 1 หน่วยใน r16 (0.1)
+    pub tiles: Vec<[i32; 2]>, // [lat, lon] ของ tile ที่มีไฟล์จริง
 }
 
-pub struct DemData {
-    pub meta: DemMeta,
-    /// ความสูง u16 (×value_scale = เมตร) เรียงแถวบน→ล่าง ในแถวซ้าย→ขวา
-    pub samples: Vec<u16>,
+pub struct DemTile {
+    samples: Vec<u16>, // tile_px × tile_px (บน→ล่าง, ซ้าย→ขวา)
 }
 
-impl DemData {
-    /// ความสูง (เมตร) ที่พิกัดพิกเซลจำนวนเต็ม (clamp ขอบ)
-    fn at(&self, px: i64, pz: i64) -> f32 {
-        let x = px.clamp(0, self.meta.width as i64 - 1) as usize;
-        let z = pz.clamp(0, self.meta.height as i64 - 1) as usize;
-        self.samples[z * self.meta.width + x] as f32 * self.meta.value_scale
-    }
-
-    /// ความสูง (เมตร) ณ ตำแหน่งบล็อก (x=เมตรตะวันออกจาก origin, z=เมตรลงใต้)
-    /// — bilinear ระหว่าง 4 จุดข้อมูลรอบๆ (ข้อมูลจริงห่างกัน ~30 ม.)
-    pub fn elevation_at_block(&self, bx: f64, bz: f64) -> f32 {
-        let px = bx / self.meta.meters_per_px_x;
-        let pz = bz / self.meta.meters_per_px_z;
-        let (x0, z0) = (px.floor(), pz.floor());
-        let (fx, fz) = ((px - x0) as f32, (pz - z0) as f32);
-        let (x0, z0) = (x0 as i64, z0 as i64);
-        let h00 = self.at(x0, z0);
-        let h10 = self.at(x0 + 1, z0);
-        let h01 = self.at(x0, z0 + 1);
-        let h11 = self.at(x0 + 1, z0 + 1);
-        let top = h00 + (h10 - h00) * fx;
-        let bot = h01 + (h11 - h01) * fx;
-        top + (bot - top) * fz
-    }
-
-    /// จุดกึ่งกลาง tile ในพิกัดบล็อก — ใช้เป็นจุด spawn เริ่มต้น
-    pub fn center_block(&self) -> (f64, f64) {
-        (
-            self.meta.width as f64 * self.meta.meters_per_px_x / 2.0,
-            self.meta.height as f64 * self.meta.meters_per_px_z / 2.0,
-        )
-    }
-
-    /// พิกัดบล็อก → lat/lon จริง (ไว้โชว์ GPS บน HUD)
-    pub fn block_to_latlon(&self, bx: f64, bz: f64) -> (f64, f64) {
-        let lat = self.meta.origin_lat - bz / 110_574.0;
-        let lon = self.meta.origin_lon + bx / (111_320.0 * lat.to_radians().cos());
-        (lat, lon)
-    }
-
-    /// lat/lon จริง → พิกัดบล็อก (อินเวอร์สของ block_to_latlon — ไว้ teleport)
-    pub fn latlon_to_block(&self, lat: f64, lon: f64) -> (f64, f64) {
-        let bz = (self.meta.origin_lat - lat) * 110_574.0;
-        let bx = (lon - self.meta.origin_lon) * 111_320.0 * lat.to_radians().cos();
-        (bx, bz)
-    }
-
-    /// lat/lon อยู่ในขอบเขต tile นี้ไหม
-    pub fn latlon_in_bounds(&self, lat: f64, lon: f64) -> bool {
-        let (bx, bz) = self.latlon_to_block(lat, lon);
-        bx >= 0.0
-            && bz >= 0.0
-            && bx <= self.meta.width as f64 * self.meta.meters_per_px_x
-            && bz <= self.meta.height as f64 * self.meta.meters_per_px_z
-    }
+enum TileSlot {
+    Loading,
+    Ready(Arc<DemTile>),
+    Missing, // ไม่มีใน manifest (ทะเล) — นับเป็น "พร้อม" (= ระดับน้ำทะเล)
 }
 
-/// โหลดครั้งเดียว แชร์ให้ worldgen task ทุก thread (แพทเทิร์น FACE_TEXTURES)
-static DEM: OnceLock<Option<DemData>> = OnceLock::new();
+pub struct DemStreamer {
+    manifest: DemManifest,
+    available: std::collections::HashSet<TileId>,
+    tiles: RwLock<HashMap<TileId, TileSlot>>,
+}
+
+static DEM: OnceLock<Option<DemStreamer>> = OnceLock::new();
 
 fn dem_dir() -> std::path::PathBuf {
     crate::voxel::project_root().join("assets").join("dem")
 }
+fn tiles_dir() -> std::path::PathBuf {
+    dem_dir().join("tiles")
+}
 
-/// DEM ของโลกจริง (None = ไม่มีไฟล์ — ปุ่ม Real World จะ disabled)
-pub fn dem() -> Option<&'static DemData> {
+/// streamer ของโลกจริง (None = ไม่มี manifest — ปุ่ม Real World disabled)
+pub fn streamer() -> Option<&'static DemStreamer> {
     DEM.get_or_init(|| {
-        let meta_bytes = std::fs::read(dem_dir().join("dem.json")).ok()?;
-        let meta: DemMeta = serde_json::from_slice(&meta_bytes).ok()?;
-        let raw = std::fs::read(dem_dir().join("heightmap.r16")).ok()?;
-        if raw.len() != meta.width * meta.height * 2 {
-            warn!("heightmap.r16 ขนาดไม่ตรงกับ dem.json — ข้าม DEM");
+        let bytes = std::fs::read(dem_dir().join("manifest.json")).ok()?;
+        let manifest: DemManifest = serde_json::from_slice(&bytes).ok()?;
+        if manifest.tiles.is_empty() {
             return None;
         }
-        let samples: Vec<u16> = raw
-            .chunks_exact(2)
-            .map(|b| u16::from_le_bytes([b[0], b[1]]))
-            .collect();
-        info!(
-            "DEM loaded: {}x{} px, origin {:.2}N {:.2}E, {:.1}x{:.1} m/px",
-            meta.width, meta.height, meta.origin_lat, meta.origin_lon,
-            meta.meters_per_px_x, meta.meters_per_px_z
-        );
-        Some(DemData { meta, samples })
+        let available = manifest.tiles.iter().map(|t| TileId { lat: t[0], lon: t[1] }).collect();
+        info!("DEM manifest: {} tiles, {}px, scale {}", manifest.tiles.len(), manifest.tile_px, manifest.value_scale);
+        Some(DemStreamer { manifest, available, tiles: RwLock::new(HashMap::new()) })
     })
     .as_ref()
 }
 
-/// โหมดแปลงไฟล์: `voxel-game --convert-dem <ไฟล์ .tif> [<lat มุมบน> <lon มุมซ้าย>]`
-/// ถ้าไม่ให้ lat/lon จะเดาจากชื่อไฟล์แบบ Copernicus (N18...E098 → บน = 19.0, ซ้าย = 98.0)
-pub fn convert_dem_cli(tif_path: &str, lat_top: Option<f64>, lon_left: Option<f64>) {
-    let (lat_top, lon_left) = match (lat_top, lon_left) {
-        (Some(a), Some(b)) => (a, b),
-        _ => match parse_copernicus_name(tif_path) {
-            Some(v) => v,
-            None => {
-                eprintln!("บอก lat/lon มุมบนซ้ายไม่ได้จากชื่อไฟล์ — ใส่เป็น argument เพิ่ม");
-                std::process::exit(1);
-            }
-        },
-    };
+impl DemStreamer {
+    fn px(&self) -> i64 {
+        self.manifest.tile_px as i64
+    }
 
-    println!("อ่าน {tif_path} ...");
-    let file = std::fs::File::open(tif_path).expect("เปิดไฟล์ tif ไม่ได้");
-    let mut decoder = tiff::decoder::Decoder::new(std::io::BufReader::new(file))
-        .expect("ไฟล์ไม่ใช่ TIFF ที่อ่านได้");
-    let (width, height) = decoder.dimensions().expect("อ่านขนาดภาพไม่ได้");
-    let (width, height) = (width as usize, height as usize);
-    println!("ขนาด {width}x{height} px");
-
-    let img = decoder.read_image().expect("decode ภาพไม่ได้ (compression ไม่รองรับ?)");
-    let value_scale = 0.1f32;
-    let samples: Vec<u16> = match img {
-        tiff::decoder::DecodingResult::F32(v) => v
-            .into_iter()
-            // ค่าลบ (ทะเล/no-data) หนีบเป็น 0 — โซนเราไม่มีแผ่นดินต่ำกว่าทะเล
-            .map(|m| (m.max(0.0) / value_scale).min(u16::MAX as f32) as u16)
-            .collect(),
-        tiff::decoder::DecodingResult::I16(v) => v
-            .into_iter()
-            .map(|m| ((m.max(0) as f32) / value_scale).min(u16::MAX as f32) as u16)
-            .collect(),
-        tiff::decoder::DecodingResult::U16(v) => v
-            .into_iter()
-            .map(|m| ((m as f32) / value_scale).min(u16::MAX as f32) as u16)
-            .collect(),
-        other => {
-            eprintln!("รูปแบบข้อมูลใน TIFF ไม่รองรับ: {other:?}");
-            std::process::exit(1);
+    pub fn center_block(&self) -> (f64, f64) {
+        if let Some(t) = self.available.iter().next() {
+            let lat = t.lat as f64 + 0.5;
+            let lon = t.lon as f64 + 0.5;
+            crate::dem::latlon_to_block(lat, lon)
+        } else {
+            (0.0, 0.0)
         }
+    }
+
+    /// lat/lon นี้อยู่ในกล่องที่มี tile ไหม (ไว้เช็ค teleport / bounds)
+    pub fn has_tile_at(&self, lat: f64, lon: f64) -> bool {
+        self.available.contains(&TileId { lat: lat.floor() as i32, lon: lon.floor() as i32 })
+    }
+
+    /// tile ที่ chunk/พื้นที่รอบพิกัดบล็อกนี้ต้องใช้ (เผื่อ bilinear ข้ามขอบ tile
+    /// จึงคืน tile ที่ครอบ (bx±margin, bz±margin))
+    pub fn tiles_covering(&self, bx0: f64, bz0: f64, bx1: f64, bz1: f64) -> Vec<TileId> {
+        let (lat_a, lon_a) = block_to_latlon(bx0, bz1); // ล่างซ้าย → lat ต่ำ, lon ต่ำ
+        let (lat_b, lon_b) = block_to_latlon(bx1, bz0); // บนขวา → lat สูง, lon สูง
+        let mut out = Vec::new();
+        for lat in lat_a.floor() as i32..=lat_b.floor() as i32 {
+            for lon in lon_a.floor() as i32..=lon_b.floor() as i32 {
+                out.push(TileId { lat, lon });
+            }
+        }
+        out
+    }
+
+    /// ขอโหลด tile (เรียกจาก main thread) — spawn task อ่านไฟล์เข้ามาใน cache
+    pub fn request(&'static self, id: TileId) {
+        {
+            let r = self.tiles.read().unwrap();
+            if r.contains_key(&id) {
+                return; // มี state อยู่แล้ว (Loading/Ready/Missing)
+            }
+        }
+        if !self.available.contains(&id) {
+            self.tiles.write().unwrap().insert(id, TileSlot::Missing);
+            return;
+        }
+        self.tiles.write().unwrap().insert(id, TileSlot::Loading);
+        let px = self.manifest.tile_px;
+        let path = tiles_dir().join(format!("{}.r16", id.file_stem()));
+        AsyncComputeTaskPool::get()
+            .spawn(async move {
+                let slot = match std::fs::read(&path) {
+                    Ok(raw) if raw.len() == px * px * 2 => {
+                        let samples: Vec<u16> =
+                            raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+                        TileSlot::Ready(Arc::new(DemTile { samples }))
+                    }
+                    _ => TileSlot::Missing,
+                };
+                if let Some(Some(s)) = DEM.get() {
+                    s.tiles.write().unwrap().insert(id, slot);
+                }
+            })
+            .detach();
+    }
+
+    /// โหลด tile ที่ครอบพิกัดนี้แบบ blocking (อ่านไฟล์ตรงในเธรดนี้) — ใช้ตอน spawn
+    /// ที่ต้องรู้ความสูงผิวทันที ไม่งั้น elevation คืน 0 (ทะเล) เพราะ tile ยังโหลด async
+    pub fn load_blocking_at(&self, bx: f64, bz: f64) {
+        for id in self.tiles_covering(bx, bz, bx, bz) {
+            let already = matches!(
+                self.tiles.read().unwrap().get(&id),
+                Some(TileSlot::Ready(_)) | Some(TileSlot::Missing)
+            );
+            if already {
+                continue;
+            }
+            let slot = if !self.available.contains(&id) {
+                TileSlot::Missing
+            } else {
+                let px = self.manifest.tile_px;
+                let path = tiles_dir().join(format!("{}.r16", id.file_stem()));
+                match std::fs::read(&path) {
+                    Ok(raw) if raw.len() == px * px * 2 => {
+                        let samples = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+                        TileSlot::Ready(Arc::new(DemTile { samples }))
+                    }
+                    _ => TileSlot::Missing,
+                }
+            };
+            self.tiles.write().unwrap().insert(id, slot);
+        }
+    }
+
+    /// tile ทั้งหมดที่พื้นที่นี้ต้องใช้พร้อมหรือยัง (Ready หรือ Missing) — ถ้าไม่ ขอโหลด
+    /// ให้ (return false) เรียกจาก main thread ก่อนสั่ง generate chunk
+    pub fn ensure_ready(&'static self, bx0: f64, bz0: f64, bx1: f64, bz1: f64) -> bool {
+        let mut all = true;
+        for id in self.tiles_covering(bx0, bz0, bx1, bz1) {
+            let ready = {
+                let r = self.tiles.read().unwrap();
+                matches!(r.get(&id), Some(TileSlot::Ready(_)) | Some(TileSlot::Missing))
+            };
+            if !ready {
+                self.request(id);
+                all = false;
+            }
+        }
+        all
+    }
+
+    /// ความสูงพิกเซล global (col=ตะวันออก, row=ใต้จากขั้วโลกเหนือ) — None ถ้า tile
+    /// ยังไม่ Ready (Missing/Loading → ให้ผู้เรียกใช้ 0 = ทะเล)
+    fn pixel(&self, tiles: &HashMap<TileId, TileSlot>, gc: i64, gr: i64) -> Option<u16> {
+        let px = self.px();
+        let id = TileId {
+            lon: gc.div_euclid(px) as i32,
+            lat: 89 - gr.div_euclid(px) as i32,
+        };
+        match tiles.get(&id) {
+            Some(TileSlot::Ready(t)) => {
+                let lc = gc.rem_euclid(px) as usize;
+                let lr = gr.rem_euclid(px) as usize;
+                Some(t.samples[lr * self.manifest.tile_px + lc])
+            }
+            _ => None,
+        }
+    }
+
+    /// ความสูง (เมตร) ณ พิกัดบล็อก — bilinear ข้าม tile ได้ (อ่าน cache เฉยๆ ไม่ trigger
+    /// โหลด ให้เรียกจาก worker task ได้ปลอดภัย); tile ยังไม่โหลด = ทะเล (0 ม.)
+    pub fn elevation_at_block(&self, bx: f64, bz: f64) -> f32 {
+        let (lat, lon) = block_to_latlon(bx, bz);
+        let px = self.manifest.tile_px as f64;
+        let fc = lon * px - 0.5;
+        let fr = (90.0 - lat) * px - 0.5;
+        let gc0 = fc.floor() as i64;
+        let gr0 = fr.floor() as i64;
+        let wc = (fc - gc0 as f64) as f32;
+        let wr = (fr - gr0 as f64) as f32;
+        let tiles = self.tiles.read().unwrap();
+        let s = |gc: i64, gr: i64| {
+            self.pixel(&tiles, gc, gr).unwrap_or(0) as f32 * self.manifest.value_scale
+        };
+        let h00 = s(gc0, gr0);
+        let h10 = s(gc0 + 1, gr0);
+        let h01 = s(gc0, gr0 + 1);
+        let h11 = s(gc0 + 1, gr0 + 1);
+        let top = h00 + (h10 - h00) * wc;
+        let bot = h01 + (h11 - h01) * wc;
+        top + (bot - top) * wr
+    }
+}
+
+/// ขอโหลด tile ในรัศมีรอบผู้เล่น (รวมระยะ LOD) เป็นระยะๆ — worldgen ก็ ensure_ready
+/// เองต่อ chunk อยู่แล้ว แต่ระบบนี้ครอบระยะไกล (LOD) ที่ worldgen ไม่แตะ ให้ภูเขา
+/// ไกลๆ มีข้อมูลโหลดมาด้วย (task เขียนผลเข้า RwLock cache เองผ่าน request)
+pub fn dem_stream_system(
+    settings: Res<crate::GameSettings>,
+    camera: Query<&Transform, With<crate::camera::FreeCamera>>,
+    mut timer: Local<f32>,
+    time: Res<Time>,
+) {
+    if settings.terrain_source != crate::TerrainSource::RealWorld {
+        return;
+    }
+    // เช็ควินาทีละครั้งพอ (tile 1° ใหญ่มาก ไม่ต้องถี่)
+    *timer += time.delta_secs();
+    if *timer < 1.0 {
+        return;
+    }
+    *timer = 0.0;
+    let Some(dem) = streamer() else { return };
+    let Ok(cam) = camera.single() else { return };
+    let r = settings.lod_distance_m.min(40_000.0) as f64;
+    let (px, pz) = (cam.translation.x as f64, cam.translation.z as f64);
+    dem.ensure_ready(px - r, pz - r, px + r, pz + r);
+}
+
+// --------------------------------------------------------
+// เครื่องมือ build DEM: ดาวน์โหลด + แปลง Copernicus tile เป็น r16 + manifest
+// `voxel-game --build-dem <lat0> <lat1> <lon0> <lon1>`
+// วนทุก tile 1° ในช่วง (inclusive) → มีไฟล์แล้วข้าม, ไม่มีก็ดาวน์โหลดจาก S3 → แปลง
+// tile ที่ S3 ไม่มี (ทะเล) → ข้าม, ไม่ใส่ใน manifest
+// --------------------------------------------------------
+
+pub fn build_dem_cli(lat0: i32, lat1: i32, lon0: i32, lon1: i32) {
+    std::fs::create_dir_all(tiles_dir()).unwrap();
+    let mut tiles: Vec<[i32; 2]> = Vec::new();
+    let tile_px = 3600usize;
+    let value_scale = 0.1f32;
+
+    for lat in lat0..=lat1 {
+        for lon in lon0..=lon1 {
+            let id = TileId { lat, lon };
+            let out = tiles_dir().join(format!("{}.r16", id.file_stem()));
+            if out.exists() && std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0) == (tile_px * tile_px * 2) as u64 {
+                println!("{} มีแล้ว ข้าม", id.file_stem());
+                tiles.push([lat, lon]);
+                continue;
+            }
+            match download_and_convert(id, tile_px, value_scale) {
+                Some(()) => {
+                    println!("{} เสร็จ", id.file_stem());
+                    tiles.push([lat, lon]);
+                }
+                None => println!("{} ไม่มีข้อมูล (ทะเล/นอกพื้นที่) ข้าม", id.file_stem()),
+            }
+        }
+    }
+
+    // รวมกับ manifest เดิม (ถ้ามี) แล้วเขียนใหม่
+    let mut set: std::collections::BTreeSet<[i32; 2]> = tiles.into_iter().collect();
+    if let Ok(bytes) = std::fs::read(dem_dir().join("manifest.json")) {
+        if let Ok(m) = serde_json::from_slice::<DemManifest>(&bytes) {
+            set.extend(m.tiles);
+        }
+    }
+    let manifest = DemManifest { tile_px, value_scale, tiles: set.into_iter().collect() };
+    std::fs::write(dem_dir().join("manifest.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    println!("เขียน manifest: {} tiles ทั้งหมด", manifest.tiles.len());
+}
+
+/// ดาวน์โหลด GeoTIFF tile จาก Copernicus S3 แล้วแปลงเป็น r16 — None ถ้า S3 ไม่มี tile นี้
+fn download_and_convert(id: TileId, tile_px: usize, value_scale: f32) -> Option<()> {
+    let stem = id.file_stem(); // N18E098
+    // path S3 ของ Copernicus GLO-30: Copernicus_DSM_COG_10_N18_00_E098_00_DEM/...DEM.tif
+    let (ns, alat) = if id.lat < 0 { ("S", -id.lat) } else { ("N", id.lat) };
+    let (ew, alon) = if id.lon < 0 { ("W", -id.lon) } else { ("E", id.lon) };
+    let dir = format!("Copernicus_DSM_COG_10_{ns}{alat:02}_00_{ew}{alon:03}_00_DEM");
+    let url = format!("https://copernicus-dem-30m.s3.amazonaws.com/{dir}/{dir}.tif");
+    let tmp = tiles_dir().join(format!("{stem}.tif.tmp"));
+
+    println!("ดาวน์โหลด {stem} ...");
+    let status = std::process::Command::new("curl")
+        .args(["-sfL", "--max-time", "300", "-o"])
+        .arg(&tmp)
+        .arg(&url)
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        _ => {
+            let _ = std::fs::remove_file(&tmp);
+            return None; // 404 = ทะเล ไม่มี tile
+        }
+    }
+
+    let result = convert_tif_to_r16(&tmp, id, tile_px, value_scale);
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+fn convert_tif_to_r16(tif: &std::path::Path, id: TileId, tile_px: usize, value_scale: f32) -> Option<()> {
+    let file = std::fs::File::open(tif).ok()?;
+    let mut decoder = tiff::decoder::Decoder::new(std::io::BufReader::new(file)).ok()?;
+    let (w, h) = decoder.dimensions().ok()?;
+    if w as usize != tile_px || h as usize != tile_px {
+        eprintln!("  ขนาด {}×{} ไม่ตรง {} — ข้าม", w, h, tile_px);
+        return None;
+    }
+    let img = decoder.read_image().ok()?;
+    let samples: Vec<u16> = match img {
+        tiff::decoder::DecodingResult::F32(v) => {
+            v.into_iter().map(|m| (m.max(0.0) / value_scale).min(u16::MAX as f32) as u16).collect()
+        }
+        tiff::decoder::DecodingResult::I16(v) => {
+            v.into_iter().map(|m| ((m.max(0) as f32) / value_scale).min(u16::MAX as f32) as u16).collect()
+        }
+        tiff::decoder::DecodingResult::U16(v) => {
+            v.into_iter().map(|m| ((m as f32) / value_scale).min(u16::MAX as f32) as u16).collect()
+        }
+        _ => return None,
     };
-    assert_eq!(samples.len(), width * height, "จำนวน sample ไม่ตรงขนาดภาพ");
-
-    // เมตรต่อพิกเซลจากขนาดจริงของ tile 1° ณ ละติจูดนี้
-    let center_lat = lat_top - 0.5;
-    let meters_per_px_z = 110_574.0 / height as f64;
-    let meters_per_px_x = 111_320.0 * center_lat.to_radians().cos() / width as f64;
-
-    let meta = DemMeta {
-        width,
-        height,
-        origin_lat: lat_top,
-        origin_lon: lon_left,
-        meters_per_px_x,
-        meters_per_px_z,
-        value_scale,
-    };
-
-    let out_dir = dem_dir();
-    std::fs::create_dir_all(&out_dir).unwrap();
+    if samples.len() != tile_px * tile_px {
+        return None;
+    }
     let mut raw = Vec::with_capacity(samples.len() * 2);
     for s in &samples {
         raw.extend_from_slice(&s.to_le_bytes());
     }
-    std::fs::write(out_dir.join("heightmap.r16"), raw).unwrap();
-    std::fs::write(out_dir.join("dem.json"), serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
-
-    let max_m = samples.iter().max().copied().unwrap_or(0) as f32 * value_scale;
-    println!(
-        "เสร็จ: assets/dem/heightmap.r16 + dem.json ({width}x{height}, ยอดสูงสุด {max_m:.0} ม., {:.1}x{:.1} ม./px)",
-        meters_per_px_x, meters_per_px_z
-    );
-}
-
-/// เดามุมบนซ้ายจากชื่อไฟล์สไตล์ Copernicus/SRTM (มี N18...E098 ฝังอยู่) → (19.0, 98.0)
-/// ระวัง: ตัว N/E โผล่ในคำอื่นได้ (COPERNICUS, DEM) — นับเฉพาะตัวที่ตามด้วยตัวเลข
-fn parse_copernicus_name(path: &str) -> Option<(f64, f64)> {
-    let name = std::path::Path::new(path).file_name()?.to_str()?.to_uppercase();
-    let bytes = name.as_bytes();
-    let find_deg = |letters: [u8; 2]| -> Option<(u8, f64)> {
-        for (i, &c) in bytes.iter().enumerate() {
-            if (c == letters[0] || c == letters[1])
-                && bytes.get(i + 1).is_some_and(|d| d.is_ascii_digit())
-            {
-                let digits: String = name[i + 1..]
-                    .chars()
-                    .take_while(|ch| ch.is_ascii_digit())
-                    .collect();
-                return digits.parse().ok().map(|v| (c, v));
-            }
-        }
-        None
-    };
-    let (lat_c, lat) = find_deg([b'N', b'S'])?;
-    let (lon_c, lon) = find_deg([b'E', b'W'])?;
-    let lat_bottom = if lat_c == b'S' { -lat } else { lat };
-    let lon_left = if lon_c == b'W' { -lon } else { lon };
-    // ชื่อ tile บอกมุม "ล่าง" — มุมบน = +1°
-    Some((lat_bottom + 1.0, lon_left))
+    std::fs::write(tiles_dir().join(format!("{}.r16", id.file_stem())), raw).ok()?;
+    Some(())
 }
