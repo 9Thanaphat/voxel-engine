@@ -159,6 +159,7 @@ fn main() {
         .init_resource::<voxel::NukeJobs>()
         .init_resource::<voxel::NukeApplication>()
         .init_resource::<ui::ScreenFlash>()
+        .init_resource::<ui::TeleportUi>()
         .init_resource::<voxel::ActivePools>()
         .init_resource::<Paused>()
         .init_resource::<network::MultiplayerUi>()

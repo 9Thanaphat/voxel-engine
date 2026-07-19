@@ -4170,7 +4170,7 @@ pub fn position_player_for_terrain(
     regen: Res<crate::RegenerateWorld>,
     world: Res<VoxelWorld>,
     client: Option<Res<bevy_renet::RenetClient>>,
-    mut camera: Query<&mut Transform, With<crate::camera::FreeCamera>>,
+    mut camera: Query<(&mut Transform, &mut crate::camera::FreeCamera)>,
 ) {
     if settings.terrain_source != crate::TerrainSource::RealWorld || client.is_some() {
         return;
@@ -4181,8 +4181,13 @@ pub fn position_player_for_terrain(
     let Some(d) = crate::dem::dem() else { return };
     let (cx, cz) = d.center_block();
     let h = crate::dem::DEM_SEA_LEVEL_Y as f32 + d.elevation_at_block(cx, cz);
-    if let Some(mut t) = camera.iter_mut().next() {
+    if let Some((mut t, mut cam)) = camera.iter_mut().next() {
         t.translation = Vec3::new(cx as f32, h + 20.0, cz as f32);
+        // รีเซ็ตมุมมองเป็นระดับสายตา — เดิมสืบทอด pitch ก้มจาก setup_camera
+        // (จูนไว้ให้โลก noise มองลงเห็นพื้นตอนเริ่ม) ทำให้โผล่มาก้มมองพื้นเกือบดิ่ง
+        cam.yaw = 0.0;
+        cam.pitch = 0.0;
+        t.rotation = Quat::from_axis_angle(Vec3::Y, cam.yaw) * Quat::from_axis_angle(Vec3::X, cam.pitch);
         info!("spawn โลกจริง: บล็อก ({:.0}, {:.0}) ผิวสูง {:.0} ม.", cx, cz, h);
     }
 }

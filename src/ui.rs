@@ -36,6 +36,14 @@ pub struct ScreenFlash {
     pub decay: f32,
 }
 
+/// ช่องกรอก lat/lon สำหรับ teleport ในโลกจริง (โหมด RealWorld) + ข้อความสถานะ
+#[derive(Resource, Default)]
+pub struct TeleportUi {
+    pub lat: String,
+    pub lon: String,
+    pub status: String,
+}
+
 pub fn setup_ui(mut commands: Commands) {
     // Crosshair
     commands.spawn((
@@ -684,7 +692,9 @@ pub fn egui_settings_system(
     mut regenerate: ResMut<crate::RegenerateWorld>,
     mut camera_query: Query<&mut crate::camera::FreeCamera>,
     mut proj_query: Query<&mut Projection, With<crate::camera::FreeCamera>>,
+    mut cam_transform: Query<&mut Transform, With<crate::camera::FreeCamera>>,
     mut wireframe_config: ResMut<bevy::pbr::wireframe::WireframeConfig>,
+    mut teleport: ResMut<TeleportUi>,
     (mut server, mut client, lan_info, world, mut mp_ui): (
         Option<ResMut<bevy_renet::RenetServer>>,
         Option<ResMut<bevy_renet::RenetClient>>,
@@ -786,6 +796,40 @@ pub fn egui_settings_system(
             regenerate.0 = true;
         }
         }); // add_enabled_ui(!networked)
+
+        // Teleport ด้วยพิกัดจริง — เฉพาะโลกจริง (มีไฟล์ dem) ก๊อป lat/lon จาก
+        // Google Maps มาวางแล้วไปโผล่ที่นั่นในเกมได้เลย
+        if settings.terrain_source == crate::TerrainSource::RealWorld {
+            if let Some(dem) = crate::dem::dem() {
+                ui.separator();
+                ui.heading("Teleport (GPS)");
+                ui.horizontal(|ui| {
+                    ui.label("Lat:");
+                    ui.add(bevy_egui::egui::TextEdit::singleline(&mut teleport.lat).desired_width(90.0));
+                    ui.label("Lon:");
+                    ui.add(bevy_egui::egui::TextEdit::singleline(&mut teleport.lon).desired_width(90.0));
+                });
+                if ui.button("Go").clicked() {
+                    match (teleport.lat.trim().parse::<f64>(), teleport.lon.trim().parse::<f64>()) {
+                        (Ok(lat), Ok(lon)) if dem.latlon_in_bounds(lat, lon) => {
+                            let (bx, bz) = dem.latlon_to_block(lat, lon);
+                            let h = crate::dem::DEM_SEA_LEVEL_Y as f32 + dem.elevation_at_block(bx, bz);
+                            if let Some(mut t) = cam_transform.iter_mut().next() {
+                                t.translation = Vec3::new(bx as f32, h + 20.0, bz as f32);
+                            }
+                            teleport.status = format!("ไปที่ {:.4}, {:.4} (ผิวสูง {:.0} ม.)", lat, lon, h);
+                        }
+                        (Ok(lat), Ok(lon)) => {
+                            teleport.status = format!("{:.4}, {:.4} อยู่นอกขอบเขต tile นี้", lat, lon);
+                        }
+                        _ => teleport.status = "กรอก lat/lon เป็นตัวเลข (เช่น 18.5885, 98.4867)".into(),
+                    }
+                }
+                if !teleport.status.is_empty() {
+                    ui.label(teleport.status.clone());
+                }
+            }
+        }
 
         ui.separator();
 

@@ -70,6 +70,22 @@ impl DemData {
         let lon = self.meta.origin_lon + bx / (111_320.0 * lat.to_radians().cos());
         (lat, lon)
     }
+
+    /// lat/lon จริง → พิกัดบล็อก (อินเวอร์สของ block_to_latlon — ไว้ teleport)
+    pub fn latlon_to_block(&self, lat: f64, lon: f64) -> (f64, f64) {
+        let bz = (self.meta.origin_lat - lat) * 110_574.0;
+        let bx = (lon - self.meta.origin_lon) * 111_320.0 * lat.to_radians().cos();
+        (bx, bz)
+    }
+
+    /// lat/lon อยู่ในขอบเขต tile นี้ไหม
+    pub fn latlon_in_bounds(&self, lat: f64, lon: f64) -> bool {
+        let (bx, bz) = self.latlon_to_block(lat, lon);
+        bx >= 0.0
+            && bz >= 0.0
+            && bx <= self.meta.width as f64 * self.meta.meters_per_px_x
+            && bz <= self.meta.height as f64 * self.meta.meters_per_px_z
+    }
 }
 
 /// โหลดครั้งเดียว แชร์ให้ worldgen task ทุก thread (แพทเทิร์น FACE_TEXTURES)
