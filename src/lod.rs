@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
 
-use crate::voxel::{MeshBuf, TerrainSampler, SEA_LEVEL};
+use crate::voxel::{block_color, BlockType, MeshBuf, TerrainSampler, SEA_LEVEL};
 
 // --------------------------------------------------------
 // Distant terrain LOD (แนว Distant Horizons) — วาดภูมิประเทศไกลเกินระยะ
@@ -21,8 +21,11 @@ const LOD_RINGS: [(f32, i32, f32); 3] = [
 ];
 /// จมใต้ระดับจริงเล็กน้อย — chunk จริง/วงละเอียดกว่าวาดทับสนิท ไม่ z-fight
 const LOD_Y_OFFSET: f32 = -1.5;
-/// กระโปรงขอบ tile ห้อยลง (คูณ cell) — ปิดรอยแยกระหว่างวง/ระหว่าง tile
-const SKIRT_DROP_CELLS: f32 = 1.5;
+/// กระโปรงขอบ tile ห้อยลงเป็นค่าคงที่ (ไม่ใช่คูณ cell แบบเดิม) — เดิม
+/// cell*1.5 ทำให้ ring นอก (cell 128ม.) ได้กระโปรงสูงถึง 192ม. กลายเป็นกำแพง
+/// ตั้งตระหง่านโผล่ให้เห็นทั่วภูเขาจริงที่ลาดชัน (คือ "รอยแตก" ประหลาดที่เจอ)
+/// ทั้งที่จุดประสงค์แค่ปิดรอยต่อบางๆ ระหว่าง tile/วงที่ความละเอียดต่างกัน
+const SKIRT_DROP: f32 = 6.0;
 const MAX_TASKS_IN_FLIGHT: usize = 6;
 /// คาบเช็ค tile รอบกล้อง (วินาที)
 const UPDATE_PERIOD: f32 = 0.5;
@@ -74,26 +77,26 @@ impl HeightSource {
         }
     }
 
-    /// สีผิวระยะไกล: ทราย (ใกล้ทะเล/desert noise) / หญ้า / หินเมื่อชัน
-    fn surface_color(&self, wx: f64, wz: f64, h: f32, slope: f32) -> [f32; 4] {
-        if slope > 0.9 {
-            return [0.42, 0.40, 0.38, 1.0]; // หน้าผา/เขาชัน
+    /// cell นี้เป็นแถบทราย (ติดทะเล/desert) ไหม — ตัดสินว่าผิว+ด้านข้างใช้ palette
+    /// ทราย หรือ หญ้า/ดิน ตามกติกา worldgen (voxel.rs TerrainSampler::surface_block)
+    fn is_sandy(&self, wx: f64, wz: f64, h: f32) -> bool {
+        match self {
+            Self::Noise(s) => h <= SEA_LEVEL as f32 + 1.0 || s.is_desert(wx, wz),
+            Self::Dem(_) => h <= crate::dem::DEM_SEA_LEVEL_Y as f32 + 1.0,
         }
-        let sandy = match self {
-            Self::Noise(s) => h <= SEA_LEVEL as f32 + 2.0 || s.is_desert(wx, wz),
-            Self::Dem(_) => h <= crate::dem::DEM_SEA_LEVEL_Y as f32 + 2.0,
-        };
-        if sandy {
-            [0.76, 0.69, 0.50, 1.0]
+    }
+
+    /// สีหน้าบนของ "บล็อกหยาบ" ให้ตรง palette กับ chunk ใกล้ๆ: หญ้า = สีเฉลี่ย
+    /// texture (LOD_GRASS), ทราย = block_color(Sand) (ทรายไม่มี texture ใช้ค่าเดียว
+    /// กับ mesher ใกล้อยู่แล้ว)
+    fn top_color(&self, wx: f64, wz: f64, h: f32) -> [f32; 4] {
+        if self.is_sandy(wx, wz, h) {
+            block_color(BlockType::Sand)
         } else {
-            // หญ้า — สูงขึ้นซีด/เขียวเข้มต่ำ (ไล่เฉดตามความสูงให้ภูเขามีมิติ)
-            let t = ((h - self.sea_level()) / 1500.0).clamp(0.0, 1.0);
-            [0.24 + 0.14 * t, 0.46 - 0.10 * t, 0.20 + 0.08 * t, 1.0]
+            LOD_GRASS
         }
     }
 }
-
-const WATER_COLOR: [f32; 4] = [0.10, 0.28, 0.52, 1.0];
 
 pub struct LodTileResult {
     ring: usize,
@@ -137,9 +140,31 @@ pub fn setup_lod(mut commands: Commands, mut materials: ResMut<Assets<StandardMa
     });
 }
 
-/// สร้าง mesh ของ tile หนึ่งใบ (รันใน background task)
-/// heightfield แบบ quad ต่อ cell (flat shaded — มองไกลสวยแบบ low-poly)
-/// + ผิวน้ำที่ sea level + กระโปรงขอบกันรอยแยก
+/// ความหนา (เมตร) ของแถบดินใต้ผิวก่อนถึงหิน — เหมือนบล็อกหญ้านั่งบนดินบนหิน
+/// ทำให้หน้าภูเขาไกลเป็นกำแพงดินคาดบน หินข้างล่าง (ไม่ใช่เทาล้วน)
+const SOIL_BAND_M: f32 = 8.0;
+
+// สีเฉลี่ยของ texture จริง (grass_top/dirt/stone.png) แปลงเป็น linear space —
+// โลกใกล้ render บล็อกพวกนี้ด้วย texture (ไม่ใช่ block_color fallback) และ
+// bevy ใช้ vertex color เป็น linear คูณกับ texture ที่ sample เป็น linear แล้ว
+// เพราะฉะนั้น LOD ต้องใช้ค่า linear เฉลี่ยของ texture ถึงจะสีตรงกับบล็อกใกล้
+// (grass_top จริงเป็นเขียวอมฟ้า ไม่ใช่ [0.2,0.6,0.2] ตาม registry) —
+// วัดด้วยการเฉลี่ยพิกเซลไฟล์ png; sand/water ไม่มี texture (ใช้ block_color อยู่
+// แล้วทั้งใกล้และ LOD จึงตรงกันเอง)
+const LOD_GRASS: [f32; 4] = [0.053, 0.254, 0.241, 1.0];
+const LOD_DIRT: [f32; 4] = [0.129, 0.044, 0.021, 1.0];
+const LOD_STONE: [f32; 4] = [0.204, 0.204, 0.204, 1.0];
+/// เงาประจำทิศ — ค่าตรงกับ FACE_SHADE ใน voxel.rs (top 1.0, +X/-X 0.8, +Z/-Z 0.6)
+/// ให้ความสว่างหน้าบล็อก LOD เท่าบล็อกใกล้ตัว (บล็อกหยาบใช้ flat shade ต่อหน้า
+/// ไม่ใช่ normal ต่อเนื่อง ไม่งั้นเสียคาแรกเตอร์ "บล็อก")
+const SHADE_TOP: f32 = 1.0;
+const SHADE_X: f32 = 0.8;
+const SHADE_Z: f32 = 0.6;
+
+/// สร้าง mesh ของ tile หนึ่งใบ (รันใน background task) — สไตล์ Distant Horizons
+/// จริง: หนึ่งความสูงต่อหนึ่ง "บล็อกหยาบ" (เซลล์ = ก้อนเดียว ไม่ไล่เอียงเนียน)
+/// พื้นบนแบน + กำแพงขั้นบันไดตรงรอยต่อที่สูงต่างกัน ให้เห็นเป็นขั้นบล็อกแบบ
+/// เกมนี้ตอนมองใกล้ ไม่ใช่เนินโค้งมนแบบ terrain LOD ทั่วไป
 fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> MeshBuf {
     let (cell, tile_size, _) = LOD_RINGS[ring];
     let n = (tile_size as f32 / cell) as usize; // จำนวน cell ต่อด้าน
@@ -147,86 +172,269 @@ fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> MeshBuf {
     let origin_z = coord.y as f64 * tile_size as f64;
     let sea = source.sea_level();
 
-    // sample มุม cell (n+1)² จุด
-    let mut hs = vec![0f32; (n + 1) * (n + 1)];
-    for j in 0..=n {
-        for i in 0..=n {
-            hs[j * (n + 1) + i] = source.height(
-                origin_x + i as f64 * cell as f64,
-                origin_z + j as f64 * cell as f64,
-            ) + LOD_Y_OFFSET;
+    // ความสูงเดียวต่อ cell (สุ่มกลาง cell) — คือ "บล็อก" หนึ่งก้อนของ LOD วงนี้
+    let mut hs = vec![0f32; n * n];
+    for j in 0..n {
+        for i in 0..n {
+            let wx = origin_x + (i as f64 + 0.5) * cell as f64;
+            let wz = origin_z + (j as f64 + 0.5) * cell as f64;
+            hs[j * n + i] = source.height(wx, wz) + LOD_Y_OFFSET;
         }
     }
-    let h_at = |i: usize, j: usize| hs[j * (n + 1) + i];
-
-    let mut buf = MeshBuf::default();
-    let mut push_quad = |verts: [[f32; 3]; 4], col: [f32; 4]| {
-        // normal จากมุม quad (flat) — พอสำหรับแสงระยะไกล
-        let a = Vec3::from(verts[0]);
-        let b = Vec3::from(verts[1]);
-        let d = Vec3::from(verts[3]);
-        let nrm = (b - a).cross(d - a).normalize_or_zero().to_array();
-        let vc = buf.positions.len() as u32;
-        for v in verts {
-            buf.positions.push(v);
-            buf.normals.push(nrm);
-            buf.colors.push(col);
-            buf.uvs.push([0.0, 0.0]);
-        }
-        buf.indices.extend_from_slice(&[vc, vc + 1, vc + 2, vc, vc + 2, vc + 3]);
+    let h_at = |i: usize, j: usize| hs[j * n + i];
+    // แถบทราย/หญ้าต่อ cell (สำหรับเลือก palette ผิว+ด้านข้าง)
+    let sandy_at = |i: usize, j: usize| {
+        let wx = origin_x + (i as f64 + 0.5) * cell as f64;
+        let wz = origin_z + (j as f64 + 0.5) * cell as f64;
+        source.is_sandy(wx, wz, h_at(i, j))
     };
+
+    let water = block_color(BlockType::Water);
+    let mut buf = MeshBuf::default();
 
     for j in 0..n {
         for i in 0..n {
             let (x0, x1) = (i as f32 * cell, (i + 1) as f32 * cell);
             let (z0, z1) = (j as f32 * cell, (j + 1) as f32 * cell);
-            let (h00, h10, h01, h11) = (h_at(i, j), h_at(i + 1, j), h_at(i, j + 1), h_at(i + 1, j + 1));
-            let h_avg = (h00 + h10 + h01 + h11) * 0.25;
+            let h = h_at(i, j);
+            let wx = origin_x + (i as f64 + 0.5) * cell as f64;
+            let wz = origin_z + (j as f64 + 0.5) * cell as f64;
+            let col = shade(source.top_color(wx, wz, h), SHADE_TOP);
 
-            // ผิวดิน (ใต้น้ำก็วาด — เห็นก้นทะเลสีเข้มผ่านน้ำไม่ได้เพราะ opaque
-            // แต่กันรูริมฝั่ง; ราคาถูกไม่คัดทิ้ง)
-            let slope = ((h00 - h11).abs().max((h10 - h01).abs())) / cell;
-            let wx = origin_x + (x0 + x1) as f64 * 0.5;
-            let wz = origin_z + (z0 + z1) as f64 * 0.5;
-            let col = source.surface_color(wx, wz, h_avg, slope);
-            push_quad(
-                [[x0, h00, z0], [x1, h10, z0], [x1, h11, z1], [x0, h01, z1]],
-                col,
-            );
+            // หน้าบนแบน — ลำดับจุดตรงกับ CUBE_POSITIONS หน้า Top ใน voxel.rs
+            // (z1 ก่อน z0) ไม่งั้น winding กลับด้าน โดน backface cull มองจาก
+            // บนไม่เห็น (เห็นทะลุ/พื้นหาย — บั๊ก "render สลับด้าน" ที่เจอมาก่อน)
+            push_quad_flat(&mut buf, [[x0, h, z1], [x1, h, z1], [x1, h, z0], [x0, h, z0]], col);
 
             // ผิวน้ำแบนที่ sea level เมื่อ cell จมน้ำ
-            if h_avg < sea {
+            if h < sea {
                 let wy = sea + LOD_Y_OFFSET + 0.5;
-                push_quad(
-                    [[x0, wy, z0], [x1, wy, z0], [x1, wy, z1], [x0, wy, z1]],
-                    WATER_COLOR,
-                );
+                push_quad_flat(&mut buf, [[x0, wy, z1], [x1, wy, z1], [x1, wy, z0], [x0, wy, z0]], water);
+            }
+
+            // กำแพงขั้นบันไดตรงรอยต่อ +X และ +Z เท่านั้น (พอ — ขอบ -X/-Z ของ
+            // เพื่อนบ้านจะโดนคลุมจากฝั่งนั้นเอง กันวาดซ้ำสองรอบ) — สี palette
+            // ตาม cell ที่สูงกว่า (คือเจ้าของหน้ากำแพงนั้น): ดินคาดบน หินข้างล่าง
+            if i + 1 < n {
+                let hn = h_at(i + 1, j);
+                if h != hn {
+                    let taller = if h > hn { (i, j) } else { (i + 1, j) };
+                    push_riser_layered(&mut buf, true, x1, z0, z1, h.min(hn), h.max(hn),
+                        h > hn, SHADE_X, sandy_at(taller.0, taller.1));
+                }
+            }
+            if j + 1 < n {
+                let hn = h_at(i, j + 1);
+                if h != hn {
+                    let taller = if h > hn { (i, j) } else { (i, j + 1) };
+                    push_riser_layered(&mut buf, false, z1, x0, x1, h.min(hn), h.max(hn),
+                        h > hn, SHADE_Z, sandy_at(taller.0, taller.1));
+                }
             }
         }
     }
 
-    // กระโปรงขอบ tile: ผนังดิ่งห้อยลงตามแนวขอบทั้ง 4 ด้าน ปิดรอยแยกระหว่างวง
-    let drop = cell * SKIRT_DROP_CELLS;
-    let edge_col = [0.35, 0.33, 0.31, 1.0];
-    for k in 0..n {
-        let (a, b) = (k as f32 * cell, (k + 1) as f32 * cell);
-        let t = tile_size as f32;
-        // ขอบ z=0, z=t, x=0, x=t
-        let pairs: [([f32; 3], [f32; 3]); 4] = [
-            ([a, h_at(k, 0), 0.0], [b, h_at(k + 1, 0), 0.0]),
-            ([b, h_at(k + 1, n), t], [a, h_at(k, n), t]),
-            ([0.0, h_at(0, n - k), (n - k) as f32 * cell], [0.0, h_at(0, n - k - 1), (n - k - 1) as f32 * cell]),
-            ([t, h_at(n, k), a], [t, h_at(n, k + 1), b]),
-        ];
-        for (p0, p1) in pairs {
-            push_quad(
-                [p0, p1, [p1[0], p1[1] - drop, p1[2]], [p0[0], p0[1] - drop, p0[2]]],
-                edge_col,
-            );
-        }
+    // กระโปรงขอบ tile: ห้อยลงจากขอบนอกสุดตามความสูงของ cell ริมนั้นๆ เอง —
+    // ปิดรอยต่อระหว่าง ring/tile ที่ความละเอียดต่างกัน
+    let drop = SKIRT_DROP;
+    let t = tile_size as f32;
+    for j in 0..n {
+        let (z0, z1) = (j as f32 * cell, (j + 1) as f32 * cell);
+        let h = h_at(0, j);
+        push_riser_layered(&mut buf, true, 0.0, z0, z1, h - drop, h, false, SHADE_X, sandy_at(0, j));
+        let h = h_at(n - 1, j);
+        push_riser_layered(&mut buf, true, t, z0, z1, h - drop, h, true, SHADE_X, sandy_at(n - 1, j));
+    }
+    for i in 0..n {
+        let (x0, x1) = (i as f32 * cell, (i + 1) as f32 * cell);
+        let h = h_at(i, 0);
+        push_riser_layered(&mut buf, false, 0.0, x0, x1, h - drop, h, false, SHADE_Z, sandy_at(i, 0));
+        let h = h_at(i, n - 1);
+        push_riser_layered(&mut buf, false, t, x0, x1, h - drop, h, true, SHADE_Z, sandy_at(i, n - 1));
     }
 
     buf
+}
+
+/// กำแพงตั้ง split เป็นดินคาดบน (SOIL_BAND_M ม.บนสุด) + หินข้างล่าง —
+/// ให้อ่านเป็นบล็อกหญ้านั่งบนดินบนหินแบบโลกจริง (แถบทราย = ทรายแทนดิน+หิน)
+fn push_riser_layered(
+    buf: &mut MeshBuf,
+    axis_x: bool,
+    pos: f32,
+    s0: f32,
+    s1: f32,
+    y_lo: f32,
+    y_hi: f32,
+    positive: bool,
+    shade_f: f32,
+    sandy: bool,
+) {
+    let soil = shade(if sandy { block_color(BlockType::Sand) } else { LOD_DIRT }, shade_f);
+    let stone = shade(if sandy { block_color(BlockType::Sand) } else { LOD_STONE }, shade_f);
+    let soil_bottom = (y_hi - SOIL_BAND_M).max(y_lo);
+    if soil_bottom > y_lo {
+        push_riser(buf, axis_x, pos, s0, s1, y_lo, soil_bottom, positive, stone);
+    }
+    push_riser(buf, axis_x, pos, s0, s1, soil_bottom, y_hi, positive, soil);
+}
+
+fn shade(col: [f32; 4], f: f32) -> [f32; 4] {
+    [col[0] * f, col[1] * f, col[2] * f, col[3]]
+}
+
+/// กำแพงตั้งระหว่างพิกัด s0..s1 สูง y0..y1 — axis_x: true = กำแพงอยู่ที่ x คงที่
+/// (pos), false = z คงที่; positive คือ normal ชี้ +แกนนั้น (winding ตรงกับ
+/// CUBE_POSITIONS หน้า Right/Left/Forward/Backward ใน voxel.rs)
+fn push_riser(
+    buf: &mut MeshBuf,
+    axis_x: bool,
+    pos: f32,
+    s0: f32,
+    s1: f32,
+    y0: f32,
+    y1: f32,
+    positive: bool,
+    col: [f32; 4],
+) {
+    let verts = match (axis_x, positive) {
+        (true, true) => [[pos, y0, s0], [pos, y1, s0], [pos, y1, s1], [pos, y0, s1]],
+        (true, false) => [[pos, y0, s1], [pos, y1, s1], [pos, y1, s0], [pos, y0, s0]],
+        (false, true) => [[s1, y0, pos], [s1, y1, pos], [s0, y1, pos], [s0, y0, pos]],
+        (false, false) => [[s0, y0, pos], [s0, y1, pos], [s1, y1, pos], [s1, y0, pos]],
+    };
+    push_quad_flat(buf, verts, col);
+}
+
+/// normal จากมุม quad (flat) — บล็อกหยาบใช้ flat shading ล้วน ไม่มี normal ต่อเนื่อง
+fn push_quad_flat(buf: &mut MeshBuf, verts: [[f32; 3]; 4], col: [f32; 4]) {
+    let a = Vec3::from(verts[0]);
+    let b = Vec3::from(verts[1]);
+    let d = Vec3::from(verts[3]);
+    let nrm = (b - a).cross(d - a).normalize_or_zero().to_array();
+    let vc = buf.positions.len() as u32;
+    for v in verts {
+        buf.positions.push(v);
+        buf.normals.push(nrm);
+        buf.colors.push(col);
+        buf.uvs.push([0.0, 0.0]);
+    }
+    buf.indices.extend_from_slice(&[vc, vc + 1, vc + 2, vc, vc + 2, vc + 3]);
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+
+    #[test]
+    fn dem_elevation_sanity() {
+        let Some(d) = crate::dem::dem() else {
+            eprintln!("no dem loaded");
+            return;
+        };
+        // จุดใกล้ spawn (52784, 55287) + จุดไกลออกไปตามรัศมี LOD แต่ละวง
+        for (label, x, z) in [
+            ("center", 52784.0, 55287.0),
+            ("+2500", 52784.0 + 2500.0, 55287.0),
+            ("+10000", 52784.0 + 10000.0, 55287.0),
+            ("+33000", 52784.0 + 33000.0, 55287.0),
+            ("-33000x", 52784.0 - 33000.0, 55287.0),
+        ] {
+            let elev = d.elevation_at_block(x, z);
+            let y = crate::dem::DEM_SEA_LEVEL_Y as f32 + elev;
+            eprintln!("{label}: elev={elev:.1}m  y={y:.1}");
+        }
+
+        // ตรงกับพิกัดมุมของ tile ring2 ตัวอย่างที่ log บอกว่า render (coord ~2..10)
+        for coord_x in [2, 6, 10] {
+            let origin_x = coord_x as f64 * 8192.0;
+            let origin_z = 6.0 * 8192.0;
+            let elev = d.elevation_at_block(origin_x, origin_z);
+            eprintln!("tile coord x={coord_x}: origin=({origin_x},{origin_z}) elev={elev:.1}");
+        }
+    }
+
+    #[test]
+    fn slope_distribution() {
+        let Some(source) = HeightSource::build(HeightSourceSpec::Dem) else {
+            eprintln!("no dem loaded");
+            return;
+        };
+        // ตัวอย่างพื้นที่ 8192m รอบ spawn ที่ cell 32m (ring1) — ดูว่า slope ทั่วไป
+        // ของภูเขาจริงเป็นเท่าไหร่ ไว้ตั้งเกณฑ์สีหินให้ตรงกับความชันจริง
+        let (cell, n): (f32, usize) = (32.0, 256);
+        let ox = 52784.0 - (n as f32 * cell) / 2.0;
+        let oz = 55287.0 - (n as f32 * cell) / 2.0;
+        let mut slopes = Vec::with_capacity(n * n);
+        let h = |i: usize, j: usize| source.height(ox as f64 + i as f64 * cell as f64, oz as f64 + j as f64 * cell as f64);
+        for j in 0..n {
+            for i in 0..n {
+                let (h00, h10, h01, h11) = (h(i, j), h(i + 1, j), h(i, j + 1), h(i + 1, j + 1));
+                slopes.push(((h00 - h11).abs().max((h10 - h01).abs())) / cell);
+            }
+        }
+        slopes.sort_by(|a, b| a.total_cmp(b));
+        let pct = |p: f32| slopes[((slopes.len() - 1) as f32 * p) as usize];
+        eprintln!(
+            "slope stats over {}x{} cells @ {}m: p50={:.2} p75={:.2} p90={:.2} p95={:.2} p99={:.2} max={:.2}",
+            n, n, cell, pct(0.5), pct(0.75), pct(0.9), pct(0.95), pct(0.99), slopes.last().unwrap()
+        );
+    }
+
+    #[test]
+    fn ring_overlap_check() {
+        // จำลอง desired-set logic แบบเดียวกับ update_lod_tiles ที่ camera x=54574,z=52250
+        let cam = Vec2::new(54574.0, 52250.0);
+        let mut ring_hits: std::collections::HashMap<(i32, i32), Vec<usize>> = Default::default();
+        for (ring, (_cell, tile_size, radius)) in LOD_RINGS.iter().enumerate() {
+            let radius = *radius;
+            let inner = if ring == 0 { 0.0 } else { LOD_RINGS[ring - 1].2 };
+            let t = *tile_size as f32;
+            let (min_tx, max_tx) = (((cam.x - radius) / t).floor() as i32, ((cam.x + radius) / t).floor() as i32);
+            let (min_tz, max_tz) = (((cam.y - radius) / t).floor() as i32, ((cam.y + radius) / t).floor() as i32);
+            for tz in min_tz..=max_tz {
+                for tx in min_tx..=max_tx {
+                    let center = Vec2::new((tx as f32 + 0.5) * t, (tz as f32 + 0.5) * t);
+                    let d = center.distance(cam);
+                    if d <= radius && (ring == 0 || d > inner) {
+                        ring_hits.entry((tx, tz)).or_default().push(ring);
+                    }
+                }
+            }
+        }
+        let overlaps = ring_hits.values().filter(|v| v.len() > 1).count();
+        eprintln!("cells with >1 ring drawing (different tile grids so this underscounts, but any >0 within same normalized space is bad): {overlaps} / {}", ring_hits.len());
+        // นับพื้นที่ที่ทั้งสองวงคาดว่าจะวาดจริง (สุ่มจุดในดิสก์แล้วเช็คว่ากี่วง cover)
+        let mut double_covered_samples = 0;
+        let mut total_samples = 0;
+        for i in -400..400 {
+            for j in -400..400 {
+                let p = cam + Vec2::new(i as f32 * 100.0, j as f32 * 100.0);
+                let mut covers = 0;
+                for (ring, (_cell, tile_size, radius)) in LOD_RINGS.iter().enumerate() {
+                    let t = *tile_size as f32;
+                    let inner = if ring == 0 { 0.0 } else { LOD_RINGS[ring - 1].2 };
+                    let tx = (p.x / t).floor();
+                    let tz = (p.y / t).floor();
+                    let center = Vec2::new((tx + 0.5) * t, (tz + 0.5) * t);
+                    let d = center.distance(cam);
+                    if d <= *radius && (ring == 0 || d > inner) {
+                        covers += 1;
+                    }
+                }
+                total_samples += 1;
+                if covers > 1 {
+                    double_covered_samples += 1;
+                }
+            }
+        }
+        let pct = 100.0 * double_covered_samples as f32 / total_samples as f32;
+        eprintln!("sampled disk points covered by >1 ring: {double_covered_samples}/{total_samples} ({pct:.1}%)");
+        // แบ่งตามระยะศูนย์กลาง tile ล้วนๆ — overlap ที่เหลือคือ tile สี่เหลี่ยม
+        // คร่อมเส้นแบ่งวงแบบวงกลมพอดี (หลีกเลี่ยงไม่ได้เว้นแต่เช็คด้วย bounding
+        // box แทน) เหลือแค่แถบบางๆ ตรงรอยต่อ 2 วง ไม่ใช่พื้นที่กว้างแบบเดิม (~4-14%)
+        assert!(pct < 2.0, "ring overlap สูงผิดปกติ: {pct:.1}%");
+    }
 }
 
 /// จัดการ tile รอบกล้อง: spawn task ที่ขาด, รับผลมาเป็น entity, เก็บที่หลุดระยะ
@@ -321,8 +529,11 @@ pub fn update_lod_tiles(
             for tx in min_tx..=max_tx {
                 let center = Vec2::new((tx as f32 + 0.5) * t, (tz as f32 + 0.5) * t);
                 let d = center.distance(Vec2::new(cam_pos.x, cam_pos.z));
-                // วงนอกเว้นพื้นที่ที่วงในละเอียดกว่าคลุมอยู่ (กันวาดซ้อนหนา)
-                if d <= radius && (ring == 0 || d + t * 0.71 > inner) {
+                // แบ่งวงตามระยะศูนย์กลาง tile ล้วนๆ (ไม่บวก half-diagonal ของ tile
+                // เข้าไปอีก — เดิมบวกทำให้วงหยาบเริ่มวาดล้ำเข้าเขตวงละเอียดเป็นแถบ
+                // กว้างหลักพันบล็อก สอง mesh ซ้อนทับกันแล้ว z-fight เป็นเส้นรอยแตก
+                // ที่เห็น) เหลือรอยต่อแค่ระดับกริด ~ครึ่ง tile ให้กระโปรงขอบปิดพอ
+                if d <= radius && (ring == 0 || d > inner) {
                     desired.insert((ring, IVec2::new(tx, tz)));
                 }
             }
