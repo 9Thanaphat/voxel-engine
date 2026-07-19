@@ -141,6 +141,15 @@ fn main() {
         dem::build_dem_cli(lat0, lat1, lon0, lon1);
         return;
     }
+    // โหมด water mask จาก OSM: `voxel-game --build-water <lat0> <lat1> <lon0> <lon1>`
+    if let Some(i) = args.iter().position(|a| a == "--build-water") {
+        let lat0 = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let lat1 = args.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let lon0 = args.get(i + 3).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let lon1 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(0);
+        dem::build_water_cli(lat0, lat1, lon0, lon1);
+        return;
+    }
 
     App::new()
         .init_resource::<GameSettings>()

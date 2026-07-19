@@ -67,6 +67,23 @@ pub struct DemManifest {
 
 pub struct DemTile {
     samples: Vec<u16>, // tile_px × tile_px (บน→ล่าง, ซ้าย→ขวา)
+    /// water mask จาก OSM — bitpacked 1 bit/px (ว่าง = ไม่มีไฟล์ .wmask = ไม่มีน้ำ)
+    water: Vec<u8>,
+}
+
+/// อ่านไฟล์ tile (.r16 + .wmask ถ้ามี) — คืน None ถ้า .r16 หาย/ขนาดผิด
+fn read_tile(px: usize, id: TileId) -> Option<DemTile> {
+    let raw = std::fs::read(tiles_dir().join(format!("{}.r16", id.file_stem()))).ok()?;
+    if raw.len() != px * px * 2 {
+        return None;
+    }
+    let samples = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+    // water mask (optional) — bitpacked, ขนาด ceil(px²/8)
+    let water = std::fs::read(dem_dir().join("water").join(format!("{}.wmask", id.file_stem())))
+        .ok()
+        .filter(|w| w.len() == px * px / 8)
+        .unwrap_or_default();
+    Some(DemTile { samples, water })
 }
 
 enum TileSlot {
@@ -153,16 +170,11 @@ impl DemStreamer {
         }
         self.tiles.write().unwrap().insert(id, TileSlot::Loading);
         let px = self.manifest.tile_px;
-        let path = tiles_dir().join(format!("{}.r16", id.file_stem()));
         AsyncComputeTaskPool::get()
             .spawn(async move {
-                let slot = match std::fs::read(&path) {
-                    Ok(raw) if raw.len() == px * px * 2 => {
-                        let samples: Vec<u16> =
-                            raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
-                        TileSlot::Ready(Arc::new(DemTile { samples }))
-                    }
-                    _ => TileSlot::Missing,
+                let slot = match read_tile(px, id) {
+                    Some(t) => TileSlot::Ready(Arc::new(t)),
+                    None => TileSlot::Missing,
                 };
                 if let Some(Some(s)) = DEM.get() {
                     s.tiles.write().unwrap().insert(id, slot);
@@ -185,14 +197,9 @@ impl DemStreamer {
             let slot = if !self.available.contains(&id) {
                 TileSlot::Missing
             } else {
-                let px = self.manifest.tile_px;
-                let path = tiles_dir().join(format!("{}.r16", id.file_stem()));
-                match std::fs::read(&path) {
-                    Ok(raw) if raw.len() == px * px * 2 => {
-                        let samples = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
-                        TileSlot::Ready(Arc::new(DemTile { samples }))
-                    }
-                    _ => TileSlot::Missing,
+                match read_tile(self.manifest.tile_px, id) {
+                    Some(t) => TileSlot::Ready(Arc::new(t)),
+                    None => TileSlot::Missing,
                 }
             };
             self.tiles.write().unwrap().insert(id, slot);
@@ -256,6 +263,32 @@ impl DemStreamer {
         let top = h00 + (h10 - h00) * wc;
         let bot = h01 + (h11 - h01) * wc;
         top + (bot - top) * wr
+    }
+
+    /// พิกเซลนี้เป็นน้ำ (OSM mask) ไหม — nearest-pixel (ไม่ต้อง bilinear กับ mask)
+    /// tile ยังไม่โหลด/ไม่มี wmask = ไม่ใช่น้ำ; อ่าน cache เฉยๆ ปลอดภัยจาก worker
+    pub fn is_water_at_block(&self, bx: f64, bz: f64) -> bool {
+        let (lat, lon) = block_to_latlon(bx, bz);
+        let px = self.manifest.tile_px as f64;
+        // pixel ที่ครอบ (ปัดลง ไม่ใช่ center-index เพราะ mask เป็น boolean)
+        let gc = (lon * px).floor() as i64;
+        let gr = ((90.0 - lat) * px).floor() as i64;
+        let ipx = self.px();
+        let id = TileId {
+            lon: gc.div_euclid(ipx) as i32,
+            lat: 89 - gr.div_euclid(ipx) as i32,
+        };
+        let tiles = self.tiles.read().unwrap();
+        if let Some(TileSlot::Ready(t)) = tiles.get(&id) {
+            if t.water.is_empty() {
+                return false;
+            }
+            let lc = gc.rem_euclid(ipx) as usize;
+            let lr = gr.rem_euclid(ipx) as usize;
+            let bit = lr * self.manifest.tile_px + lc;
+            return (t.water[bit / 8] >> (bit % 8)) & 1 == 1;
+        }
+        false
     }
 }
 
@@ -387,4 +420,174 @@ fn convert_tif_to_r16(tif: &std::path::Path, id: TileId, tile_px: usize, value_s
     }
     std::fs::write(tiles_dir().join(format!("{}.r16", id.file_stem())), raw).ok()?;
     Some(())
+}
+
+// --------------------------------------------------------
+// เครื่องมือ build water mask จาก OSM: `--build-water <lat0> <lat1> <lon0> <lon1>`
+// ต่อ tile 1°: ดึงน้ำจาก Overpass → rasterize เข้า grid 3600² → .wmask (bitpacked)
+// --------------------------------------------------------
+
+fn water_dir() -> std::path::PathBuf {
+    dem_dir().join("water")
+}
+
+pub fn build_water_cli(lat0: i32, lat1: i32, lon0: i32, lon1: i32) {
+    std::fs::create_dir_all(water_dir()).unwrap();
+    let tile_px = 3600usize;
+    for lat in lat0..=lat1 {
+        for lon in lon0..=lon1 {
+            let id = TileId { lat, lon };
+            // มี .wmask แล้วข้าม (รันซ้ำเพื่อเก็บ tile ที่ยังขาดได้)
+            if water_dir().join(format!("{}.wmask", id.file_stem())).exists() {
+                println!("{} มีแล้ว ข้าม", id.file_stem());
+                continue;
+            }
+            // retry — Overpass public API rate-limit ถ้ายิงถี่ (429/timeout)
+            let mut done = false;
+            for attempt in 1..=4 {
+                if let Some(n) = build_water_tile(id, tile_px) {
+                    println!("{} เสร็จ ({} water pixels)", id.file_stem(), n);
+                    done = true;
+                    break;
+                }
+                println!("{} ลองใหม่ ({}/4) — รอ Overpass", id.file_stem(), attempt);
+                std::thread::sleep(std::time::Duration::from_secs(20));
+            }
+            if !done {
+                println!("{} ข้าม (ดึง/parse ไม่ได้หลัง retry)", id.file_stem());
+            }
+            // เว้นจังหวะระหว่าง tile กัน rate-limit
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+    }
+    println!("เสร็จทั้งหมด");
+}
+
+/// ดึง OSM + rasterize water mask ของ tile หนึ่ง → คืนจำนวนพิกเซลน้ำ (None ถ้าพัง)
+fn build_water_tile(id: TileId, tile_px: usize) -> Option<usize> {
+    let (s, w, n, e) = (id.lat, id.lon, id.lat + 1, id.lon + 1);
+    let query = format!(
+        "[out:json][timeout:180];\
+         (way[\"natural\"=\"water\"]({s},{w},{n},{e});\
+          way[\"water\"]({s},{w},{n},{e});\
+          way[\"waterway\"~\"^(river|canal|stream|drain|ditch|riverbank)$\"]({s},{w},{n},{e}););\
+         out geom;"
+    );
+    let tmp = water_dir().join(format!("{}.json.tmp", id.file_stem()));
+    println!("ดึง OSM {} ...", id.file_stem());
+    let status = std::process::Command::new("curl")
+        .args(["-s", "--max-time", "200", "-o"])
+        .arg(&tmp)
+        .args(["--data", &query, "https://overpass-api.de/api/interpreter"])
+        .status();
+    if !matches!(status, Ok(s) if s.success()) {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    let bytes = std::fs::read(&tmp).ok()?;
+    let _ = std::fs::remove_file(&tmp);
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let elements = json["elements"].as_array()?;
+
+    let mut mask = vec![0u8; tile_px * tile_px / 8];
+    let set = |mask: &mut [u8], px: i64, py: i64| {
+        if px >= 0 && py >= 0 && (px as usize) < tile_px && (py as usize) < tile_px {
+            let bit = py as usize * tile_px + px as usize;
+            mask[bit / 8] |= 1 << (bit % 8);
+        }
+    };
+    // lat/lon → พิกเซล tile (px=ตะวันออก, py=ใต้จากขอบบน)
+    let to_px = |lat: f64, lon: f64| -> (f64, f64) {
+        ((lon - id.lon as f64) * tile_px as f64, (id.lat as f64 + 1.0 - lat) * tile_px as f64)
+    };
+
+    for el in elements {
+        if el["type"] != "way" {
+            continue;
+        }
+        let tags = &el["tags"];
+        let Some(geom) = el["geometry"].as_array() else { continue };
+        let pts: Vec<(f64, f64)> = geom
+            .iter()
+            .filter_map(|g| Some(to_px(g["lat"].as_f64()?, g["lon"].as_f64()?)))
+            .collect();
+        if pts.len() < 2 {
+            continue;
+        }
+        let tag = |k: &str| tags[k].as_str();
+        let is_area = tag("natural") == Some("water")
+            || tags["water"].is_string()
+            || matches!(tag("waterway"), Some("riverbank") | Some("dock"));
+        if is_area {
+            fill_polygon(&mut mask, tile_px, &pts, &set);
+        } else if let Some(ww) = tag("waterway") {
+            let width_m = tags["width"]
+                .as_str()
+                .and_then(|s| s.split_whitespace().next())
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(match ww {
+                    "river" => 40.0,
+                    "canal" => 10.0,
+                    "stream" => 4.0,
+                    _ => 2.0, // drain/ditch
+                });
+            let r_px = (width_m / 2.0 / 30.0).max(1.0) as i64;
+            draw_thick_line(&mut mask, &pts, r_px, &set);
+        }
+    }
+
+    let count = mask.iter().map(|b| b.count_ones() as usize).sum();
+    std::fs::write(water_dir().join(format!("{}.wmask", id.file_stem())), &mask).ok()?;
+    Some(count)
+}
+
+/// เติมรูปหลายเหลี่ยม (even-odd scanline) — pts เป็นพิกัดพิกเซล
+fn fill_polygon(mask: &mut [u8], tile_px: usize, pts: &[(f64, f64)], set: &impl Fn(&mut [u8], i64, i64)) {
+    let (mut y_min, mut y_max) = (f64::MAX, f64::MIN);
+    for &(_, y) in pts {
+        y_min = y_min.min(y);
+        y_max = y_max.max(y);
+    }
+    let y0 = (y_min.floor() as i64).max(0);
+    let y1 = (y_max.ceil() as i64).min(tile_px as i64 - 1);
+    for py in y0..=y1 {
+        let yc = py as f64 + 0.5;
+        let mut xs: Vec<f64> = Vec::new();
+        for i in 0..pts.len() {
+            let (x0, ya) = pts[i];
+            let (x1, yb) = pts[(i + 1) % pts.len()];
+            if (ya <= yc && yb > yc) || (yb <= yc && ya > yc) {
+                xs.push(x0 + (yc - ya) / (yb - ya) * (x1 - x0));
+            }
+        }
+        xs.sort_by(|a, b| a.total_cmp(b));
+        for pair in xs.chunks_exact(2) {
+            let (xa, xb) = (pair[0].floor() as i64, pair[1].ceil() as i64);
+            for px in xa..=xb {
+                set(mask, px, py);
+            }
+        }
+    }
+}
+
+/// วาดเส้นหนา (stamp วงกลมรัศมี r ตามแนวเส้น) — pts เป็นพิกัดพิกเซล
+fn draw_thick_line(mask: &mut [u8], pts: &[(f64, f64)], r: i64, set: &impl Fn(&mut [u8], i64, i64)) {
+    let stamp = |mask: &mut [u8], cx: i64, cy: i64| {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy <= r * r {
+                    set(mask, cx + dx, cy + dy);
+                }
+            }
+        }
+    };
+    for seg in pts.windows(2) {
+        let (x0, y0) = seg[0];
+        let (x1, y1) = seg[1];
+        let len = ((x1 - x0).hypot(y1 - y0)).ceil().max(1.0);
+        for k in 0..=len as i64 {
+            let t = k as f64 / len;
+            stamp(mask, (x0 + (x1 - x0) * t).round() as i64, (y0 + (y1 - y0) * t).round() as i64);
+        }
+    }
 }

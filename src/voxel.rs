@@ -1433,10 +1433,14 @@ fn generate_chunk_blocks(
             let h = heights[z][x];
             let is_desert = desert[z][x];
             let surface = sampler.surface_block(h, is_desert, sea_level);
+            // แม่น้ำ/ผืนน้ำจาก OSM mask (โลกจริง) — คอลัมน์นี้เป็นน้ำไหม
+            let is_river = dem_data.is_some_and(|d| d.is_water_at_block(wx, wz));
 
             for y in 0..CHUNK_HEIGHT {
                 let yi = y as i32;
-                let block = if yi < h - 3 {
+                let block = if is_river && yi <= h && yi > h - 3 {
+                    BlockType::Water // แม่น้ำ: น้ำ 3 บล็อกบนสุด (ท้องน้ำ = หินข้างล่าง)
+                } else if yi < h - 3 {
                     BlockType::Stone
                 } else if yi < h {
                     if is_desert { BlockType::Sand } else { BlockType::Dirt }

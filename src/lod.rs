@@ -86,11 +86,20 @@ impl HeightSource {
         }
     }
 
-    /// สีหน้าบนของ "บล็อกหยาบ" ให้ตรง palette กับ chunk ใกล้ๆ: หญ้า = สีเฉลี่ย
-    /// texture (LOD_GRASS), ทราย = block_color(Sand) (ทรายไม่มี texture ใช้ค่าเดียว
-    /// กับ mesher ใกล้อยู่แล้ว)
+    /// cell นี้เป็นน้ำ OSM (แม่น้ำ/ทะเลสาบ) ไหม — ให้ทะเลสาบ/แม่น้ำใหญ่เห็นในระยะไกล
+    fn is_water(&self, wx: f64, wz: f64) -> bool {
+        match self {
+            Self::Noise(_) => false,
+            Self::Dem(d) => d.is_water_at_block(wx, wz),
+        }
+    }
+
+    /// สีหน้าบนของ "บล็อกหยาบ": น้ำ (OSM) → สีน้ำ, ไม่งั้นหญ้า/ทราย ให้ตรง palette
+    /// กับ chunk ใกล้ๆ (หญ้า = สีเฉลี่ย texture LOD_GRASS, ทราย/น้ำ = block_color)
     fn top_color(&self, wx: f64, wz: f64, h: f32) -> [f32; 4] {
-        if self.is_sandy(wx, wz, h) {
+        if self.is_water(wx, wz) {
+            block_color(BlockType::Water)
+        } else if self.is_sandy(wx, wz, h) {
             block_color(BlockType::Sand)
         } else {
             LOD_GRASS
