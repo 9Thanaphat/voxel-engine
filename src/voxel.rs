@@ -2799,9 +2799,9 @@ impl Default for SelectedBlock {
 // คือ creative วางไม่จำกัด) — UI อยู่ ui.rs, ที่นี่คือ state + input
 // --------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ItemStack {
-    pub block: BlockType,
+    pub item: crate::item::Item,
     /// None = วางไม่จำกัด (creative) — survival ค่อยใส่จำนวนจริงแล้ว render เลขบนช่อง
     pub count: Option<u32>,
 }
@@ -2815,14 +2815,51 @@ pub struct Hotbar {
 
 impl Default for Hotbar {
     fn default() -> Self {
-        const DEFAULTS: [BlockType; 9] = [
-            BlockType::Dirt, BlockType::Grass, BlockType::Stone,
-            BlockType::Wood, BlockType::Leaves, BlockType::Sand,
-            BlockType::Water8, BlockType::Glowstone, BlockType::Glass,
+        Self::creative()
+    }
+}
+
+/// จำนวนสูงสุดต่อ stack (survival) — tool ไม่ stack (1 ชิ้น)
+pub const MAX_STACK: u32 = 64;
+
+pub fn max_stack(item: crate::item::Item) -> u32 {
+    match item {
+        crate::item::Item::Tool(_) => 1,
+        _ => MAX_STACK,
+    }
+}
+
+impl Hotbar {
+    /// เริ่มด้วย palette เต็ม hotbar (จำนวนจริง = 1 stack) — โหมด Creative
+    /// วางบล็อกไม่ลด count (build อิสระ) แต่ทิ้ง Q / เก็บ ปรับจำนวนได้จนหมด/เต็ม
+    pub fn creative() -> Self {
+        use crate::item::{Item, ToolType};
+        const DEFAULTS: [Item; 9] = [
+            Item::Tool(ToolType::Chisel),
+            Item::Tool(ToolType::CopperWire),
+            Item::Block(BlockType::Dirt),
+            Item::Block(BlockType::Stone),
+            Item::Block(BlockType::Wood),
+            Item::Block(BlockType::Leaves),
+            Item::Block(BlockType::Glass),
+            Item::Block(BlockType::SmartLamp),
+            Item::Block(BlockType::SwitchOff),
         ];
         Self {
-            slots: DEFAULTS.map(|block| Some(ItemStack { block, count: None })),
+            slots: DEFAULTS.map(|item| Some(ItemStack { item, count: Some(max_stack(item)) })),
             selected: 0,
+        }
+    }
+
+    /// ช่องว่างทั้งหมด — โหมด Survival (เก็บของเอง)
+    pub fn survival_empty() -> Self {
+        Self { slots: [None; 9], selected: 0 }
+    }
+
+    pub fn for_mode(mode: crate::GameMode) -> Self {
+        match mode {
+            crate::GameMode::Creative => Self::creative(),
+            crate::GameMode::Survival => Self::survival_empty(),
         }
     }
 }
@@ -2831,13 +2868,19 @@ impl Default for Hotbar {
 #[derive(Resource, Default)]
 pub struct BlockPickerOpen(pub bool);
 
-/// บล็อกทั้งหมดที่เลือกวางได้ (รายการในหน้าต่างกด E)
-pub const PLACEABLE_BLOCKS: [BlockType; 18] = [
-    BlockType::Dirt, BlockType::Grass, BlockType::Stone, BlockType::Wood,
-    BlockType::Leaves, BlockType::Sand, BlockType::Water8, BlockType::Glowstone,
-    BlockType::LampRed, BlockType::LampGreen, BlockType::LampBlue, BlockType::Glass,
-    BlockType::TallGrass, BlockType::Tnt, BlockType::IronBlock, BlockType::Nuke,
-    BlockType::SwitchOff, BlockType::SmartLamp,
+/// ไอเทมทั้งหมดที่เลือกวางได้ (รายการในหน้าต่างกด E)
+pub const PLACEABLE_ITEMS: [crate::item::Item; 20] = [
+    crate::item::Item::Tool(crate::item::ToolType::Chisel),
+    crate::item::Item::Tool(crate::item::ToolType::CopperWire),
+    crate::item::Item::Block(BlockType::Dirt), crate::item::Item::Block(BlockType::Grass), 
+    crate::item::Item::Block(BlockType::Stone), crate::item::Item::Block(BlockType::Wood),
+    crate::item::Item::Block(BlockType::Leaves), crate::item::Item::Block(BlockType::Sand), 
+    crate::item::Item::Block(BlockType::Water8), crate::item::Item::Block(BlockType::Glowstone),
+    crate::item::Item::Block(BlockType::LampRed), crate::item::Item::Block(BlockType::LampGreen), 
+    crate::item::Item::Block(BlockType::LampBlue), crate::item::Item::Block(BlockType::Glass),
+    crate::item::Item::Block(BlockType::TallGrass), crate::item::Item::Block(BlockType::Tnt), 
+    crate::item::Item::Block(BlockType::IronBlock), crate::item::Item::Block(BlockType::Nuke),
+    crate::item::Item::Block(BlockType::SwitchOff), crate::item::Item::Block(BlockType::SmartLamp),
 ];
 
 /// texture ที่ใช้เป็น icon บนช่อง hotbar — เอาหน้าข้างก่อน (grass เห็นเป็น
@@ -2850,12 +2893,16 @@ pub fn hotbar_icon_texture(block: BlockType) -> Option<&'static str> {
 /// จบด้วย sync บล็อกของช่องที่เลือกลง SelectedBlock ให้ระบบวางบล็อกใช้ต่อ
 pub fn hotbar_input_system(
     mut hotbar: ResMut<Hotbar>,
+    settings: Res<crate::GameSettings>,
     mut selected: ResMut<SelectedBlock>,
+    mut interaction_mode: ResMut<InteractionMode>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     target: Res<TargetedBlock>,
     mut q_egui: Query<&mut bevy_egui::EguiContext, With<bevy::window::PrimaryWindow>>,
+    mut spawn_events: MessageWriter<crate::item::SpawnDroppedItemEvent>,
+    camera_query: Query<&Transform, With<crate::camera::FreeCamera>>,
 ) {
     const SLOT_KEYS: [KeyCode; 9] = [
         KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3,
@@ -2888,25 +2935,61 @@ pub fn hotbar_input_system(
             // น้ำระดับไหนก็ตาม pick ได้เป็นน้ำเต็มบล็อก
             let block = if hit.block.is_water() { BlockType::Water8 } else { hit.block };
             if block != BlockType::Air {
-                if let Some(i) = hotbar.slots.iter().position(|s| s.map(|s| s.block) == Some(block)) {
+                if let Some(i) = hotbar.slots.iter().position(|s| s.map(|s| s.item) == Some(crate::item::Item::Block(block))) {
                     hotbar.selected = i;
-                } else {
+                } else if settings.game_mode == crate::GameMode::Creative {
+                    // Creative เท่านั้น summon บล็อกใหม่เข้าช่องได้ (Survival ต้องหาเอง)
                     let sel = hotbar.selected;
-                    hotbar.slots[sel] = Some(ItemStack { block, count: None });
+                    let it = crate::item::Item::Block(block);
+                    hotbar.slots[sel] = Some(ItemStack { item: it, count: Some(max_stack(it)) });
                 }
             }
         }
     }
 
-    // กด Q เพื่อเคลียร์ช่องให้เป็นมือเปล่า
+    // กด Q เพื่อทิ้งไอเทมจากมือ
     if keyboard.just_pressed(KeyCode::KeyQ) && !over_egui {
         let sel = hotbar.selected;
-        hotbar.slots[sel] = None;
+        if let Some(stack) = hotbar.slots[sel] {
+            if let Some(cam_tf) = camera_query.iter().next() {
+                let forward = cam_tf.forward();
+                let spawn_pos = cam_tf.translation + forward.normalize() * 0.5 - Vec3::Y * 0.2;
+                let velocity = forward.normalize() * 5.0 + Vec3::Y * 3.0; // พุ่งไปข้างหน้า + เด้งขึ้น
+                spawn_events.write(crate::item::SpawnDroppedItemEvent {
+                    item: stack.item,
+                    pos: spawn_pos,
+                    velocity,
+                });
+            }
+            
+            // หักของออกจากช่อง: count None = Creative ∞ (คงช่องไว้ ทิ้งได้เรื่อยๆ),
+            // Some(c) = Survival (ลด 1, หมดแล้วช่องว่าง)
+            if let Some(c) = stack.count {
+                if c > 1 {
+                    hotbar.slots[sel].as_mut().unwrap().count = Some(c - 1);
+                } else {
+                    hotbar.slots[sel] = None;
+                }
+            }
+        }
     }
 
-    let block = hotbar.slots[hotbar.selected].map_or(BlockType::Air, |s| s.block);
+    let item = hotbar.slots[hotbar.selected].map(|s| s.item);
+    let block = match item {
+        Some(crate::item::Item::Block(b)) => b,
+        _ => BlockType::Air,
+    };
     if selected.0 != block {
         selected.0 = block;
+    }
+
+    let new_mode = match item {
+        Some(crate::item::Item::Tool(crate::item::ToolType::Chisel)) => InteractionMode::SubVoxel,
+        Some(crate::item::Item::Tool(crate::item::ToolType::CopperWire)) => InteractionMode::Wiring,
+        _ => InteractionMode::Normal,
+    };
+    if *interaction_mode != new_mode {
+        *interaction_mode = new_mode;
     }
 }
 
@@ -3364,21 +3447,15 @@ pub fn block_interaction_system(
     ),
     mut pools: ResMut<ActivePools>,
     mut fx_writer: MessageWriter<crate::particles::BlockFx>,
-    (settings, mut active_tnt): (Res<crate::GameSettings>, ResMut<ActiveTnt>),
+    (settings, mut active_tnt, mut spawn_events, mut hotbar): (Res<crate::GameSettings>, ResMut<ActiveTnt>, MessageWriter<crate::item::SpawnDroppedItemEvent>, ResMut<Hotbar>),
 ) {
+    let survival = settings.game_mode == crate::GameMode::Survival;
     // หน้าต่างเลือกบล็อกเปิดอยู่ — คลิกเป็นของหน้าต่าง ไม่ใช่การขุด/วาง
     if picker.0 {
         return;
     }
 
-    // Toggle Interaction Mode
-    if keyboard.just_pressed(KeyCode::KeyT) {
-        *interaction_mode = match *interaction_mode {
-            InteractionMode::Normal => InteractionMode::SubVoxel,
-            InteractionMode::SubVoxel => InteractionMode::Wiring,
-            InteractionMode::Wiring => InteractionMode::Normal,
-        };
-    }
+
 
     let Some(hit) = target.0 else { return };
 
@@ -3454,6 +3531,19 @@ pub fn block_interaction_system(
                 placed: BlockType::Air,
                 replaced: hit.block,
             });
+            
+            // ดรอปไอเทมออกมา (เฉพาะ Survival — Creative ขุดฟรีไม่มีของตก)
+            if survival {
+                spawn_events.write(crate::item::SpawnDroppedItemEvent {
+                    item: crate::item::Item::Block(hit.block),
+                    pos: hit.pos.as_vec3() + Vec3::new(0.5, 0.5, 0.5),
+                    velocity: Vec3::new(
+                        (fastrand::f32() - 0.5) * 4.0,
+                        2.0 + fastrand::f32() * 3.0,
+                        (fastrand::f32() - 0.5) * 4.0,
+                    ),
+                });
+            }
         } else if place_pressed && selected.0 == BlockType::Air {
             // Interact! (กดคลิกขวาด้วยมือเปล่า)
             let current = world.get_block(hit.pos.x, hit.pos.y, hit.pos.z);
@@ -3481,8 +3571,12 @@ pub fn block_interaction_system(
         } else if place_pressed && selected.0 != BlockType::Air {
             let p = hit.pos + hit.normal;
 
-            let mut blocked = false;
-            if selected.0.is_solid() {
+            // Survival: ต้องมีของในช่องที่เลือกก่อนถึงวางได้ (count>0 หรือ None=∞)
+            let mut blocked = survival
+                && hotbar.slots[hotbar.selected]
+                    .map(|s| s.count == Some(0))
+                    .unwrap_or(true);
+            if !blocked && selected.0.is_solid() {
                 if let Some(cam) = camera_query.iter().next() {
                     let feet = cam.translation - Vec3::Y * crate::camera::EYE_HEIGHT;
                     let pmin = feet - Vec3::new(crate::camera::PLAYER_HALF, 0.0, crate::camera::PLAYER_HALF);
@@ -3505,6 +3599,19 @@ pub fn block_interaction_system(
                     placed: selected.0,
                     replaced: world.get_block(p.x, p.y, p.z),
                 });
+                // Survival: หักจำนวนออกจากช่องที่เลือก (count None = ∞ ไม่หัก)
+                if survival {
+                    let sel = hotbar.selected;
+                    if let Some(stack) = hotbar.slots[sel].as_mut() {
+                        if let Some(c) = stack.count {
+                            if c <= 1 {
+                                hotbar.slots[sel] = None;
+                            } else {
+                                stack.count = Some(c - 1);
+                            }
+                        }
+                    }
+                }
             }
         }
     }

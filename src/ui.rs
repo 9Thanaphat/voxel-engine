@@ -30,6 +30,10 @@ pub struct HotbarSlotUi(pub usize);
 #[derive(Component)]
 pub struct HotbarSlotIcon(pub usize);
 
+/// เลขจำนวนมุมล่างขวาช่อง (Survival) — ว่างเมื่อ count = None (Creative ∞)
+#[derive(Component)]
+pub struct HotbarSlotCount(pub usize);
+
 /// จอขาววาบตอนมองระเบิด — alpha ตาม ScreenFlash.intensity
 #[derive(Component)]
 pub struct ScreenFlashOverlay;
@@ -135,6 +139,22 @@ pub fn setup_ui(mut commands: Commands) {
                     BackgroundColor(Color::NONE),
                     HotbarSlotIcon(i),
                 ));
+                // เลขจำนวน (Survival) มุมล่างขวา ทับบน icon
+                slot.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        right: Val::Px(2.0),
+                        bottom: Val::Px(0.0),
+                        ..default()
+                    },
+                    Text::new(""),
+                    TextFont {
+                        font_size: bevy::text::FontSize::Px(15.0),
+                        ..default()
+                    },
+                    TextColor(Color::WHITE),
+                    HotbarSlotCount(i),
+                ));
             });
         }
     });
@@ -217,9 +237,21 @@ pub fn update_hotbar_ui(
     asset_server: Res<AssetServer>,
     mut slot_query: Query<(&HotbarSlotUi, &mut BorderColor)>,
     mut icon_query: Query<(Entity, &HotbarSlotIcon, &mut BackgroundColor)>,
+    mut count_query: Query<(&HotbarSlotCount, &mut Text)>,
 ) {
     if !hotbar.is_changed() {
         return;
+    }
+
+    // เลขจำนวน: โชว์เมื่อ count = Some(n) (Survival), ว่างเมื่อ None (Creative ∞)
+    for (count, mut text) in &mut count_query {
+        let s = match hotbar.slots[count.0].and_then(|st| st.count) {
+            Some(n) => n.to_string(),
+            None => String::new(),
+        };
+        if text.0 != s {
+            text.0 = s;
+        }
     }
 
     for (slot, mut border) in &mut slot_query {
@@ -234,12 +266,12 @@ pub fn update_hotbar_ui(
     for (entity, icon, mut bg) in &mut icon_query {
         match hotbar.slots[icon.0] {
             Some(stack) => {
-                if let Some(tex) = crate::voxel::hotbar_icon_texture(stack.block) {
+                if let Some(tex) = stack.item.icon_texture() {
                     commands.entity(entity).insert(ImageNode::new(asset_server.load(tex)));
                     bg.0 = Color::NONE;
                 } else {
                     commands.entity(entity).remove::<ImageNode>();
-                    let c = crate::voxel::block_color(stack.block);
+                    let c = stack.item.color();
                     bg.0 = Color::srgba(c[0], c[1], c[2], c[3]);
                 }
             }
@@ -258,9 +290,17 @@ pub fn block_picker_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut picker: ResMut<crate::voxel::BlockPickerOpen>,
     mut hotbar: ResMut<crate::voxel::Hotbar>,
+    settings: Res<crate::GameSettings>,
     paused: Res<crate::Paused>,
     mut cursor_query: Query<&mut bevy::window::CursorOptions, With<bevy::window::PrimaryWindow>>,
 ) {
+    // Survival: summon บล็อกฟรีไม่ได้ — ปิด picker ทิ้ง (กัน E เปิด)
+    if settings.game_mode != crate::GameMode::Creative {
+        if picker.0 {
+            picker.0 = false;
+        }
+        return;
+    }
     if keyboard.just_pressed(KeyCode::KeyE) && !paused.0 {
         picker.0 = !picker.0;
         if picker.0 {
@@ -295,8 +335,9 @@ pub fn block_picker_system(
             });
 
             bevy_egui::egui::Grid::new("block_picker_grid").spacing([6.0, 6.0]).show(ui, |ui| {
-                for (n, &block) in crate::voxel::PLACEABLE_BLOCKS.iter().enumerate() {
-                    let c = crate::voxel::block_color(block);
+                for (n, &item) in crate::voxel::PLACEABLE_ITEMS.iter().enumerate() {
+                    let text = item.name();
+                    let c = item.color();
                     let fill = bevy_egui::egui::Color32::from_rgb(
                         (c[0] * 255.0) as u8,
                         (c[1] * 255.0) as u8,
@@ -310,15 +351,17 @@ pub fn block_picker_system(
                         bevy_egui::egui::Color32::WHITE
                     };
                     let btn = bevy_egui::egui::Button::new(
-                        bevy_egui::egui::RichText::new(crate::voxel::block_name(block)).color(text_color),
+                        bevy_egui::egui::RichText::new(text).color(text_color),
                     )
                     .fill(fill)
                     .min_size(bevy_egui::egui::vec2(96.0, 40.0));
 
                     if ui.add(btn).clicked() {
                         let sel = hotbar.selected;
-                        hotbar.slots[sel] =
-                            Some(crate::voxel::ItemStack { block, count: None });
+                        hotbar.slots[sel] = Some(crate::voxel::ItemStack {
+                            item,
+                            count: Some(crate::voxel::max_stack(item)),
+                        });
                     }
                     if n % 4 == 3 {
                         ui.end_row();
@@ -404,6 +447,7 @@ pub fn main_menu_system(
     mut next_state: ResMut<NextState<crate::GameState>>,
     mut settings: ResMut<crate::GameSettings>,
     mut regenerate: ResMut<crate::RegenerateWorld>,
+    mut hotbar: ResMut<crate::voxel::Hotbar>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let ctx = ctx.clone(); // In egui 0.35 Context is easily cloned to avoid mutability issues
@@ -427,8 +471,17 @@ pub fn main_menu_system(
 
             let btn_size = bevy_egui::egui::vec2(200.0, 40.0);
 
+            // เลือกโหมดเล่นก่อนเริ่ม — มีผลตอนกดปุ่มเริ่มเกม (rebuild hotbar)
+            ui.horizontal(|ui| {
+                ui.label("Mode:");
+                ui.selectable_value(&mut settings.game_mode, crate::GameMode::Creative, "Creative");
+                ui.selectable_value(&mut settings.game_mode, crate::GameMode::Survival, "Survival");
+            });
+            ui.add_space(10.0);
+
             if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Singleplayer")).clicked() {
                 select_terrain(&mut settings, &mut regenerate, crate::TerrainSource::Noise);
+                *hotbar = crate::voxel::Hotbar::for_mode(settings.game_mode);
                 next_state.set(crate::GameState::InGame);
             }
             ui.add_space(10.0);
@@ -444,6 +497,7 @@ pub fn main_menu_system(
             }
             if rw_btn.clicked() {
                 select_terrain(&mut settings, &mut regenerate, crate::TerrainSource::RealWorld);
+                *hotbar = crate::voxel::Hotbar::for_mode(settings.game_mode);
                 next_state.set(crate::GameState::InGame);
             }
             ui.add_space(10.0);
@@ -622,11 +676,14 @@ pub fn update_coordinate_ui_system(
 
 pub fn update_mode_text(
     interaction_mode: Res<crate::voxel::InteractionMode>,
+    settings: Res<crate::GameSettings>,
     mut text_query: Query<&mut Text, With<ModeText>>,
 ) {
-    if interaction_mode.is_added() || interaction_mode.is_changed() {
+    if interaction_mode.is_added() || interaction_mode.is_changed()
+        || settings.is_added() || settings.is_changed()
+    {
         for mut text in &mut text_query {
-            text.0 = format!("Mode: {:?}", *interaction_mode);
+            text.0 = format!("Mode: {:?} | {:?}", *interaction_mode, settings.game_mode);
         }
     }
 }
@@ -731,6 +788,7 @@ pub fn egui_settings_system(
     mut cam_transform: Query<&mut Transform, With<crate::camera::FreeCamera>>,
     mut wireframe_config: ResMut<bevy::pbr::wireframe::WireframeConfig>,
     mut teleport: ResMut<TeleportUi>,
+    mut hotbar: ResMut<crate::voxel::Hotbar>,
     (mut server, mut client, lan_info, world, mut mp_ui): (
         Option<ResMut<bevy_renet::RenetServer>>,
         Option<ResMut<bevy_renet::RenetClient>>,
@@ -772,6 +830,25 @@ pub fn egui_settings_system(
                 ui.label(mp_ui.status.clone());
             }
         }
+
+        ui.separator();
+
+        // โหมดเล่น — client-local, สลับได้ทุกเมื่อ (rebuild inventory ตามโหมด)
+        ui.heading("Game Mode");
+        let mut mode = settings.game_mode;
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut mode, crate::GameMode::Creative, "Creative");
+            ui.radio_value(&mut mode, crate::GameMode::Survival, "Survival");
+        });
+        if mode != settings.game_mode {
+            settings.game_mode = mode;
+            *hotbar = crate::voxel::Hotbar::for_mode(mode);
+        }
+        ui.label(
+            bevy_egui::egui::RichText::new("เปลี่ยนโหมดจะล้าง inventory")
+                .small()
+                .weak(),
+        );
 
         ui.separator();
 

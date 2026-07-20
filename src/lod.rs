@@ -174,13 +174,31 @@ fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> MeshBuf {
     let origin_z = coord.y as f64 * tile_size as f64;
     let sea = source.sea_level();
 
-    // ความสูงเดียวต่อ cell (สุ่มกลาง cell) — คือ "บล็อก" หนึ่งก้อนของ LOD วงนี้
+    // ความสูงเดียวต่อ cell — คือ "บล็อก" หนึ่งก้อนของ LOD วงนี้
+    // ring 0 ซ้อนใต้ chunk จริง: ถ้าสุ่มแค่จุดกลาง cell 8ม. บนภูเขาชันพื้นจริง
+    // ในเซลล์สวิงเกิน LOD_Y_OFFSET แล้วบล็อกหยาบโผล่ทะลุพื้นจริงละเอียด (LOD
+    // "ไม่หาย" ตอนเข้าใกล้) → ใช้ค่า "ต่ำสุด" ของ sub-sample 3×3 ให้บล็อกจมต่ำ
+    // กว่าหรือเท่าพื้นจริงทั่วทั้งเซลล์ chunk จริงจึงวาดทับสนิททุกจุด
+    // ring 1/2 อยู่ไกลไม่เคยทับ chunk จริง คงสุ่มจุดกลาง (กันสันเขาไกลเตี้ยลง)
     let mut hs = vec![0f32; n * n];
     for j in 0..n {
         for i in 0..n {
-            let wx = origin_x + (i as f64 + 0.5) * cell as f64;
-            let wz = origin_z + (j as f64 + 0.5) * cell as f64;
-            hs[j * n + i] = source.height(wx, wz) + LOD_Y_OFFSET;
+            let base = if ring == 0 {
+                let mut m = f32::INFINITY;
+                for sj in 0..3 {
+                    for si in 0..3 {
+                        let wx = origin_x + (i as f64 + (si as f64 + 0.5) / 3.0) * cell as f64;
+                        let wz = origin_z + (j as f64 + (sj as f64 + 0.5) / 3.0) * cell as f64;
+                        m = m.min(source.height(wx, wz));
+                    }
+                }
+                m
+            } else {
+                let wx = origin_x + (i as f64 + 0.5) * cell as f64;
+                let wz = origin_z + (j as f64 + 0.5) * cell as f64;
+                source.height(wx, wz)
+            };
+            hs[j * n + i] = base + LOD_Y_OFFSET;
         }
     }
     let h_at = |i: usize, j: usize| hs[j * n + i];

@@ -199,7 +199,10 @@ pub fn instant_power_update_system(
             }
             if changed {
                 let affected = crate::voxel::edit_affected_chunks(pos);
-                crate::voxel::remesh_chunks(&mut commands, &mut world, &mut mp, affected);
+                crate::voxel::remesh_chunks(&mut commands, &mut world, &mut mp, affected.clone());
+                for chunk_pos in affected {
+                    crate::voxel::refresh_chunk_lamp_lights(&mut commands, &mut world, chunk_pos);
+                }
             }
         }
     }

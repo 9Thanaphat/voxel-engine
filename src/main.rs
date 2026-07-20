@@ -8,6 +8,7 @@ mod particles;
 mod dem;
 mod electricity;
 mod lod;
+mod item;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -25,6 +26,14 @@ pub enum TerrainSource {
     RealWorld,
 }
 
+/// โหมดเล่น: Creative = palette วาง/ขุดไม่จำกัด, Survival = นับจำนวนจริง เก็บ/หัก stack
+/// (เป็นค่า client-local — inventory ไม่ sync ข้าม network)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GameMode {
+    Creative,
+    Survival,
+}
+
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NoiseParams {
     pub frequency: f64,
@@ -37,6 +46,8 @@ pub struct GameSettings {
     pub render_distance: i32,
     pub render_mode: RenderMode,
     pub terrain_source: TerrainSource,
+    /// โหมดเล่น Creative/Survival (ดู [`GameMode`]) — เปลี่ยนแล้ว rebuild Hotbar
+    pub game_mode: GameMode,
     pub noise: NoiseParams,
     /// เวลาในเกม หน่วยชั่วโมง 0-24 (6 = พระอาทิตย์ขึ้น, 12 = เที่ยง, 18 = ตก)
     pub time_of_day: f32,
@@ -62,6 +73,7 @@ impl Default for GameSettings {
             render_distance: 8,
             render_mode: RenderMode::Full,
             terrain_source: TerrainSource::Noise,
+            game_mode: GameMode::Creative,
             noise: NoiseParams {
                 frequency: 0.015,
                 amplitude: 40.0,
@@ -197,6 +209,7 @@ fn main() {
             bevy_renet::netcode::NetcodeServerPlugin,
             bevy_renet::netcode::NetcodeClientPlugin,
             bevy_hanabi::HanabiPlugin,
+            item::ItemPlugin,
         ))
         .init_state::<GameState>()
         .add_message::<particles::BlockFx>()
