@@ -320,6 +320,7 @@ fn main() {
                 // ต้องหลัง cursor_grab_system: ESC ในระบบนั้นปลดล็อคเมาส์ทุกครั้ง
                 // ปิด inventory ด้วย ESC แล้วต้องได้เมาส์ล็อคกลับ ไม่ใช่ค้างเป็นลูกศร
                 ui::inventory_close_system.after(camera::cursor_grab_system),
+                ui::inventory_hover_name_system,
                 ui::update_inventory_ui.after(voxel::start_icon_bake),
                 ui::update_container_ui.after(voxel::start_icon_bake),
                 ui::update_held_icon.after(voxel::start_icon_bake),
@@ -328,15 +329,18 @@ fn main() {
                 command::run_commands,
                 ui::update_hotbar_ui.after(voxel::start_icon_bake),
                 ui::bake_palette_icons.after(voxel::start_icon_bake),
-                ui::update_coordinate_ui_system,
-                ui::update_fps_text,
-                ui::update_block_target_text,
-                ui::update_mode_text,
+                // รวมเป็น tuple ย่อย — tuple ระบบของ bevy จำกัด 20 ตัวต่อชั้น
+                (
+                    ui::update_coordinate_ui_system,
+                    ui::update_fps_text,
+                    ui::update_block_target_text,
+                    ui::update_mode_text,
+                ),
             ).run_if(in_state(GameState::InGame)),
         )
         .add_systems(
             OnEnter(GameState::InGame),
-            (reset_paused, voxel::position_player_for_terrain),
+            (reset_paused, voxel::position_player_for_terrain, ui::show_controls_hint),
         )
         // ออกจากโลก: เซฟที่ค้าง + ล้างโลกทิ้ง ไม่งั้นค้างเป็นฉากหลังเมนูหลัก
         .add_systems(
@@ -413,6 +417,7 @@ fn main() {
         .add_systems(
             bevy_egui::EguiPrimaryContextPass,
             (
+                ui::setup_egui_theme,
                 ui::track_egui_typing,
                 ui::egui_settings_system.run_if(in_state(GameState::InGame)),
                 ui::options_menu_system.run_if(in_state(GameState::InGame)),
@@ -431,7 +436,12 @@ fn main() {
         .add_systems(OnEnter(GameState::SinglePlayerMenu), ui::refresh_world_list)
         .add_systems(
             Update,
-            (ui::toggle_ingame_ui, ui::handle_f3_system),
+            (
+                ui::toggle_ingame_ui,
+                ui::handle_f3_system,
+                ui::hotbar_item_name_system,
+                ui::quit_after_save,
+            ),
         )
         .run();
 }

@@ -1243,6 +1243,7 @@ pub fn auto_host_system(
     pending: Option<Res<AutoHostPending>>,
     world: Option<Res<VoxelWorld>>,
     mut mp_ui: ResMut<MultiplayerUi>,
+    mut chat: ResMut<crate::ui::ChatState>,
 ) {
     if pending.is_none() {
         return;
@@ -1250,6 +1251,13 @@ pub fn auto_host_system(
     let Some(world) = world else { return };
     commands.remove_resource::<AutoHostPending>();
     start_host(&mut commands, &world, &mut mp_ui);
+    // แจ้ง IP ในแชทให้ host เห็นทันที — ไม่ต้องไปขุดหาใน ESC → Options
+    if mp_ui.status.is_empty() {
+        let ip = local_lan_ip().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        chat.push_system(format!("Hosting on {ip}:{SERVER_PORT} - friends join with this IP"));
+    } else {
+        chat.push_error(mp_ui.status.clone());
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -82,6 +82,40 @@ pub struct ContainerSlotCount(pub usize);
 #[derive(Component)]
 pub struct HeldStackIcon;
 
+/// ป้ายชื่อ item เด้งเหนือ hotbar ตอนสลับช่อง (จางหายเอง) — ตัวครอบ (คุม Visibility)
+#[derive(Component)]
+pub struct HotbarItemNameRoot;
+
+/// ตัว Text ข้างใน HotbarItemNameRoot
+#[derive(Component)]
+pub struct HotbarItemNameText;
+
+/// บรรทัดชื่อ item ที่เมาส์ hover อยู่ ท้ายหน้าต่างช่องเก็บของ
+#[derive(Component)]
+pub struct InvHoverNameText;
+
+/// กริด Furnace เฉพาะ (input/fuel → output) — สลับโชว์กับ ContainerPanel ตามชนิดกล่อง
+#[derive(Component)]
+pub struct FurnacePanel;
+
+/// ตัวครอบ hotbar ล่างจอ (HUD) — ซ่อนตอนหน้าต่างช่องเก็บของเปิด (ในหน้าต่างมีแถว
+/// hotbar ของตัวเองอยู่แล้ว โชว์คู่กันซ้ำซ้อน)
+#[derive(Component)]
+pub struct HudHotbarRoot;
+
+/// สลับ node เข้า/ออกจาก layout — Visibility::Hidden อย่างเดียวยัง "กินพื้นที่" อยู่
+/// (หน้าต่างเลยสูงโบ๋เพราะกริดที่ซ่อน) ต้อง Display::None ควบด้วยถึงจะ fit เนื้อหาจริง
+fn set_shown(node: &mut Node, vis: &mut Visibility, show: bool) {
+    let d = if show { Display::Flex } else { Display::None };
+    if node.display != d {
+        node.display = d;
+    }
+    let v = if show { Visibility::Inherited } else { Visibility::Hidden };
+    if *vis != v {
+        *vis = v;
+    }
+}
+
 /// กองที่ "ถืออยู่บนเมาส์" ระหว่างจัดของ — ต้องคืนเข้าช่อง/ทิ้งลงโลกตอนปิดหน้าต่าง
 #[derive(Resource, Default)]
 pub struct HeldStack(pub Option<crate::voxel::ItemStack>);
@@ -357,6 +391,7 @@ pub fn setup_ui(mut commands: Commands) {
             ..default()
         },
         InGameUi,
+        HudHotbarRoot,
         Visibility::Hidden,
     )).with_children(|parent| {
         for i in 0..9 {
@@ -401,6 +436,28 @@ pub fn setup_ui(mut commands: Commands) {
         }
     });
 
+    // ป้ายชื่อ item เหนือ hotbar — เด้งตอนสลับช่อง แล้วจางหาย (hotbar_item_name_system)
+    // ไม่ติด InGameUi เพราะ toggle_ingame_ui จะบังคับโชว์ตลอด — ระบบคุม Visibility เอง
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(72.0),
+            width: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        HotbarItemNameRoot,
+        Visibility::Hidden,
+    )).with_children(|parent| {
+        parent.spawn((
+            Text::new(""),
+            TextFont { font_size: bevy::text::FontSize::Px(18.0), ..default() },
+            TextColor(Color::WHITE),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+            HotbarItemNameText,
+        ));
+    });
+
     // หน้าต่างช่องเก็บของ (กด E) — pre-spawn ทั้งกริดแล้วอัปเดตในที่แบบเดียวกับ hotbar
     // ไม่ติด InGameUi เพราะ toggle_ingame_ui จะบังคับให้โผล่ตลอดเวลาที่อยู่ในเกม
     // ความมองเห็นคุมโดย update_inventory_ui ตาม InventoryOpen แทน
@@ -431,8 +488,8 @@ pub fn setup_ui(mut commands: Commands) {
                 BackgroundColor(Color::srgba(0.08, 0.08, 0.11, 0.96)),
             ))
             .with_children(|panel| {
-                // 0. กริด Chest/Furnace ที่เปิดอยู่ (คลิกขวามือเปล่าใส่บล็อก) — ซ่อนโดย
-                // ปริยาย โผล่เฉพาะตอน OpenContainer เป็น Some (ดู update_container_ui)
+                // 0. กริด Chest ที่เปิดอยู่ (คลิกขวามือเปล่าใส่บล็อก) — ซ่อนโดย
+                // ปริยาย โผล่เฉพาะตอน OpenContainer เป็น Chest (ดู update_container_ui)
                 panel
                     .spawn((
                         Node {
@@ -454,6 +511,59 @@ pub fn setup_ui(mut commands: Commands) {
                                     }
                                 });
                         }
+                    });
+
+                // 0b. กริด Furnace เฉพาะ: Input+Fuel ซ้าย → Output ขวา พร้อม label
+                // (ช่อง 0/1/2 ซ้ำ index กับกริด Chest ได้ — โชว์ทีละ panel เท่านั้น
+                // และ node ที่ซ่อนไม่รับ hover/คลิก จึงไม่ตีกัน; ยังไม่มีระบบเผาจริง
+                // — จัดตามความหมายช่องใน voxel.rs ไว้ก่อน)
+                let slot_label = |p: &mut bevy::ecs::relationship::RelatedSpawnerCommands<ChildOf>, text: &str| {
+                    p.spawn((
+                        Text::new(text),
+                        TextFont { font_size: bevy::text::FontSize::Px(13.0), ..default() },
+                        TextColor(Color::srgba(0.8, 0.8, 0.8, 0.9)),
+                    ));
+                };
+                panel
+                    .spawn((
+                        Node {
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(14.0),
+                            margin: UiRect::bottom(Val::Px(10.0)),
+                            ..default()
+                        },
+                        FurnacePanel,
+                        Visibility::Hidden,
+                    ))
+                    .with_children(|f| {
+                        f.spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::Center,
+                            row_gap: Val::Px(4.0),
+                            ..default()
+                        })
+                        .with_children(|c| {
+                            slot_label(c, "Input");
+                            spawn_container_slot(c, 0);
+                            slot_label(c, "Fuel");
+                            spawn_container_slot(c, 1);
+                        });
+                        f.spawn((
+                            Text::new(">"),
+                            TextFont { font_size: bevy::text::FontSize::Px(30.0), ..default() },
+                            TextColor(Color::srgba(1.0, 0.85, 0.2, 0.9)),
+                        ));
+                        f.spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::Center,
+                            row_gap: Val::Px(4.0),
+                            ..default()
+                        })
+                        .with_children(|c| {
+                            slot_label(c, "Output");
+                            spawn_container_slot(c, 2);
+                        });
                     });
 
                 // 1. palette ของ Creative — 10 คอลัมน์ x เท่าที่ PLACEABLE_ITEMS ต้องใช้ (ซ่อนใน Survival)
@@ -536,8 +646,26 @@ pub fn setup_ui(mut commands: Commands) {
                             spawn_inv_slot(r, idx);
                         }
                     });
+
+                // 4. บรรทัดชื่อ item ที่ hover อยู่ (ย้ายไปเป็น UI ลอยแทน)
             });
         });
+
+    // tooltip ชื่อ item ที่ hover อยู่ — ลอยตามเมาส์
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            padding: UiRect::all(Val::Px(4.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.1, 0.1, 0.1, 0.9)),
+        GlobalZIndex(102),
+        Text::new(""),
+        TextFont { font_size: bevy::text::FontSize::Px(15.0), ..default() },
+        TextColor(Color::srgb(1.0, 0.85, 0.2)),
+        Visibility::Hidden,
+        InvHoverNameText,
+    ));
 
     // icon ของกองที่ถืออยู่ — ลอยตามเมาส์ ต้องอยู่นอกหน้าต่างเพื่อไม่ให้ layout ดันตำแหน่ง
     commands.spawn((
@@ -906,6 +1034,7 @@ pub fn inventory_click_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut hotbar: ResMut<crate::voxel::Hotbar>,
     mut held: ResMut<HeldStack>,
+    open_container: Res<crate::voxel::OpenContainer>,
     slot_query: Query<(&InvSlotUi, &Interaction)>,
     palette_query: Query<(&PaletteSlotUi, &Interaction)>,
 ) {
@@ -921,7 +1050,7 @@ pub fn inventory_click_system(
         keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
 
     // palette: หยิบ stack เต็มขึ้นมือ (Creative เท่านั้น — Survival ซ่อนแถบนี้อยู่)
-    if settings.game_mode == crate::GameMode::Creative {
+    if settings.game_mode == crate::GameMode::Creative && open_container.0.is_none() {
         for (pal, interaction) in &palette_query {
             if *interaction == Interaction::None {
                 continue;
@@ -954,13 +1083,21 @@ pub fn inventory_click_system(
 /// วาดช่องทั้งหมด + คุมความมองเห็นของหน้าต่าง (root ไม่ติด InGameUi จึงต้องคุมเอง)
 pub fn update_inventory_ui(
     open: Res<crate::voxel::InventoryOpen>,
+    open_container: Res<crate::voxel::OpenContainer>,
     hotbar: Res<crate::voxel::Hotbar>,
     settings: Res<crate::GameSettings>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     icons: Res<crate::voxel::ItemIconCache>,
-    mut root_query: Query<&mut Visibility, (With<InventoryRoot>, Without<InventoryPalette>)>,
-    mut palette_query: Query<&mut Visibility, With<InventoryPalette>>,
+    mut root_query: Query<
+        &mut Visibility,
+        (With<InventoryRoot>, Without<InventoryPalette>, Without<HudHotbarRoot>),
+    >,
+    mut palette_query: Query<(&mut Node, &mut Visibility), With<InventoryPalette>>,
+    mut hud_hotbar_query: Query<
+        &mut Visibility,
+        (With<HudHotbarRoot>, Without<InventoryRoot>, Without<InventoryPalette>),
+    >,
     mut slot_query: Query<(&InvSlotUi, &mut BorderColor)>,
     mut icon_query: Query<(Entity, &InvSlotIcon, &mut BackgroundColor), Without<HeldStackIcon>>,
     mut count_query: Query<(&InvSlotCount, &mut Text)>,
@@ -972,16 +1109,24 @@ pub fn update_inventory_ui(
             *vis = want;
         }
     }
+    // hotbar ล่างจอซ้ำกับแถวในหน้าต่าง — ซ่อนไว้ตลอดที่หน้าต่างเปิด
+    for mut vis in &mut hud_hotbar_query {
+        let want = if show { Visibility::Hidden } else { Visibility::Inherited };
+        if *vis != want {
+            *vis = want;
+        }
+    }
     if !show {
         return;
     }
 
-    let creative = settings.game_mode == crate::GameMode::Creative;
-    for mut vis in &mut palette_query {
-        let want = if creative { Visibility::Inherited } else { Visibility::Hidden };
-        if *vis != want {
-            *vis = want;
-        }
+    // palette ของ creative โชว์เฉพาะหน้าช่องเก็บของล้วนๆ (กด E) — ตอนเปิด
+    // Chest/Furnace จอนั้นคือ "ย้ายของเข้าออกกล่อง" ไม่ใช่ที่หยิบของฟรี
+    let show_palette = settings.game_mode == crate::GameMode::Creative
+        && open_container.0.is_none();
+    for (mut node, mut vis) in &mut palette_query {
+        // Display::None ด้วย — ซ่อนแล้วต้องไม่เหลือช่องว่างค้าง (ดู set_shown)
+        set_shown(&mut node, &mut vis, show_palette);
     }
 
     for (count, mut text) in &mut count_query {
@@ -1032,22 +1177,40 @@ pub fn update_container_ui(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     icons: Res<crate::voxel::ItemIconCache>,
-    mut panel_query: Query<&mut Visibility, (With<ContainerPanel>, Without<ContainerSlotUi>)>,
-    mut slot_vis_query: Query<(&ContainerSlotUi, &mut Visibility), Without<ContainerPanel>>,
+    mut chest_panel: Query<
+        (&mut Node, &mut Visibility),
+        (With<ContainerPanel>, Without<FurnacePanel>, Without<ContainerSlotUi>),
+    >,
+    mut furnace_panel: Query<
+        (&mut Node, &mut Visibility),
+        (With<FurnacePanel>, Without<ContainerPanel>, Without<ContainerSlotUi>),
+    >,
+    mut slot_vis_query: Query<
+        (&ContainerSlotUi, &mut Visibility),
+        (Without<ContainerPanel>, Without<FurnacePanel>),
+    >,
     mut icon_query: Query<(Entity, &ContainerSlotIcon, &mut BackgroundColor), Without<HeldStackIcon>>,
     mut count_query: Query<(&ContainerSlotCount, &mut Text)>,
 ) {
-    let Some(oc) = open_container.0 else {
-        for mut vis in &mut panel_query {
-            if *vis != Visibility::Hidden { *vis = Visibility::Hidden; }
+    // แต่ละชนิดกล่องมี panel ของตัวเอง — โชว์อันเดียว อีกอันหลุดจาก layout ไปเลย
+    // (set_shown ใช้ Display::None — Visibility เฉยๆ ยังกินความสูงหน้าต่างอยู่)
+    let (show_chest, show_furnace) = match open_container.0 {
+        None => (false, false),
+        Some(oc) => {
+            let is_chest = oc.kind == crate::voxel::BlockType::Chest;
+            (is_chest, !is_chest)
         }
-        return;
     };
-    for mut vis in &mut panel_query {
-        if *vis != Visibility::Visible { *vis = Visibility::Visible; }
+    for (mut node, mut vis) in chest_panel.iter_mut() {
+        set_shown(&mut node, &mut vis, show_chest);
     }
+    for (mut node, mut vis) in furnace_panel.iter_mut() {
+        set_shown(&mut node, &mut vis, show_furnace);
+    }
+    let Some(oc) = open_container.0 else { return };
+    let is_chest = oc.kind == crate::voxel::BlockType::Chest;
 
-    let capacity: usize = if oc.kind == crate::voxel::BlockType::Chest { 27 } else { 3 };
+    let capacity: usize = if is_chest { 27 } else { 3 };
     // เอามาเป็น array คงที่ก่อน — ช่อง 0..27 ใช้ร่วมกันทั้ง Chest(27)/Furnace(3, ที่เหลือ None)
     let mut slots: [Option<crate::voxel::ItemStack>; 27] = [None; 27];
     match oc.kind {
@@ -1218,6 +1381,131 @@ pub fn update_held_icon(
 }
 
 /// decay ความจ้า + อัปเดต alpha ของ overlay (จ้าเกิน 1.0 = ขาวสนิทค้างไว้ก่อน)
+/// ป้ายชื่อ item เด้งเหนือ hotbar ตอนสลับช่อง/ของในช่องเปลี่ยน แล้วจางหายใน 1.6 วิ
+/// รันตลอด (ไม่ gate InGame) — timer จะพาป้ายซ่อนเองแม้ออกไปเมนูกลางคัน
+pub fn hotbar_item_name_system(
+    time: Res<Time>,
+    hotbar: Res<crate::voxel::Hotbar>,
+    inventory_open: Res<crate::voxel::InventoryOpen>,
+    mut timer: Local<f32>,
+    mut last: Local<Option<(usize, Option<crate::item::Item>)>>,
+    mut root_query: Query<&mut Visibility, With<HotbarItemNameRoot>>,
+    mut text_query: Query<&mut Text, With<HotbarItemNameText>>,
+) {
+    // หน้าต่างช่องเก็บของเปิดอยู่ — hotbar ล่างจอถูกซ่อน ป้ายก็ไม่ควรลอยเดี่ยวๆ
+    if inventory_open.0 {
+        *timer = 0.0;
+    }
+    let current = (hotbar.selected, hotbar.slots[hotbar.selected].map(|s| s.item));
+    if *last != Some(current) {
+        // เฟรมแรกของแอป (last = None) ไม่ต้องเด้ง — ตั้ง baseline เฉยๆ
+        let first_run = last.is_none();
+        *last = Some(current);
+        if !first_run {
+            if let Some(item) = current.1 {
+                if let Ok(mut text) = text_query.single_mut() {
+                    text.0 = item.name().to_string();
+                }
+                *timer = 1.6;
+            } else {
+                *timer = 0.0; // ช่องว่าง — ซ่อนเลย
+            }
+        }
+    }
+    if *timer > 0.0 {
+        *timer -= time.delta_secs();
+    }
+    let want = if *timer > 0.0 { Visibility::Visible } else { Visibility::Hidden };
+    if let Ok(mut vis) = root_query.single_mut() {
+        if *vis != want { *vis = want; }
+    }
+}
+
+/// โชว์ชื่อ item ใต้กริดตอนเมาส์ hover ช่องในหน้าต่าง E (ช่องเรา/palette/กล่อง)
+pub fn inventory_hover_name_system(
+    open: Res<crate::voxel::InventoryOpen>,
+    hotbar: Res<crate::voxel::Hotbar>,
+    open_container: Res<crate::voxel::OpenContainer>,
+    world: Res<crate::voxel::VoxelWorld>,
+    slot_query: Query<(&InvSlotUi, &Interaction)>,
+    palette_query: Query<(&PaletteSlotUi, &Interaction)>,
+    container_query: Query<(&ContainerSlotUi, &Interaction)>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut hover_ui_query: Query<(&mut Text, &mut Node, &mut Visibility), With<InvHoverNameText>>,
+) {
+    if !open.0 {
+        if let Ok((_, _, mut vis)) = hover_ui_query.single_mut() {
+            if *vis != Visibility::Hidden { *vis = Visibility::Hidden; }
+        }
+        return;
+    }
+    let mut name: Option<&'static str> = None;
+    for (slot, interaction) in &slot_query {
+        if *interaction != Interaction::None {
+            name = hotbar.slots[slot.0].map(|s| s.item.name());
+            break;
+        }
+    }
+    if name.is_none() {
+        for (pal, interaction) in &palette_query {
+            if *interaction != Interaction::None {
+                name = crate::voxel::PLACEABLE_ITEMS.get(pal.0).map(|i| i.name());
+                break;
+            }
+        }
+    }
+    if name.is_none() {
+        if let Some(oc) = open_container.0 {
+            for (slot, interaction) in &container_query {
+                if *interaction == Interaction::None {
+                    continue;
+                }
+                name = match oc.kind {
+                    crate::voxel::BlockType::Chest => world
+                        .get_chest_slots(oc.pos.x, oc.pos.y, oc.pos.z)
+                        .and_then(|s| s.get(slot.0).copied().flatten())
+                        .map(|s| s.item.name()),
+                    crate::voxel::BlockType::Furnace => world
+                        .get_furnace_slots(oc.pos.x, oc.pos.y, oc.pos.z)
+                        .and_then(|s| s.get(slot.0).copied().flatten())
+                        .map(|s| s.item.name()),
+                    _ => None,
+                };
+                break;
+            }
+        }
+    }
+    if let Ok((mut text, mut node, mut vis)) = hover_ui_query.single_mut() {
+        if let Some(want) = name {
+            if text.0 != want {
+                text.0 = want.to_string();
+            }
+            if *vis != Visibility::Visible {
+                *vis = Visibility::Visible;
+            }
+            if let Some(pos) = windows.iter().next().and_then(|w| w.cursor_position()) {
+                node.left = Val::Px(pos.x + 15.0);
+                node.top = Val::Px(pos.y + 15.0);
+            }
+        } else {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+        }
+    }
+}
+
+/// สอนปุ่มครั้งแรกที่เข้าโลก (ต่อการเปิดเกมหนึ่งครั้ง) — ผ่านแชทที่จางหายเอง
+/// ไม่มีที่อื่นให้ผู้เล่นใหม่รู้ปุ่มเลยนอกจาก ESC → Options ที่ซ่อนอยู่
+pub fn show_controls_hint(mut chat: ResMut<ChatState>, mut shown: Local<bool>) {
+    if *shown {
+        return;
+    }
+    *shown = true;
+    chat.push_system("Controls: WASD move | Space jump | F fly/walk | E inventory | Q drop item");
+    chat.push_system("T chat | F5 camera view | F3 debug info | ESC pause menu");
+}
+
 pub fn update_screen_flash(
     time: Res<Time>,
     mut flash: ResMut<ScreenFlash>,
@@ -1484,12 +1772,70 @@ fn enter_world(
     next_state.set(crate::GameState::InGame);
 }
 
+/// ธีม egui กลาง ตั้งครั้งเดียว: ฟอนต์ใหญ่ขึ้น + โทนสีเดียวกับ HUD (น้ำเงินเข้ม/ทอง)
+/// — ค่า default ของ egui เป็นเทา debug-tool ไม่เข้ากับเกม
+pub fn setup_egui_theme(mut contexts: bevy_egui::EguiContexts, mut done: Local<bool>) {
+    if *done {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+    *done = true;
+    use bevy_egui::egui::{self, Color32, FontFamily, FontId, TextStyle};
+
+    // egui 0.35: style แยกตาม light/dark theme — all_styles_mut ทาให้ทั้งคู่
+    ctx.all_styles_mut(|style| {
+        style.text_styles.insert(TextStyle::Heading, FontId::new(30.0, FontFamily::Proportional));
+        style.text_styles.insert(TextStyle::Body, FontId::new(17.0, FontFamily::Proportional));
+        style.text_styles.insert(TextStyle::Button, FontId::new(18.0, FontFamily::Proportional));
+        style.text_styles.insert(TextStyle::Small, FontId::new(13.0, FontFamily::Proportional));
+        style.spacing.button_padding = egui::vec2(12.0, 6.0);
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+
+        let panel = Color32::from_rgba_unmultiplied(18, 18, 28, 245);
+        let widget = Color32::from_rgb(45, 45, 62);
+        let widget_hover = Color32::from_rgb(64, 64, 88);
+        let accent = Color32::from_rgb(255, 217, 51); // ทองเดียวกับกรอบ hotbar ที่เลือก
+
+        let v = &mut style.visuals;
+        v.window_fill = panel;
+        v.panel_fill = panel;
+        v.window_stroke = egui::Stroke::new(1.0, Color32::from_rgb(85, 85, 110));
+        v.widgets.inactive.bg_fill = widget;
+        v.widgets.inactive.weak_bg_fill = widget; // ปุ่มใช้ weak_bg_fill ใน egui รุ่นใหม่
+        v.widgets.hovered.bg_fill = widget_hover;
+        v.widgets.hovered.weak_bg_fill = widget_hover;
+        v.widgets.active.bg_fill = widget_hover;
+        v.widgets.active.weak_bg_fill = widget_hover;
+        v.selection.bg_fill = Color32::from_rgba_unmultiplied(255, 217, 51, 70);
+        v.selection.stroke = egui::Stroke::new(1.0, accent);
+        v.hyperlink_color = accent;
+    });
+}
+
+/// ฉากหลังทึบของหน้าเมนูนอกเกม — ไม่งั้นหน้าต่างเมนูลอยบนจอว่างเปล่า (โลกถูก unload แล้ว)
+fn menu_backdrop(ctx: &bevy_egui::egui::Context) {
+    use bevy_egui::egui;
+    let screen = ctx.content_rect(); // egui 0.35: screen_rect เปลี่ยนชื่อเป็น content_rect
+    egui::Area::new(egui::Id::new("menu_backdrop"))
+        .order(egui::Order::Background)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            ui.painter().rect_filled(
+                screen,
+                egui::CornerRadius::ZERO,
+                egui::Color32::from_rgb(13, 15, 24),
+            );
+        });
+}
+
 pub fn main_menu_system(
     mut contexts: bevy_egui::EguiContexts,
     mut next_state: ResMut<NextState<crate::GameState>>,
+    mut app_exit: MessageWriter<bevy::app::AppExit>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let ctx = ctx.clone(); // In egui 0.35 Context is easily cloned to avoid mutability issues
+    menu_backdrop(&ctx);
 
     bevy_egui::egui::Window::new("Main Menu")
         .title_bar(false)
@@ -1499,16 +1845,17 @@ pub fn main_menu_system(
         .show(&ctx, |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space(20.0);
-            
+
             ui.heading(
                 bevy_egui::egui::RichText::new("VOXEL GAME")
-                    .size(50.0)
+                    .size(56.0)
+                    .color(bevy_egui::egui::Color32::from_rgb(255, 217, 51))
                     .strong()
             );
-            
+
             ui.add_space(50.0);
 
-            let btn_size = bevy_egui::egui::vec2(200.0, 40.0);
+            let btn_size = bevy_egui::egui::vec2(220.0, 44.0);
 
             if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Singleplayer")).clicked() {
                 next_state.set(crate::GameState::SinglePlayerMenu);
@@ -1520,17 +1867,25 @@ pub fn main_menu_system(
             }
             ui.add_space(10.0);
 
-            // ทางเข้าเดิม (noise ด่วน / โลกจริง / สไลเดอร์ world gen) — ไว้จูนและเทส
-            if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Dev Mode")).clicked() {
+            // ออกทาง AppExit (ไม่ใช่ process::exit) — ให้ bevy ปิดตัวตามปกติ
+            if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Quit")).clicked() {
+                app_exit.write(bevy::app::AppExit::Success);
+            }
+
+            ui.add_space(24.0);
+
+            // ทางเข้า dev (noise ด่วน / โลกจริง / สไลเดอร์ world gen) — ลดรูปเป็น
+            // ลิงก์เล็กท้ายเมนู ไม่ปนกับปุ่มหลักให้ผู้เล่นทั่วไปงง
+            if ui
+                .add(bevy_egui::egui::Button::new(
+                    bevy_egui::egui::RichText::new("dev mode").small().weak(),
+                ).frame(false))
+                .clicked()
+            {
                 next_state.set(crate::GameState::DevMenu);
             }
-            ui.add_space(10.0);
 
-            if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Quit")).clicked() {
-                std::process::exit(0);
-            }
-            
-            ui.add_space(20.0);
+            ui.add_space(10.0);
         });
     });
 }
@@ -1564,18 +1919,45 @@ impl Default for CreateWorldUi {
     }
 }
 
-/// หน้าเลือก world ที่เคยสร้าง (เข้าจากปุ่ม Singleplayer)
+/// เลือกโลกจากหน้า Multiplayer เพื่อเปิด host — เข้าเกมแล้วเปิด LAN อัตโนมัติ
+/// (แก้ปัญหา "Open to LAN" ซ่อนลึกใน ESC → Options จนผู้เล่นใหม่หาไม่เจอ)
+#[derive(Resource)]
+pub struct HostIntent;
+
+/// หน้าเลือก world ที่เคยสร้าง (เข้าจากปุ่ม Singleplayer หรือ Host a World)
 pub fn singleplayer_menu_system(
     mut contexts: bevy_egui::EguiContexts,
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mut next_state: ResMut<NextState<crate::GameState>>,
     mut settings: ResMut<crate::GameSettings>,
     mut regenerate: ResMut<crate::RegenerateWorld>,
     mut hotbar: ResMut<crate::voxel::Hotbar>,
     mut list: ResMut<WorldList>,
     mut create_ui: ResMut<CreateWorldUi>,
+    host_intent: Option<Res<HostIntent>>,
+    // โลกที่รอยืนยันลบ (คลิก Delete ครั้งแรก) — กันลบถาวรด้วยคลิกเดียว/คลิกพลาด
+    mut confirm_delete: Local<Option<usize>>,
 ) {
+    let hosting = host_intent.is_some();
+    // ESC = ถอยกลับ (เหมือนกดปุ่ม Back)
+    if keyboard.just_pressed(KeyCode::Escape) {
+        if confirm_delete.is_some() {
+            *confirm_delete = None;
+        } else {
+            if hosting {
+                commands.remove_resource::<HostIntent>();
+                next_state.set(crate::GameState::MultiplayerMenu);
+            } else {
+                next_state.set(crate::GameState::MainMenu);
+            }
+            return;
+        }
+    }
+
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let ctx = ctx.clone();
+    menu_backdrop(&ctx);
 
     // เก็บ action ไว้ทำหลังปิด closure — ยืม list อยู่ระหว่างวน loop
     let mut play: Option<usize> = None;
@@ -1589,11 +1971,19 @@ pub fn singleplayer_menu_system(
         .show(&ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(20.0);
-                ui.heading(bevy_egui::egui::RichText::new("SELECT WORLD").size(32.0).strong());
+                let title = if hosting { "SELECT WORLD TO HOST" } else { "SELECT WORLD" };
+                ui.heading(bevy_egui::egui::RichText::new(title).size(32.0).strong());
+                if hosting {
+                    ui.label(
+                        bevy_egui::egui::RichText::new("the world opens to LAN right after loading")
+                            .small()
+                            .weak(),
+                    );
+                }
                 ui.add_space(20.0);
             });
 
-            let btn_size = bevy_egui::egui::vec2(200.0, 40.0);
+            let btn_size = bevy_egui::egui::vec2(220.0, 44.0);
 
             if list.0.is_empty() {
                 ui.vertical_centered(|ui| {
@@ -1625,10 +2015,16 @@ pub fn singleplayer_menu_system(
                                         bevy_egui::egui::Align::Center,
                                     ),
                                     |ui| {
-                                        if ui.button("Delete").clicked() {
-                                            delete = Some(i);
+                                        // ปุ่มลบสีแดง แยกจาก Play ชัดๆ — และแค่ "ขอยืนยัน"
+                                        // การลบจริงอยู่ในหน้าต่าง confirm ข้างล่าง
+                                        if ui.button(
+                                            bevy_egui::egui::RichText::new("Delete")
+                                                .color(bevy_egui::egui::Color32::from_rgb(240, 90, 90)),
+                                        ).clicked() {
+                                            *confirm_delete = Some(i);
                                         }
-                                        if ui.button("Play").clicked() {
+                                        let play_label = if hosting { "Host" } else { "Play" };
+                                        if ui.button(play_label).clicked() {
                                             play = Some(i);
                                         }
                                     },
@@ -1647,14 +2043,74 @@ pub fn singleplayer_menu_system(
                 }
                 ui.add_space(10.0);
                 if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Back")).clicked() {
-                    next_state.set(crate::GameState::MainMenu);
+                    if hosting {
+                        commands.remove_resource::<HostIntent>();
+                        next_state.set(crate::GameState::MultiplayerMenu);
+                    } else {
+                        next_state.set(crate::GameState::MainMenu);
+                    }
                 }
                 ui.add_space(20.0);
             });
         });
 
+    // หน้าต่างยืนยันลบ — ทับกลางจอ ลบจริงเฉพาะกดปุ่มแดงในนี้เท่านั้น
+    if let Some(i) = *confirm_delete {
+        match list.0.get(i) {
+            Some((_, meta)) => {
+                let name = meta.name.clone();
+                bevy_egui::egui::Window::new("Confirm Delete")
+                    .title_bar(false)
+                    .resizable(false)
+                    .collapsible(false)
+                    .anchor(bevy_egui::egui::Align2::CENTER_CENTER, bevy_egui::egui::vec2(0.0, 0.0))
+                    .show(&ctx, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(12.0);
+                            ui.label(
+                                bevy_egui::egui::RichText::new(format!("Delete world '{name}'?"))
+                                    .size(20.0)
+                                    .strong(),
+                            );
+                            ui.label(
+                                bevy_egui::egui::RichText::new("This cannot be undone")
+                                    .small()
+                                    .weak(),
+                            );
+                            ui.add_space(12.0);
+                            ui.horizontal(|ui| {
+                                if ui.add_sized(
+                                    bevy_egui::egui::vec2(110.0, 36.0),
+                                    bevy_egui::egui::Button::new(
+                                        bevy_egui::egui::RichText::new("Delete")
+                                            .color(bevy_egui::egui::Color32::from_rgb(255, 120, 120)),
+                                    ),
+                                ).clicked() {
+                                    delete = Some(i);
+                                    *confirm_delete = None;
+                                }
+                                if ui.add_sized(
+                                    bevy_egui::egui::vec2(110.0, 36.0),
+                                    bevy_egui::egui::Button::new("Cancel"),
+                                ).clicked() {
+                                    *confirm_delete = None;
+                                }
+                            });
+                            ui.add_space(8.0);
+                        });
+                    });
+            }
+            None => *confirm_delete = None, // index เก่าหลัง list เปลี่ยน
+        }
+    }
+
     if let Some(i) = play {
         let (dir, meta) = list.0[i].clone();
+        if hosting {
+            // เข้าเกมแล้ว auto_host_system จะรอ VoxelWorld พร้อมก่อนค่อยเปิด LAN
+            commands.remove_resource::<HostIntent>();
+            commands.insert_resource(crate::network::AutoHostPending);
+        }
         enter_world(
             &mut settings,
             &mut regenerate,
@@ -1678,6 +2134,7 @@ pub fn singleplayer_menu_system(
 /// ฟอร์มสร้าง world ใหม่ — ชื่อ / seed / โหมด (โลกแบบ generate เท่านั้น)
 pub fn create_world_menu_system(
     mut contexts: bevy_egui::EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mut next_state: ResMut<NextState<crate::GameState>>,
     mut settings: ResMut<crate::GameSettings>,
     mut regenerate: ResMut<crate::RegenerateWorld>,
@@ -1685,8 +2142,15 @@ pub fn create_world_menu_system(
     mut create_ui: ResMut<CreateWorldUi>,
     mut list: ResMut<WorldList>,
 ) {
+    // ESC = ถอยกลับ (ทิ้งฟอร์ม)
+    if keyboard.just_pressed(KeyCode::Escape) {
+        create_ui.status.clear();
+        next_state.set(crate::GameState::SinglePlayerMenu);
+        return;
+    }
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let ctx = ctx.clone();
+    menu_backdrop(&ctx);
     let mut created: Option<(std::path::PathBuf, crate::world_save::WorldMeta)> = None;
 
     bevy_egui::egui::Window::new("Create World")
@@ -1781,13 +2245,20 @@ pub fn create_world_menu_system(
 /// ทางเข้าแบบเดิมก่อนมีระบบ world — เข้าเกมไวๆ ไว้จูนค่า/เทส (เปิด Game Settings เต็ม)
 pub fn dev_menu_system(
     mut contexts: bevy_egui::EguiContexts,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mut next_state: ResMut<NextState<crate::GameState>>,
     mut settings: ResMut<crate::GameSettings>,
     mut regenerate: ResMut<crate::RegenerateWorld>,
     mut hotbar: ResMut<crate::voxel::Hotbar>,
 ) {
+    // ESC = ถอยกลับ
+    if keyboard.just_pressed(KeyCode::Escape) {
+        next_state.set(crate::GameState::MainMenu);
+        return;
+    }
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let ctx = ctx.clone();
+    menu_backdrop(&ctx);
 
     bevy_egui::egui::Window::new("Dev Mode")
         .title_bar(false)
@@ -1853,14 +2324,26 @@ pub fn dev_menu_system(
 pub fn multiplayer_menu_system(
     mut contexts: bevy_egui::EguiContexts,
     mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mut next_state: ResMut<NextState<crate::GameState>>,
     mut mp_ui: ResMut<crate::network::MultiplayerUi>,
     client: Option<Res<bevy_renet::RenetClient>>,
     settings: Res<crate::GameSettings>,
 ) {
+    let connecting = client.is_some();
+    // ESC = ถอยกลับ (ยกเลิกการเชื่อมต่อที่ค้างด้วย เหมือนกดปุ่ม Back)
+    if keyboard.just_pressed(KeyCode::Escape) {
+        if connecting {
+            crate::network::teardown_client(&mut commands);
+        }
+        mp_ui.status.clear();
+        next_state.set(crate::GameState::MainMenu);
+        return;
+    }
+
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let ctx = ctx.clone();
-    let connecting = client.is_some();
+    menu_backdrop(&ctx);
 
     bevy_egui::egui::Window::new("Multiplayer Menu")
         .title_bar(false)
@@ -1873,7 +2356,31 @@ pub fn multiplayer_menu_system(
                 ui.heading(bevy_egui::egui::RichText::new("MULTIPLAYER").size(32.0).strong());
                 ui.add_space(20.0);
 
-                ui.label("Server IP:");
+                let btn_size = bevy_egui::egui::vec2(220.0, 44.0);
+
+                // เปิด host จากตรงนี้ได้เลย — เดิมต้องเข้าโลกก่อนแล้วไปหา
+                // "Open to LAN" ใน ESC → Options ซึ่งไม่มีใครหาเจอ
+                if ui
+                    .add_enabled(
+                        !connecting,
+                        bevy_egui::egui::Button::new("Host a World").min_size(btn_size),
+                    )
+                    .clicked()
+                {
+                    commands.insert_resource(HostIntent);
+                    next_state.set(crate::GameState::SinglePlayerMenu);
+                }
+                ui.label(
+                    bevy_egui::egui::RichText::new("pick a world, it opens to LAN automatically")
+                        .small()
+                        .weak(),
+                );
+
+                ui.add_space(14.0);
+                ui.separator();
+                ui.add_space(14.0);
+
+                ui.label("Join with IP:");
                 ui.add_enabled(
                     !connecting,
                     bevy_egui::egui::TextEdit::singleline(&mut mp_ui.address)
@@ -1882,7 +2389,6 @@ pub fn multiplayer_menu_system(
                 );
                 ui.add_space(10.0);
 
-                let btn_size = bevy_egui::egui::vec2(200.0, 40.0);
                 if ui.add_enabled(!connecting, bevy_egui::egui::Button::new("Join").min_size(btn_size)).clicked() {
                     crate::network::start_client(&mut commands, &mut mp_ui, settings.noise, settings.terrain_source);
                 }
@@ -1988,12 +2494,39 @@ pub fn pause_menu_system(
                 ui.add_space(10.0);
 
                 if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Quit Game")).clicked() {
-                    std::process::exit(0);
+                    // ห้าม process::exit ตรงๆ — ข้าม unload_world_on_exit แล้ว chunk
+                    // ที่ dirty (น้ำ/ระเบิดเพิ่งแก้) หายเงียบๆ ให้กลับ MainMenu ก่อน
+                    // (OnExit เซฟให้) แล้ว quit_after_save ค่อยปิดโปรแกรม
+                    paused.0 = false;
+                    if let Some(server) = server.as_mut() {
+                        server.disconnect_all();
+                        commands.insert_resource(crate::network::StopHostRequested);
+                    } else if let (Some(client), Some(cs)) = (client.as_mut(), client_sync.as_mut()) {
+                        cs.leaving = true;
+                        client.disconnect();
+                    }
+                    commands.insert_resource(QuitAfterSave);
+                    next_state.set(crate::GameState::MainMenu);
                 }
 
                 ui.add_space(20.0);
             });
         });
+}
+
+/// กด Quit จากใน pause menu — รอให้ออกจากโลกเสร็จ (OnExit เซฟ chunk ค้างแล้ว)
+/// ค่อยปิดโปรแกรมจริง
+#[derive(Resource)]
+pub struct QuitAfterSave;
+
+pub fn quit_after_save(
+    requested: Option<Res<QuitAfterSave>>,
+    state: Res<State<crate::GameState>>,
+    mut app_exit: MessageWriter<bevy::app::AppExit>,
+) {
+    if requested.is_some() && *state.get() == crate::GameState::MainMenu {
+        app_exit.write(bevy::app::AppExit::Success);
+    }
 }
 
 pub fn update_coordinate_ui_system(
@@ -2149,8 +2682,11 @@ pub fn options_menu_system(
         Res<crate::voxel::VoxelWorld>,
         ResMut<crate::network::MultiplayerUi>,
     ),
+    // สถานะรอยืนยันของปุ่มลบเซฟ — ปุ่มอันตราย ห้ามลบด้วยคลิกเดียว
+    mut confirm_clear: Local<bool>,
 ) {
     if settings.dev_mode || !show_options.0 {
+        *confirm_clear = false;
         return;
     }
     let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -2199,16 +2735,33 @@ pub fn options_menu_system(
             );
             // chunk ที่เซฟไว้ override การ generate เสมอ — ปุ่มนี้คืนโลกกลับเป็นตอนสร้าง
             // (เฉพาะโฟลเดอร์ของโลกนี้) ตอนต่อ network ห้ามแตะ = desync
+            // สองจังหวะ: คลิกแรกแค่ขอยืนยัน ลบจริงต้องกดปุ่มแดง
             ui.add_enabled_ui(!networked, |ui| {
-                if ui.button("Clear Saved Edits").clicked() {
-                    let dir = crate::voxel::active_save_dir();
-                    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-                        // เก็บ world.json ไว้ ลบเฉพาะ chunk
-                        if entry.path().extension().is_some_and(|e| e == "bin") {
-                            let _ = std::fs::remove_file(entry.path());
-                        }
+                if !*confirm_clear {
+                    if ui.button("Clear Saved Edits...").clicked() {
+                        *confirm_clear = true;
                     }
-                    regenerate.0 = true;
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label("Delete all saved edits in this world?");
+                        if ui.button(
+                            bevy_egui::egui::RichText::new("Yes, clear")
+                                .color(bevy_egui::egui::Color32::from_rgb(255, 120, 120)),
+                        ).clicked() {
+                            let dir = crate::voxel::active_save_dir();
+                            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                                // เก็บ world.json ไว้ ลบเฉพาะ chunk
+                                if entry.path().extension().is_some_and(|e| e == "bin") {
+                                    let _ = std::fs::remove_file(entry.path());
+                                }
+                            }
+                            regenerate.0 = true;
+                            *confirm_clear = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            *confirm_clear = false;
+                        }
+                    });
                 }
             });
 
@@ -2259,8 +2812,8 @@ pub fn options_menu_system(
 
             ui.separator();
 
-            ui.label("ESC: unlock mouse | F: fly/walk | 1-9/scroll: hotbar slot");
-            ui.label("Middle click: pick block | E: block picker | T: subvoxel mode");
+            ui.label("ESC: pause | F: fly/walk | F5: 3rd person | F3: debug | 1-9/scroll: hotbar");
+            ui.label("E: inventory | Q: drop item | T or /: chat | middle click: pick block | hold Chisel: sub-voxel");
 
             ui.add_space(10.0);
             ui.vertical_centered(|ui| {
@@ -2295,6 +2848,7 @@ pub fn egui_settings_system(
         Res<crate::voxel::VoxelWorld>,
         ResMut<crate::network::MultiplayerUi>,
     ),
+    mut confirm_clear: Local<bool>,
 ) {
     // โลกปกติใช้ Options พื้นฐานจาก pause menu แทน (ดู [`options_menu_system`])
     if !settings.dev_mode {
@@ -2401,10 +2955,29 @@ pub fn egui_settings_system(
                 regen = true;
             }
             // chunk ที่เซฟไว้จะ override การ generate เสมอ — ปุ่มนี้ล้างเซฟทิ้ง
-            // (เฉพาะโฟลเดอร์ของโลกที่กำลังเล่น — โลกอีกชนิดไม่โดน)
-            if ui.button("Clear Saved Edits").clicked() {
-                let _ = std::fs::remove_dir_all(crate::voxel::active_save_dir());
-                regen = true;
+            // (เฉพาะไฟล์ chunk ของโลกที่กำลังเล่น — world.json/โลกอื่นไม่โดน)
+            // สองจังหวะกันคลิกพลาด เหมือน options_menu_system
+            if !*confirm_clear {
+                if ui.button("Clear Saved Edits...").clicked() {
+                    *confirm_clear = true;
+                }
+            } else {
+                if ui.button(
+                    bevy_egui::egui::RichText::new("Yes, clear")
+                        .color(bevy_egui::egui::Color32::from_rgb(255, 120, 120)),
+                ).clicked() {
+                    let dir = crate::voxel::active_save_dir();
+                    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                        if entry.path().extension().is_some_and(|e| e == "bin") {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                    regen = true;
+                    *confirm_clear = false;
+                }
+                if ui.button("Cancel").clicked() {
+                    *confirm_clear = false;
+                }
             }
         });
 
@@ -2516,7 +3089,7 @@ pub fn egui_settings_system(
         ui.checkbox(&mut settings.show_tnt_rays, "Show TNT Rays");
 
         ui.separator();
-        ui.label("ESC: unlock mouse | F: fly/walk | 1-9/scroll: hotbar slot");
-        ui.label("Middle click: pick block | E: block picker | T: subvoxel mode");
+        ui.label("ESC: pause | F: fly/walk | F5: 3rd person | F3: debug | 1-9/scroll: hotbar");
+        ui.label("E: inventory | Q: drop item | T or /: chat | middle click: pick block | hold Chisel: sub-voxel");
     });
 }

@@ -304,8 +304,10 @@ pub fn setup_camera(
         MainCamera,
         Camera3d::default(),
         // มองไกลถึงขอบ tile DEM (~33 กม.) — default 1000 มองไม่เห็น LOD ไกล
+        // fov 70° แบบเกม first-person ทั่วไป (default 45° ของ bevy แคบอึดอัด)
         Projection::Perspective(PerspectiveProjection {
             far: 50_000.0,
+            fov: 70f32.to_radians(),
             ..default()
         }),
         // หมอกระยะไกล: เนียนรอยต่อ LOD + ให้ภูเขาไกลจางแบบ of จริง
