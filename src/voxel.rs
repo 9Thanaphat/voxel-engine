@@ -53,6 +53,9 @@ pub enum BlockType {
     SmartLamp = 29,
     SmartLampOn = 30,
     SwitchOn = 31,
+    Furnace = 32,
+    Chest = 33,
+    Campfire = 34,
 }
 
 impl BlockType {
@@ -89,6 +92,9 @@ impl BlockType {
             29 => BlockType::SmartLamp,
             30 => BlockType::SmartLampOn,
             31 => BlockType::SwitchOn,
+            32 => BlockType::Furnace,
+            33 => BlockType::Chest,
+            34 => BlockType::Campfire,
             _ => BlockType::Air,
         }
     }
@@ -140,7 +146,7 @@ pub struct BlockDef {
     pub overlay_side: &'static [&'static str],
 }
 
-pub const BLOCK_DEFS: [BlockDef; 32] = [
+pub const BLOCK_DEFS: [BlockDef; 35] = [
     BlockDef { name: "Air", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None, hardness: 0.0,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
     BlockDef { name: "Dirt", color: [0.4, 0.2, 0.0, 1.0], solid: true, transparent: false, emission: None, hardness: 1.0,
@@ -229,6 +235,22 @@ pub const BLOCK_DEFS: [BlockDef; 32] = [
         tex_top: &["textures/lamp-on.png"], tex_side: &["textures/lamp-on.png"], tex_bottom: &["textures/lamp-on.png"], overlay_side: &[] },
     BlockDef { name: "Switch (ON)", color: [0.3, 0.9, 0.3, 1.0], solid: true, transparent: false, emission: None, hardness: 1.0,
         tex_top: &["textures/switch-on.png"], tex_side: &["textures/switch-on.png"], tex_bottom: &["textures/switch-on.png"], overlay_side: &[] },
+    // tex_side[0]=ด้านข้างธรรมดา, [1]=หน้า (facing_variant เลือกตาม facing ที่วางหันหาผู้เล่น)
+    BlockDef { name: "Furnace", color: [0.4, 0.4, 0.4, 1.0], solid: true, transparent: false, emission: None, hardness: 3.5,
+        tex_top: &["textures/furnace.png"], tex_side: &["textures/furnace.png", "textures/furnace_front.png"],
+        tex_bottom: &["textures/furnace.png"], overlay_side: &[] },
+    // tex_side[0]=ด้านข้าง, [1]=หน้า, [2]=หลัง (facing_variant เลือกตาม facing/facing^1)
+    BlockDef { name: "Chest", color: [0.55, 0.35, 0.15, 1.0], solid: true, transparent: false, emission: None, hardness: 3.0,
+        tex_top: &["textures/chest_top_bottom.png"],
+        tex_side: &["textures/chest_side.png", "textures/chest_front.png", "textures/chest_back.png"],
+        tex_bottom: &["textures/chest_top_bottom.png"], overlay_side: &[] },
+    // ไม่มี texture แบนต่อหน้า — วาดด้วย glTF model จริง (assets/model/campfire.gltf) แทน
+    // ทั้งคิวบ์ (ดู create_mesh_from_blocks ที่ข้าม Campfire ไปเหมือน TallGrass/Chiseled)
+    // transparent:true กัน AO/หน้าเพื่อนบ้านถูกตัดทิ้งราวกับ Campfire เต็มช่อง (โมเดลไม่เต็มจริง)
+    // solid:true ไว้คู่กับ block_collision_box (กล่องเล็กกว่าคิวบ์เต็ม ไม่ใช่ AABB เต็มช่อง)
+    // emission ทำให้ได้ PointLight + particle ไฟฟรีผ่านระบบ lamp/sparkle เดิม (ดู refresh_chunk_lamp_lights)
+    BlockDef { name: "Campfire", color: [0.35, 0.22, 0.12, 1.0], solid: true, transparent: true, emission: Some([1.4, 0.6, 0.15]), hardness: 0.4,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
 ];
 
 pub fn block_def(block: BlockType) -> &'static BlockDef {
@@ -237,6 +259,28 @@ pub fn block_def(block: BlockType) -> &'static BlockDef {
 
 pub fn block_name(block: BlockType) -> &'static str {
     block_def(block).name
+}
+
+/// ตัดทุกอย่างที่ไม่ใช่ตัวอักษร/ตัวเลขออกแล้วเป็นตัวพิมพ์เล็ก —
+/// ทำให้ "Tall Grass", "tall_grass", "TallGrass" กลายเป็นคีย์เดียวกัน
+fn name_key(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// หา BlockType จากชื่อที่ผู้ใช้พิมพ์ (สำหรับ /give, /setblock)
+/// รับได้ทั้งชื่อ variant (`IronBlock`, `iron_block`) และชื่อที่โชว์ใน UI (`Iron`, "Tall Grass")
+pub fn block_from_name(input: &str) -> Option<BlockType> {
+    let key = name_key(input);
+    if key.is_empty() {
+        return None;
+    }
+    (0..BLOCK_DEFS.len() as u8).map(BlockType::from_u8).find(|&bt| {
+        // Debug ให้ชื่อ variant ตรงๆ (IronBlock) ส่วน BLOCK_DEFS ให้ชื่อโชว์ (Iron)
+        name_key(&format!("{bt:?}")) == key || name_key(block_name(bt)) == key
+    })
 }
 
 pub fn block_color(block: BlockType) -> [f32; 4] {
@@ -249,6 +293,72 @@ pub fn block_hardness(block: BlockType) -> f32 {
 
 pub fn lamp_emission(block: BlockType) -> Option<Color> {
     block_def(block).emission.map(|c| Color::srgb(c[0], c[1], c[2]))
+}
+
+/// กล่อง collision จริงของบล็อก (มุมล่าง, มุมบน ภายในช่อง 1x1x1 ของตัวเอง) — ค่าเริ่มต้นคือ
+/// คิวบ์เต็มช่องเดิมสำหรับบล็อกทุกชนิด ยกเว้นบล็อกที่ไม่ใช่คิวบ์เต็ม (เช่น Campfire) ที่ระบุ
+/// กล่องเล็กกว่าจริงไว้เฉพาะที่นี่ — ไม่ต้องเพิ่ม field ใน BlockDef/BLOCK_DEFS ทั้งตาราง
+pub fn block_collision_box(block: BlockType) -> (Vec3, Vec3) {
+    match block {
+        BlockType::Campfire => (Vec3::new(0.15, 0.0, 0.15), Vec3::new(0.85, 0.4, 0.85)),
+        _ => (Vec3::ZERO, Vec3::ONE),
+    }
+}
+
+// --------------------------------------------------------
+// ตารางการขุด (ระบบทุบบล็อก Survival) — แพทเทิร์นเดียวกับ block_collision_box:
+// match function แยก ไม่เพิ่ม field ใน BLOCK_DEFS (field `hardness` เดิมคือความทน
+// "ระเบิด" คนละความหมาย — Iron 999 = ระเบิดไม่พังแต่ขุดด้วย pickaxe ได้)
+// --------------------------------------------------------
+
+/// บล็อกนี้อยู่หมวดเครื่องมือไหน (ขุดด้วย tool หมวดตรงกัน = เร็วขึ้น dig_speed เท่า)
+pub fn block_dig_class(block: BlockType) -> crate::item::DigClass {
+    use crate::item::DigClass;
+    match block {
+        BlockType::Stone | BlockType::IronBlock | BlockType::Furnace
+        | BlockType::Glowstone | BlockType::LampRed | BlockType::LampGreen | BlockType::LampBlue
+        | BlockType::SmartLamp | BlockType::SmartLampOn
+        | BlockType::SwitchOff | BlockType::SwitchOn => DigClass::Pick,
+        BlockType::Wood | BlockType::Chest | BlockType::Tnt | BlockType::Nuke
+        | BlockType::Campfire => DigClass::Axe,
+        BlockType::Dirt | BlockType::Grass | BlockType::Sand => DigClass::Shovel,
+        _ => DigClass::None,
+    }
+}
+
+/// เวลาขุดด้วยมือเปล่า (วินาที) — ปรับสมดุลเกมที่ตารางนี้ที่เดียว
+pub fn block_dig_time(block: BlockType) -> f32 {
+    match block {
+        BlockType::TallGrass | BlockType::Campfire => 0.2,
+        BlockType::Leaves => 0.35,
+        BlockType::Glass => 0.5,
+        BlockType::Sand => 0.75,
+        BlockType::Dirt | BlockType::Tnt | BlockType::Nuke => 1.0,
+        BlockType::Grass => 1.2,
+        BlockType::Glowstone | BlockType::LampRed | BlockType::LampGreen | BlockType::LampBlue
+        | BlockType::SmartLamp | BlockType::SmartLampOn
+        | BlockType::SwitchOff | BlockType::SwitchOn => 1.5,
+        BlockType::Wood | BlockType::Chest => 3.0,
+        BlockType::Furnace => 3.5,
+        BlockType::Stone => 5.0,
+        BlockType::IronBlock => 7.5,
+        _ => 1.0,
+    }
+}
+
+/// กติกา drop แบบ Minecraft: หมวด Pick (หิน/แร่) ต้องถือ pickaxe ตอนแตกถึงได้ของ
+/// มือเปล่า/tool ผิดหมวดขุดได้ (ช้า) แต่บล็อกหายเปล่า — หมวดอื่นได้ของเสมอ
+pub fn block_requires_tool(block: BlockType) -> bool {
+    block_dig_class(block) == crate::item::DigClass::Pick
+}
+
+/// เวลาขุดจริงตามของที่ถืออยู่ (tool หมวดตรง = หาร dig_speed)
+pub fn break_time(block: BlockType, held: Option<crate::item::ToolType>) -> f32 {
+    let base = block_dig_time(block);
+    match held {
+        Some(tool) if tool.dig_class() == block_dig_class(block) => base / tool.dig_speed(),
+        _ => base,
+    }
 }
 
 /// texture ที่ใช้ได้จริง (มีไฟล์บน disk) ต่อ (บล็อก, หน้า) — สร้างครั้งเดียวตอน setup
@@ -285,6 +395,23 @@ pub fn texture_variant(block: BlockType, face_id: usize, wx: i32, wy: i32, wz: i
 
 pub fn face_texture(block: BlockType, face_id: usize, variant: u8) -> Option<&'static str> {
     face_texture_list(block, face_id).get(variant as usize).copied()
+}
+
+/// เลือก texture variant ของ Furnace/Chest ตาม facing (หน้าหันหาผู้เล่นตอนวาง) แทน texture_variant
+/// face_id ที่ใช้จริง (จาก FACE_OFFSETS) มีแค่ 2/3/4/5 เป็นด้านข้าง — บน/ล่าง (0/1) ใช้ variant 0 เสมอ
+/// facing เก็บเป็น face_id ของหน้า "หน้า" ตรงๆ (2/3/4/5); หน้าตรงข้ามคือ facing ^ 1
+pub fn facing_variant(block: BlockType, face_id: usize, facing: u8) -> u8 {
+    if face_id < 2 {
+        return 0;
+    }
+    let face_id = face_id as u8;
+    match block {
+        BlockType::Furnace => if face_id == facing { 1 } else { 0 },
+        BlockType::Chest => {
+            if face_id == facing { 1 } else if face_id == (facing ^ 1) { 2 } else { 0 }
+        }
+        _ => 0,
+    }
 }
 
 /// overlay ด้านข้างที่ใช้ได้จริง (มีไฟล์บน disk) ต่อบล็อก
@@ -512,6 +639,13 @@ impl ChunkBlocks {
 pub struct ChunkData {
     pub blocks: Arc<ChunkBlocks>,
     pub chiseled_blocks: HashMap<usize, Box<[u8; 4096]>>,
+    /// หน้า "หน้า" ของ Furnace/Chest ต่อตำแหน่ง (เก็บเป็น face_id 2/3/4/5) — เหมือน chiseled_blocks
+    /// ต่างกันที่อันนี้ต้องเซฟลง disk จริง (ดู save_chunk_full/load_chunk_aux)
+    pub facings: HashMap<usize, u8>,
+    /// ของในกล่อง Chest ต่อตำแหน่ง (27 ช่อง) — เซฟลง disk เหมือน facings
+    pub chest_slots: HashMap<usize, Box<[Option<ItemStack>; 27]>>,
+    /// ของในกล่อง Furnace ต่อตำแหน่ง (3 ช่อง: input/fuel/output — ยังไม่มี logic เผา)
+    pub furnace_slots: HashMap<usize, Box<[Option<ItemStack>; 3]>>,
     pub num_vertices: usize,
     pub num_indices: usize,
     /// ช่วง y ที่มีน้ำ (inclusive) — grow-only ตอน set_block เขียนน้ำ,
@@ -522,6 +656,9 @@ pub struct ChunkData {
     /// ให้เส้นทาง remesh เฉพาะน้ำอัปเดตยอดรวมแบบ delta ได้โดยไม่พัง
     pub num_water_vertices: usize,
     pub num_water_indices: usize,
+    /// มีบล็อกถูกเขียนหลังโหลด — การขุด/วางเซฟทันทีอยู่แล้ว แต่ผลจาก fluid sim
+    /// กับ TNT ที่ยังไหลอยู่ไม่เซฟรายเฟรม flag นี้ให้ตอนออกจากโลกเซฟเก็บให้ครบ
+    pub dirty: bool,
 }
 
 impl ChunkData {
@@ -580,6 +717,7 @@ pub struct VoxelWorld {
     pub glow_chunks: HashMap<IVec2, Vec<Entity>>,     // mesh entity (บล็อกเรืองแสง ต่อสี)
     pub textured_chunks: HashMap<IVec2, Vec<Entity>>, // mesh entity (บล็อกมี texture ต่อไฟล์)
     pub lamp_lights: HashMap<IVec2, Vec<Entity>>,     // PointLight ของบล็อกไฟใน chunk
+    pub campfire_models: HashMap<IVec2, Vec<Entity>>, // glTF scene entity ของ Campfire ใน chunk
     pub total_vertices: usize,
     pub total_indices: usize,
 }
@@ -630,7 +768,7 @@ impl VoxelWorld {
     pub fn convert_to_chiseled(&mut self, x: i32, y: i32, z: i32) {
         let block = self.get_block(x, y, z);
         if block == BlockType::Air || block == BlockType::Chiseled { return; }
-        
+
         if y < 0 || y >= CHUNK_HEIGHT as i32 { return; }
         let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
         let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
@@ -640,6 +778,83 @@ impl VoxelWorld {
             let mut data = Box::new([0u8; 4096]);
             data.fill(block as u8);
             chunk.chiseled_blocks.insert(idx, data);
+        }
+        // Furnace/Chest ที่ถูกสกัดกลายเป็น Chiseled — facing/ของใน container เดิมไม่มีความหมายแล้ว
+        self.clear_container_and_facing(x, y, z);
+    }
+
+    /// หน้า "หน้า" ของ Furnace/Chest ที่ตำแหน่งนี้ (face_id 2/3/4/5) — None ถ้าไม่มีข้อมูล
+    /// คู่ getter ของ set_block_facing — ยังไม่มีจุดเรียกใช้ (meshing อ่าน chunk.facings ตรงๆ)
+    /// เก็บไว้เผื่อ debug/F3 หรือ smelting logic ในอนาคตต้องรู้ facing
+    #[allow(dead_code)]
+    pub fn get_block_facing(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 { return None; }
+        let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        self.chunks.get(&IVec2::new(cx, cz)).and_then(|chunk| {
+            chunk.facings.get(&ChunkData::get_index(lx, y as usize, lz)).copied()
+        })
+    }
+
+    pub fn set_block_facing(&mut self, x: i32, y: i32, z: i32, facing: u8) {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 { return; }
+        let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        if let Some(chunk) = self.chunks.get_mut(&IVec2::new(cx, cz)) {
+            let idx = ChunkData::get_index(lx, y as usize, lz);
+            chunk.facings.insert(idx, facing);
+        }
+    }
+
+    pub fn get_chest_slots(&self, x: i32, y: i32, z: i32) -> Option<&[Option<ItemStack>; 27]> {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 { return None; }
+        let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        self.chunks.get(&IVec2::new(cx, cz)).and_then(|chunk| {
+            chunk.chest_slots.get(&ChunkData::get_index(lx, y as usize, lz)).map(|b| b.as_ref())
+        })
+    }
+
+    pub fn get_furnace_slots(&self, x: i32, y: i32, z: i32) -> Option<&[Option<ItemStack>; 3]> {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 { return None; }
+        let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        self.chunks.get(&IVec2::new(cx, cz)).and_then(|chunk| {
+            chunk.furnace_slots.get(&ChunkData::get_index(lx, y as usize, lz)).map(|b| b.as_ref())
+        })
+    }
+
+    pub fn set_chest_slot(&mut self, x: i32, y: i32, z: i32, slot: usize, item: Option<ItemStack>) {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 || slot >= 27 { return; }
+        let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        if let Some(chunk) = self.chunks.get_mut(&IVec2::new(cx, cz)) {
+            let idx = ChunkData::get_index(lx, y as usize, lz);
+            chunk.chest_slots.entry(idx).or_insert_with(|| Box::new([None; 27]))[slot] = item;
+        }
+    }
+
+    pub fn set_furnace_slot(&mut self, x: i32, y: i32, z: i32, slot: usize, item: Option<ItemStack>) {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 || slot >= 3 { return; }
+        let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        if let Some(chunk) = self.chunks.get_mut(&IVec2::new(cx, cz)) {
+            let idx = ChunkData::get_index(lx, y as usize, lz);
+            chunk.furnace_slots.entry(idx).or_insert_with(|| Box::new([None; 3]))[slot] = item;
+        }
+    }
+
+    /// ล้าง facing + ของใน container ค้าง (เรียกก่อนเขียนทับ Furnace/Chest ด้วยบล็อกอื่น
+    /// กัน entry ค้างใน map — ของใน container ที่ถูกทุบให้ break-drop ดึงออกไปเก็บ/ทิ้งก่อนเรียกฟังก์ชันนี้)
+    pub fn clear_container_and_facing(&mut self, x: i32, y: i32, z: i32) {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 { return; }
+        let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        if let Some(chunk) = self.chunks.get_mut(&IVec2::new(cx, cz)) {
+            let idx = ChunkData::get_index(lx, y as usize, lz);
+            chunk.facings.remove(&idx);
+            chunk.chest_slots.remove(&idx);
+            chunk.furnace_slots.remove(&idx);
         }
     }
 
@@ -659,6 +874,7 @@ impl VoxelWorld {
             // make_mut ตอนนี้ clone แค่ Vec<Section> + section เดียวที่โดนเขียน (~4KB)
             // — เดิม clone ทั้งคอลัมน์ 128KB ต่อ write แรกหลัง share ให้ mesh task
             Arc::make_mut(&mut chunk.blocks).set(local_x, local_y, local_z, block_type);
+            chunk.dirty = true;
             // ขยายแถบน้ำแบบ grow-only (tighten ทีเดียวตอน rebuild mesh น้ำ)
             if block_type.is_water() {
                 chunk.water_y_min = chunk.water_y_min.min(local_y);
@@ -895,6 +1111,7 @@ pub fn create_mesh_from_blocks(
     blocks: &ChunkBlocks,
     neighbors: &[Arc<ChunkBlocks>; 8],
     chiseled_blocks: Option<&HashMap<usize, Box<[u8; 4096]>>>,
+    facings: Option<&HashMap<usize, u8>>,
 ) -> ChunkMeshSet {
     // ต่อมุมผิวน้ำ: (ระยะกดผิวลง, ความลึกน้ำ normalize 0..1) — แชร์ข้ามหน้า/บล็อก
     let mut drop_cache: HashMap<(i32, i32, i32), (f32, f32)> = HashMap::with_capacity(1024);
@@ -1029,7 +1246,7 @@ pub fn create_mesh_from_blocks(
                     let block = blocks.get(c[0] as usize, c[1] as usize, c[2] as usize);
                     // TallGrass ไม่ใช่ลูกบาศก์ — วาดแยกเป็นกากบาทท้ายฟังก์ชัน
                     // Chiseled ข้ามไปก่อน วาดแยกทีหลัง
-                    if block == BlockType::Air || block == BlockType::TallGrass || block == BlockType::Chiseled {
+                    if block == BlockType::Air || block == BlockType::TallGrass || block == BlockType::Chiseled || block == BlockType::Campfire {
                         continue;
                     }
 
@@ -1085,13 +1302,19 @@ pub fn create_mesh_from_blocks(
                         face_ao(c, face_id)
                     };
 
-                    let variant = texture_variant(
-                        block,
-                        face_id,
-                        world_base_x + c[0],
-                        c[1],
-                        world_base_z + c[2],
-                    );
+                    let variant = if matches!(block, BlockType::Furnace | BlockType::Chest) {
+                        let idx = ChunkData::get_index(c[0] as usize, c[1] as usize, c[2] as usize);
+                        let facing = facings.and_then(|m| m.get(&idx)).copied().unwrap_or(4);
+                        facing_variant(block, face_id, facing)
+                    } else {
+                        texture_variant(
+                            block,
+                            face_id,
+                            world_base_x + c[0],
+                            c[1],
+                            world_base_z + c[2],
+                        )
+                    };
 
                     if !block.is_water() && ao[0] == ao[1] && ao[1] == ao[2] && ao[2] == ao[3] {
                         mask[midx(ui, vi)] = Some((block, ao[0], variant));
@@ -1354,9 +1577,10 @@ pub struct TerrainSampler {
 impl TerrainSampler {
     pub fn new(params: crate::NoiseParams) -> Self {
         Self {
-            fbm: Fbm::<Perlin>::new(1).set_octaves(params.octaves as usize),
-            temperature: Perlin::new(2),
-            cave: Perlin::new(3),
+            // seed เดียวคุมทุกชั้น — ให้ biome/ถ้ำเปลี่ยนตาม seed ด้วย ไม่ใช่แค่ความสูง
+            fbm: Fbm::<Perlin>::new(params.seed).set_octaves(params.octaves as usize),
+            temperature: Perlin::new(params.seed.wrapping_add(1)),
+            cave: Perlin::new(params.seed.wrapping_add(2)),
             params,
         }
     }
@@ -1705,23 +1929,48 @@ pub fn project_root() -> std::path::PathBuf {
     }
 }
 
-/// โลกจริง (DEM) เซฟแยกโฟลเดอร์จากโลก noise — พิกัด chunk ชนกันตรงๆ
-/// ห้ามให้เซฟข้ามโลกโหลดปนกัน; ตั้งค่าโดย UI ตอนเลือกโลก/สลับ radio
-pub static DEM_SAVE_DIR: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// โฟลเดอร์เซฟของโลกที่กำลังเล่น — ห้ามให้เซฟข้ามโลกโหลดปนกันเพราะพิกัด chunk ชนกันตรงๆ
+/// เป็น global เพราะ chunk I/O ทำในงาน async ที่เข้าถึง resource ไม่ได้
+/// `None` = ยังไม่ได้เลือกโลก ใช้ `saves/` ตาม default เดิม
+static ACTIVE_SAVE_DIR: std::sync::RwLock<Option<std::path::PathBuf>> =
+    std::sync::RwLock::new(None);
 
-/// โฟลเดอร์เซฟของโลกที่กำลังเล่น (saves/ หรือ saves_dem/)
+/// ตั้งโฟลเดอร์เซฟของโลกที่กำลังจะเข้า (โลกจากเมนู Singleplayer = saves/<slug>/)
+pub fn set_active_save_dir(path: Option<std::path::PathBuf>) {
+    if let Ok(mut guard) = ACTIVE_SAVE_DIR.write() {
+        *guard = path;
+    }
+}
+
+/// เส้นทาง dev mode: โลก noise ใช้ `saves/` โลกจริง (DEM) ใช้ `saves_dem/` แบบเดิม
+pub fn set_legacy_save_dir(is_dem: bool) {
+    let dir = if is_dem { "saves_dem" } else { "saves" };
+    set_active_save_dir(Some(project_root().join(dir)));
+}
+
+/// โฟลเดอร์เซฟของโลกที่กำลังเล่น
 pub fn active_save_dir() -> std::path::PathBuf {
-    let dir = if DEM_SAVE_DIR.load(std::sync::atomic::Ordering::Relaxed) {
-        "saves_dem"
-    } else {
-        "saves"
-    };
-    project_root().join(dir)
+    match ACTIVE_SAVE_DIR.read() {
+        Ok(guard) => guard.clone().unwrap_or_else(|| project_root().join("saves")),
+        Err(_) => project_root().join("saves"),
+    }
 }
 
 fn chunk_save_path(chunk_pos: IVec2) -> std::path::PathBuf {
     active_save_dir().join(format!("chunk_{}_{}.bin", chunk_pos.x, chunk_pos.y))
+}
+
+/// ไฟล์เสริมของ chunk เก็บ facing + ของใน Chest/Furnace (แยกจาก .bin หลักเพื่อไม่แตะ
+/// format บล็อกเดิมเลย — ไม่มีไฟล์นี้ = ไม่มี facing/container ใดๆ โหลดโลกเก่าได้ปกติ)
+fn chunk_aux_path(chunk_pos: IVec2) -> std::path::PathBuf {
+    active_save_dir().join(format!("chunk_{}_{}.aux.bin", chunk_pos.x, chunk_pos.y))
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct ChunkAux {
+    facings: Vec<(u32, u8)>,
+    chest: Vec<(u32, [Option<crate::item::WireItemStack>; 27])>,
+    furnace: Vec<(u32, [Option<crate::item::WireItemStack>; 3])>,
 }
 
 pub fn save_chunk(chunk_pos: IVec2, blocks: &ChunkBlocks) {
@@ -1732,6 +1981,44 @@ pub fn save_chunk(chunk_pos: IVec2, blocks: &ChunkBlocks) {
     compacted.compact();
     if let Err(e) = std::fs::write(chunk_save_path(chunk_pos), compacted.to_save_bytes()) {
         warn!("save chunk {:?} failed: {}", chunk_pos, e);
+    }
+}
+
+/// เหมือน save_chunk แต่เซฟไฟล์ .aux.bin (facing + container) ควบไปด้วย
+pub fn save_chunk_full(chunk_pos: IVec2, chunk: &ChunkData) {
+    save_chunk(chunk_pos, &chunk.blocks);
+    let aux = ChunkAux {
+        facings: chunk.facings.iter().map(|(&i, &f)| (i as u32, f)).collect(),
+        chest: chunk.chest_slots.iter().map(|(&i, s)| {
+            let mut wire = [None; 27];
+            for (w, slot) in wire.iter_mut().zip(s.iter()) {
+                *w = slot.map(crate::item::WireItemStack::from_stack);
+            }
+            (i as u32, wire)
+        }).collect(),
+        furnace: chunk.furnace_slots.iter().map(|(&i, s)| {
+            let mut wire = [None; 3];
+            for (w, slot) in wire.iter_mut().zip(s.iter()) {
+                *w = slot.map(crate::item::WireItemStack::from_stack);
+            }
+            (i as u32, wire)
+        }).collect(),
+    };
+    // chunk ไม่มี facing/container เลย — ไม่ต้องเขียนไฟล์ (และลบของเก่าถ้ามี กันค้าง)
+    if aux.facings.is_empty() && aux.chest.is_empty() && aux.furnace.is_empty() {
+        let _ = std::fs::remove_file(chunk_aux_path(chunk_pos));
+        return;
+    }
+    match bincode::serialize(&aux) {
+        Ok(bytes) => {
+            let mut out = Vec::with_capacity(bytes.len() + 4);
+            out.extend_from_slice(b"AUX1");
+            out.extend_from_slice(&bytes);
+            if let Err(e) = std::fs::write(chunk_aux_path(chunk_pos), out) {
+                warn!("save chunk aux {:?} failed: {}", chunk_pos, e);
+            }
+        }
+        Err(e) => warn!("encode chunk aux {:?} failed: {}", chunk_pos, e),
     }
 }
 
@@ -1748,6 +2035,95 @@ fn load_chunk(chunk_pos: IVec2) -> Option<ChunkBlocks> {
     ChunkBlocks::from_save_bytes(&bytes)
 }
 
+/// แปลง facings map เป็นรูปแบบสายส่ง (network ChunkData / เซฟ) — ใช้ร่วมกันทั้งสองทาง
+pub fn facings_to_wire(facings: &HashMap<usize, u8>) -> Vec<(u32, u8)> {
+    facings.iter().map(|(&k, &v)| (k as u32, v)).collect()
+}
+
+/// แปลง chest+furnace slots เป็นรูปแบบสายส่งเดียวกัน (kind tag: 0=chest, 1=furnace)
+pub fn containers_to_wire(
+    chest: &HashMap<usize, Box<[Option<ItemStack>; 27]>>,
+    furnace: &HashMap<usize, Box<[Option<ItemStack>; 3]>>,
+) -> Vec<(u32, u8, Vec<Option<crate::item::WireItemStack>>)> {
+    chest
+        .iter()
+        .map(|(&k, s)| {
+            (
+                k as u32,
+                0u8,
+                s.iter().map(|slot| slot.map(crate::item::WireItemStack::from_stack)).collect(),
+            )
+        })
+        .chain(furnace.iter().map(|(&k, s)| {
+            (
+                k as u32,
+                1u8,
+                s.iter().map(|slot| slot.map(crate::item::WireItemStack::from_stack)).collect(),
+            )
+        }))
+        .collect()
+}
+
+/// กลับด้าน facings_to_wire — ใช้ตอนรับ ServerMessage::ChunkData ฝั่ง client
+pub fn wire_to_facings(wire: Vec<(u32, u8)>) -> HashMap<usize, u8> {
+    wire.into_iter().map(|(k, v)| (k as usize, v)).collect()
+}
+
+/// กลับด้าน containers_to_wire — kind 0=chest(27)/1=furnace(3), ช่องอื่นทิ้ง (ข้อมูลเพี้ยน)
+pub fn wire_to_containers(
+    wire: Vec<(u32, u8, Vec<Option<crate::item::WireItemStack>>)>,
+) -> (HashMap<usize, Box<[Option<ItemStack>; 27]>>, HashMap<usize, Box<[Option<ItemStack>; 3]>>) {
+    let mut chest = HashMap::new();
+    let mut furnace = HashMap::new();
+    for (idx, kind, slots) in wire {
+        let idx = idx as usize;
+        match kind {
+            0 if slots.len() == 27 => {
+                let mut arr: Box<[Option<ItemStack>; 27]> = Box::new([None; 27]);
+                for (dst, w) in arr.iter_mut().zip(slots) {
+                    *dst = w.and_then(crate::item::WireItemStack::to_stack);
+                }
+                chest.insert(idx, arr);
+            }
+            1 if slots.len() == 3 => {
+                let mut arr: Box<[Option<ItemStack>; 3]> = Box::new([None; 3]);
+                for (dst, w) in arr.iter_mut().zip(slots) {
+                    *dst = w.and_then(crate::item::WireItemStack::to_stack);
+                }
+                furnace.insert(idx, arr);
+            }
+            _ => {}
+        }
+    }
+    (chest, furnace)
+}
+
+/// โหลด facing + container จากไฟล์ .aux.bin — ไม่มีไฟล์/decode ไม่ผ่าน = ว่างเปล่า
+/// (ทั้งเซฟเก่าก่อนมีฟีเจอร์นี้ และ chunk ที่ไม่เคยมี Furnace/Chest)
+pub fn load_chunk_aux(chunk_pos: IVec2) -> (HashMap<usize, u8>, HashMap<usize, Box<[Option<ItemStack>; 27]>>, HashMap<usize, Box<[Option<ItemStack>; 3]>>) {
+    let empty = || (HashMap::new(), HashMap::new(), HashMap::new());
+    let Ok(bytes) = std::fs::read(chunk_aux_path(chunk_pos)) else { return empty() };
+    let Some(rest) = bytes.strip_prefix(b"AUX1") else { return empty() };
+    let Ok(aux) = bincode::deserialize::<ChunkAux>(rest) else { return empty() };
+
+    let facings = aux.facings.into_iter().map(|(i, f)| (i as usize, f)).collect();
+    let chest = aux.chest.into_iter().map(|(i, wire)| {
+        let mut slots: Box<[Option<ItemStack>; 27]> = Box::new([None; 27]);
+        for (s, w) in slots.iter_mut().zip(wire.into_iter()) {
+            *s = w.and_then(crate::item::WireItemStack::to_stack);
+        }
+        (i as usize, slots)
+    }).collect();
+    let furnace = aux.furnace.into_iter().map(|(i, wire)| {
+        let mut slots: Box<[Option<ItemStack>; 3]> = Box::new([None; 3]);
+        for (s, w) in slots.iter_mut().zip(wire.into_iter()) {
+            *s = w.and_then(crate::item::WireItemStack::to_stack);
+        }
+        (i as usize, slots)
+    }).collect();
+    (facings, chest, furnace)
+}
+
 // --------------------------------------------------------
 // Async Chunk Generation
 // --------------------------------------------------------
@@ -1757,6 +2133,10 @@ pub struct ChunkBlockData {
     pub blocks: Arc<ChunkBlocks>,
     /// sub-voxel data ที่มากับ chunk (ตอนนี้ใช้เฉพาะ chunk ที่รับจาก network host)
     pub chiseled: HashMap<usize, Box<[u8; 4096]>>,
+    /// facing ของ Furnace/Chest ต่อตำแหน่ง (จาก disk save หรือ network host)
+    pub facings: HashMap<usize, u8>,
+    pub chest_slots: HashMap<usize, Box<[Option<ItemStack>; 27]>>,
+    pub furnace_slots: HashMap<usize, Box<[Option<ItemStack>; 3]>>,
     pub version: u32,
 }
 
@@ -1806,14 +2186,20 @@ pub fn spawn_block_generation_task(
         // ถ้ามีไฟล์เซฟ (ผู้เล่นเคยแก้ chunk นี้) ใช้ของเซฟแทนการ generate
         // — ยกเว้นตอนเป็น network client: save บนเครื่องเป็นโลก single player
         //   ของผู้เล่นเอง ห้ามเอามาปนกับโลกของ host
-        let blocks = use_disk_save
-            .then(|| load_chunk(chunk_pos))
-            .flatten()
-            .unwrap_or_else(|| generate_chunk_blocks(chunk_pos, noise, source));
+        let from_disk = use_disk_save.then(|| load_chunk(chunk_pos)).flatten();
+        let (facings, chest_slots, furnace_slots) = if use_disk_save && from_disk.is_some() {
+            load_chunk_aux(chunk_pos)
+        } else {
+            (HashMap::new(), HashMap::new(), HashMap::new())
+        };
+        let blocks = from_disk.unwrap_or_else(|| generate_chunk_blocks(chunk_pos, noise, source));
         let _ = sender.send(ChunkBlockData {
             chunk_pos,
             blocks: Arc::new(blocks),
             chiseled: HashMap::new(),
+            facings,
+            chest_slots,
+            furnace_slots,
             version,
         });
     }).detach();
@@ -1823,11 +2209,12 @@ pub fn spawn_mesh_generation_task(
     chunk_pos: IVec2,
     blocks: Arc<ChunkBlocks>,
     neighbors: [Arc<ChunkBlocks>; 8],
+    facings: HashMap<usize, u8>,
     version: u32,
     sender: Sender<ChunkMeshData>,
 ) {
     AsyncComputeTaskPool::get().spawn(async move {
-        let set = create_mesh_from_blocks(chunk_pos, &blocks, &neighbors, None);
+        let set = create_mesh_from_blocks(chunk_pos, &blocks, &neighbors, None, Some(&facings));
         let _ = sender.send(ChunkMeshData { chunk_pos, set, version });
     }).detach();
 }
@@ -2161,7 +2548,18 @@ pub fn world_reset_system(
         return;
     }
     request.0 = false;
+    despawn_world(&mut commands, &mut world, &mut generator, &mut pools, &mut active_fluids);
+}
 
+/// ล้างโลกทั้งใบ: mesh entity ทุกชั้น + block data + งาน generate ที่ค้าง
+/// (ใช้ร่วมกันระหว่าง regenerate กลางเกม กับตอนออกจากโลกกลับเมนู)
+fn despawn_world(
+    commands: &mut Commands,
+    world: &mut VoxelWorld,
+    generator: &mut ChunkGenerator,
+    pools: &mut ActivePools,
+    active_fluids: &mut ActiveFluids,
+) {
     // โลกกำลังจะหายทั้งใบ — สระ/น้ำที่ตื่นอยู่อ้างอิงบล็อกเก่า ทิ้งให้หมด
     pools.0.clear();
     active_fluids.0.clear();
@@ -2193,6 +2591,11 @@ pub fn world_reset_system(
             commands.entity(entity).despawn();
         }
     }
+    for (_, entities) in world.campfire_models.drain() {
+        for entity in entities {
+            commands.entity(entity).despawn();
+        }
+    }
     world.chunks.clear();
     world.total_vertices = 0;
     world.total_indices = 0;
@@ -2201,6 +2604,46 @@ pub fn world_reset_system(
     generator.generating_meshes.clear();
     // ทำให้ผลจาก task ที่ยังค้างอยู่ใน pool กลายเป็นของเก่าและถูกทิ้ง
     generator.version += 1;
+}
+
+/// ออกจากโลกกลับเมนูหลัก: เซฟ chunk ที่ค้าง แล้วล้างทุกอย่างที่มองเห็นได้
+/// (ไม่งั้นโลกเดิมค้างเป็นฉากหลังเมนู และยังกิน frame ต่อไป)
+#[allow(clippy::too_many_arguments)]
+pub fn unload_world_on_exit(
+    mut commands: Commands,
+    mut world: ResMut<VoxelWorld>,
+    mut generator: ResMut<ChunkGenerator>,
+    mut pools: ResMut<ActivePools>,
+    mut active_fluids: ResMut<ActiveFluids>,
+    mut active_tnt: ResMut<ActiveTnt>,
+    mut nuke_jobs: ResMut<NukeJobs>,
+    mut regenerate: ResMut<crate::RegenerateWorld>,
+    dropped: Query<Entity, With<crate::item::DroppedItem>>,
+) {
+    // การขุด/วางเซฟทันทีอยู่แล้ว — ที่เหลือคือผลจาก fluid sim/ระเบิดที่ยังไหลอยู่
+    let mut saved = 0;
+    for (pos, chunk) in world.chunks.iter_mut() {
+        if chunk.dirty {
+            save_chunk_full(*pos, chunk);
+            chunk.dirty = false;
+            saved += 1;
+        }
+    }
+    if saved > 0 {
+        info!("saved {saved} dirty chunks on world exit");
+    }
+
+    despawn_world(&mut commands, &mut world, &mut generator, &mut pools, &mut active_fluids);
+
+    // ระเบิดที่ยังนับถอยหลัง/nuke ที่คำนวณค้างอยู่ อ้างถึงโลกที่เพิ่งหายไป
+    active_tnt.0.clear();
+    *nuke_jobs = NukeJobs::default();
+    for entity in dropped.iter() {
+        commands.entity(entity).despawn();
+    }
+
+    // โลกถูกล้างแล้ว — กันไม่ให้ regenerate ที่ค้างจากรอบก่อนไปทำงานตอนเข้าโลกหน้า
+    regenerate.0 = false;
 }
 
 /// เพื่อนบ้าน 8 ทิศ ตามลำดับที่ create_mesh_from_blocks ต้องการ
@@ -2302,6 +2745,9 @@ pub fn world_generation_system(
                     chunk_pos,
                     blocks: Arc::new(ChunkBlocks::from_dense_bytes(&received.blocks)),
                     chiseled: received.chiseled.clone(),
+                    facings: received.facings.clone(),
+                    chest_slots: received.chest_slots.clone(),
+                    furnace_slots: received.furnace_slots.clone(),
                     version: generator.version,
                 });
             } else {
@@ -2328,9 +2774,10 @@ pub fn world_generation_system(
 
                 let blocks = world.chunks.get(&chunk_pos).unwrap().blocks.clone();
                 let neighbors = neighbors_pos.map(|p| world.chunks.get(&p).unwrap().blocks.clone());
+                let facings = world.chunks.get(&chunk_pos).unwrap().facings.clone();
 
                 let sender = generator.sender_meshes.lock().unwrap().clone();
-                spawn_mesh_generation_task(chunk_pos, blocks, neighbors, generator.version, sender);
+                spawn_mesh_generation_task(chunk_pos, blocks, neighbors, facings, generator.version, sender);
                 mesh_budget -= 1;
             }
         }
@@ -2516,11 +2963,64 @@ pub fn refresh_chunk_lamp_lights(
                 base_z + z as f32 + 0.5,
             ),
         )).id();
+        // Campfire ต้องได้ particle ไฟ ไม่ใช่ sparkle ทั่วไปของ lamp สี — แท็กไว้ให้
+        // attach_campfire_flames จับแทน attach_lamp_sparkles (ดู particles.rs)
+        if block == BlockType::Campfire {
+            commands.entity(entity).insert(crate::particles::CampfireFlameSource);
+        }
         lights.push(entity);
     });
     if !lights.is_empty() {
         world.lamp_lights.insert(chunk_pos, lights);
     }
+}
+
+/// glTF model ของ Campfire ต่อตำแหน่ง — เหมือน refresh_chunk_lamp_lights เป๊ะ (despawn ของเก่า
+/// ทั้งชุดแล้วสแกน+spawn ใหม่) ต่างกันที่ spawn WorldAssetRoot (glTF scene) แทน PointLight
+pub fn refresh_chunk_campfire_models(
+    commands: &mut Commands,
+    world: &mut VoxelWorld,
+    chunk_pos: IVec2,
+    assets: &CampfireAssets,
+) {
+    if let Some(old) = world.campfire_models.remove(&chunk_pos) {
+        for entity in old {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    let Some(chunk) = world.chunks.get(&chunk_pos) else { return };
+
+    let base_x = (chunk_pos.x * CHUNK_WIDTH as i32) as f32;
+    let base_z = (chunk_pos.y * CHUNK_WIDTH as i32) as f32;
+
+    let mut models = Vec::new();
+    chunk.blocks.for_each_matching(|b| b == BlockType::Campfire, |x, y, z, _block| {
+        let entity = commands.spawn((
+            WorldAssetRoot(assets.scene.clone()),
+            Transform::from_xyz(
+                base_x + x as f32 + 0.5,
+                y as f32,
+                base_z + z as f32 + 0.5,
+            ),
+        )).id();
+        models.push(entity);
+    });
+    if !models.is_empty() {
+        world.campfire_models.insert(chunk_pos, models);
+    }
+}
+
+/// scene ของ Campfire แคชไว้ครั้งเดียว (กัน asset_server.load(path) ซ้ำทุกครั้งที่ chunk refresh)
+#[derive(Resource)]
+pub struct CampfireAssets {
+    pub scene: Handle<WorldAsset>,
+}
+
+pub fn setup_campfire_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(CampfireAssets {
+        scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("model/campfire.gltf")),
+    });
 }
 
 pub fn process_generated_chunks_system(
@@ -2537,6 +3037,7 @@ pub fn process_generated_chunks_system(
     mut client_sync: Option<ResMut<crate::network::ClientSync>>,
     mut active_fluids: ResMut<ActiveFluids>,
     mut active_tnt: ResMut<ActiveTnt>,
+    campfire_assets: Res<CampfireAssets>,
 ) {
     // Process Blocks
     let mut received_blocks = Vec::new();
@@ -2544,6 +3045,7 @@ pub fn process_generated_chunks_system(
         let receiver = generator.receiver_blocks.lock().unwrap();
         while let Ok(block_data) = receiver.try_recv() {
             received_blocks.push(block_data);
+            if received_blocks.len() >= 4 { break; }
         }
     }
 
@@ -2575,12 +3077,16 @@ pub fn process_generated_chunks_system(
         world.chunks.insert(chunk_pos, ChunkData {
             blocks: block_data.blocks,
             chiseled_blocks: block_data.chiseled,
+            facings: block_data.facings,
+            chest_slots: block_data.chest_slots,
+            furnace_slots: block_data.furnace_slots,
             num_vertices: 0,
             num_indices: 0,
             water_y_min,
             water_y_max,
             num_water_vertices: 0,
             num_water_indices: 0,
+            dirty: false,
         });
         generator.generating_blocks.remove(&chunk_pos);
 
@@ -2606,6 +3112,7 @@ pub fn process_generated_chunks_system(
         let receiver = generator.receiver_meshes.lock().unwrap();
         while let Ok(mesh_data) = receiver.try_recv() {
             received_meshes.push(mesh_data);
+            if received_meshes.len() >= 4 { break; }
         }
     }
 
@@ -2676,6 +3183,7 @@ pub fn process_generated_chunks_system(
         update_glow_entities(&mut commands, &mut world, &mut meshes, &lamp_materials, chunk_pos, glow, transform);
         update_textured_entities(&mut commands, &mut world, &mut meshes, &block_materials, chunk_pos, textured, transform);
         refresh_chunk_lamp_lights(&mut commands, &mut world, chunk_pos);
+        refresh_chunk_campfire_models(&mut commands, &mut world, chunk_pos, &campfire_assets);
 
         generator.generating_meshes.remove(&chunk_pos);
     }
@@ -2748,6 +3256,11 @@ pub fn chunk_unloading_system(
                 commands.entity(entity).despawn();
             }
         }
+        if let Some(entities) = world.campfire_models.remove(&pos) {
+            for entity in entities {
+                commands.entity(entity).despawn();
+            }
+        }
         if let Some(chunk_data) = world.chunks.remove(&pos) {
             world.total_vertices -= chunk_data.num_vertices;
             world.total_indices -= chunk_data.num_indices;
@@ -2759,6 +3272,9 @@ pub fn chunk_unloading_system(
                     cs.full_chunks.insert(pos, crate::network::ReceivedChunk {
                         blocks: chunk_data.blocks.iter_all().map(|b| b as u8).collect(),
                         chiseled: chunk_data.chiseled_blocks.clone(),
+                        facings: chunk_data.facings.clone(),
+                        chest_slots: chunk_data.chest_slots.clone(),
+                        furnace_slots: chunk_data.furnace_slots.clone(),
                     });
                 }
             }
@@ -2781,6 +3297,91 @@ pub struct TargetHit {
 /// ผล raycast ของเฟรมนี้ — ให้ระบบอื่น (UI, interaction) อ่านต่อ
 #[derive(Resource, Default)]
 pub struct TargetedBlock(pub Option<TargetHit>);
+
+// --------------------------------------------------------
+// ระบบทุบบล็อก (Survival): กดค้างสะสม progress + รอยแตก 10 stage
+// texture รอยแตกผู้ใช้วาดเองที่ assets/textures/breakblock/break1..10.png
+// --------------------------------------------------------
+
+/// บล็อกที่กำลังทุบอยู่ + progress 0..1 (Survival เท่านั้น — Creative แตกทันที)
+#[derive(Resource, Default)]
+pub struct BreakingProgress {
+    pub target: Option<(IVec3, f32)>,
+    /// นับถอยหลังส่ง Action::Mine ซ้ำระหว่างกดค้าง ให้ remote เห็นแขนแกว่งต่อเนื่อง
+    pub action_cooldown: f32,
+}
+
+/// entity กล่องรอยแตก (ใบเดียว ครอบบล็อกที่กำลังทุบ) + material 10 stage
+#[derive(Resource)]
+pub struct BreakOverlay {
+    pub entity: Entity,
+    pub materials: Vec<Handle<StandardMaterial>>,
+}
+
+pub fn setup_break_overlay(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
+) {
+    let mats: Vec<Handle<StandardMaterial>> = (1..=10)
+        .map(|i| {
+            materials.add(StandardMaterial {
+                base_color_texture: Some(
+                    asset_server.load(format!("textures/breakblock/break{i}.png")),
+                ),
+                // PNG พื้นโปร่งใส — เห็นเป็นรอยแตกวาดทับ texture บล็อกเดิม
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                ..Default::default()
+            })
+        })
+        .collect();
+    // ใหญ่กว่าบล็อกจริงนิดเดียว กัน z-fight กับหน้าบล็อก
+    let entity = commands
+        .spawn((
+            Mesh3d(meshes.add(Cuboid::new(1.002, 1.002, 1.002))),
+            MeshMaterial3d(mats[0].clone()),
+            Transform::default(),
+            Visibility::Hidden,
+            NotShadowCaster,
+        ))
+        .id();
+    commands.insert_resource(BreakOverlay { entity, materials: mats });
+}
+
+/// วาง/ซ่อนกล่องรอยแตกตาม BreakingProgress + สลับ stage ตาม progress
+pub fn update_break_overlay(
+    breaking: Res<BreakingProgress>,
+    overlay: Res<BreakOverlay>,
+    mut query: Query<(&mut Transform, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>)>,
+) {
+    let Ok((mut tf, mut vis, mut mat)) = query.get_mut(overlay.entity) else { return };
+    match breaking.target {
+        Some((pos, progress)) => {
+            tf.translation = pos.as_vec3() + Vec3::splat(0.5);
+            let stage = ((progress * 10.0) as usize).min(9);
+            if mat.0 != overlay.materials[stage] {
+                mat.0 = overlay.materials[stage].clone();
+            }
+            *vis = Visibility::Visible;
+        }
+        None => *vis = Visibility::Hidden,
+    }
+}
+
+/// ออกจากโลก — ล้าง progress ค้างและซ่อนกล่องรอยแตกทันที
+/// (update_break_overlay รันเฉพาะ InGame — ปล่อยไว้กล่องค้างโชว์หลังเมนู)
+pub fn clear_breaking_on_exit(
+    mut breaking: ResMut<BreakingProgress>,
+    overlay: Res<BreakOverlay>,
+    mut vis_query: Query<&mut Visibility>,
+) {
+    breaking.target = None;
+    if let Ok(mut vis) = vis_query.get_mut(overlay.entity) {
+        *vis = Visibility::Hidden;
+    }
+}
 
 /// บล็อกที่เลือกไว้สำหรับวาง — sync มาจากช่อง hotbar ที่เลือกอยู่
 /// (ยังเป็น source of truth ของโค้ดวางบล็อก/network — Air = ช่องว่าง วางไม่ได้)
@@ -2806,10 +3407,23 @@ pub struct ItemStack {
     pub count: Option<u32>,
 }
 
+/// กว้างของกริด = จำนวนช่อง hotbar (ปรับแล้วต้อง rebuild — ไม่ใช่ค่า runtime)
+pub const INV_COLS: usize = 9;
+/// จำนวนแถวของช่องเก็บของ (ไม่นับแถว hotbar)
+pub const INV_ROWS: usize = 3;
+pub const HOTBAR_SLOTS: usize = INV_COLS;
+pub const INV_SLOTS: usize = INV_COLS * INV_ROWS;
+pub const TOTAL_SLOTS: usize = HOTBAR_SLOTS + INV_SLOTS;
+
+/// ที่เก็บของผู้เล่นทั้งหมด — ชื่อยังเป็น Hotbar เพราะเป็นทั้ง state ของแถบล่างจอด้วย
+///
+/// layout ของ `slots`: **0..HOTBAR_SLOTS = แถบล่างจอ** (เรียงซ้าย→ขวา),
+/// **HOTBAR_SLOTS..TOTAL_SLOTS = ช่องเก็บของ** (เรียงซ้าย→ขวา บน→ล่าง)
+/// การเรียง hotbar ไว้ก่อนทำให้ระบบที่วนทุกช่อง (เก็บของ) เติมแถบล่างจออัตโนมัติก่อน
 #[derive(Resource)]
 pub struct Hotbar {
-    pub slots: [Option<ItemStack>; 9],
-    /// index ช่องที่เลือกอยู่ (0..9)
+    pub slots: [Option<ItemStack>; TOTAL_SLOTS],
+    /// index ช่องที่เลือกอยู่ (0..HOTBAR_SLOTS)
     pub selected: usize,
 }
 
@@ -2834,7 +3448,7 @@ impl Hotbar {
     /// วางบล็อกไม่ลด count (build อิสระ) แต่ทิ้ง Q / เก็บ ปรับจำนวนได้จนหมด/เต็ม
     pub fn creative() -> Self {
         use crate::item::{Item, ToolType};
-        const DEFAULTS: [Item; 9] = [
+        const DEFAULTS: [Item; HOTBAR_SLOTS] = [
             Item::Tool(ToolType::Chisel),
             Item::Tool(ToolType::CopperWire),
             Item::Block(BlockType::Dirt),
@@ -2845,15 +3459,17 @@ impl Hotbar {
             Item::Block(BlockType::SmartLamp),
             Item::Block(BlockType::SwitchOff),
         ];
-        Self {
-            slots: DEFAULTS.map(|item| Some(ItemStack { item, count: Some(max_stack(item)) })),
-            selected: 0,
+        // ช่องเก็บของเริ่มว่าง — Creative หยิบเพิ่มจาก palette ในหน้าต่าง E ได้ตลอด
+        let mut slots = [None; TOTAL_SLOTS];
+        for (slot, item) in slots.iter_mut().zip(DEFAULTS) {
+            *slot = Some(ItemStack { item, count: Some(max_stack(item)) });
         }
+        Self { slots, selected: 0 }
     }
 
     /// ช่องว่างทั้งหมด — โหมด Survival (เก็บของเอง)
     pub fn survival_empty() -> Self {
-        Self { slots: [None; 9], selected: 0 }
+        Self { slots: [None; TOTAL_SLOTS], selected: 0 }
     }
 
     pub fn for_mode(mode: crate::GameMode) -> Self {
@@ -2864,29 +3480,222 @@ impl Hotbar {
     }
 }
 
-/// หน้าต่างเลือกบล็อก (กด E) เปิดอยู่ไหม — ตอนเปิด block_interaction หยุดรับคลิก
+/// หน้าต่างช่องเก็บของ (กด E) เปิดอยู่ไหม — ตอนเปิด block_interaction หยุดรับคลิก
+/// และ ESC จะเป็นการปิดหน้าต่างแทนที่จะเด้ง pause menu
 #[derive(Resource, Default)]
-pub struct BlockPickerOpen(pub bool);
+pub struct InventoryOpen(pub bool);
+
+/// Chest/Furnace ที่เปิดค้างอยู่ตอนนี้ (คลิกขวามือเปล่าใส่บล็อก) — เปิดพร้อม
+/// InventoryOpen เสมอ (ใช้ plumbing เดิมของหน้าต่างช่องเก็บของทั้งหมด: early-return ของ
+/// block_interaction_system, ESC ปิดผ่าน pause_menu_system, ล็อค/ปลดล็อคเมาส์)
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct OpenContainerState {
+    pub pos: IVec3,
+    pub kind: BlockType,
+}
+
+#[derive(Resource, Default)]
+pub struct OpenContainer(pub Option<OpenContainerState>);
 
 /// ไอเทมทั้งหมดที่เลือกวางได้ (รายการในหน้าต่างกด E)
-pub const PLACEABLE_ITEMS: [crate::item::Item; 20] = [
+pub const PLACEABLE_ITEMS: [crate::item::Item; 26] = [
     crate::item::Item::Tool(crate::item::ToolType::Chisel),
     crate::item::Item::Tool(crate::item::ToolType::CopperWire),
-    crate::item::Item::Block(BlockType::Dirt), crate::item::Item::Block(BlockType::Grass), 
+    crate::item::Item::Tool(crate::item::ToolType::Pickaxe),
+    crate::item::Item::Tool(crate::item::ToolType::Axe),
+    crate::item::Item::Tool(crate::item::ToolType::Shovel),
+    crate::item::Item::Block(BlockType::Dirt), crate::item::Item::Block(BlockType::Grass),
     crate::item::Item::Block(BlockType::Stone), crate::item::Item::Block(BlockType::Wood),
-    crate::item::Item::Block(BlockType::Leaves), crate::item::Item::Block(BlockType::Sand), 
+    crate::item::Item::Block(BlockType::Leaves), crate::item::Item::Block(BlockType::Sand),
     crate::item::Item::Block(BlockType::Water8), crate::item::Item::Block(BlockType::Glowstone),
-    crate::item::Item::Block(BlockType::LampRed), crate::item::Item::Block(BlockType::LampGreen), 
+    crate::item::Item::Block(BlockType::LampRed), crate::item::Item::Block(BlockType::LampGreen),
     crate::item::Item::Block(BlockType::LampBlue), crate::item::Item::Block(BlockType::Glass),
-    crate::item::Item::Block(BlockType::TallGrass), crate::item::Item::Block(BlockType::Tnt), 
+    crate::item::Item::Block(BlockType::TallGrass), crate::item::Item::Block(BlockType::Tnt),
     crate::item::Item::Block(BlockType::IronBlock), crate::item::Item::Block(BlockType::Nuke),
     crate::item::Item::Block(BlockType::SwitchOff), crate::item::Item::Block(BlockType::SmartLamp),
+    crate::item::Item::Block(BlockType::Furnace), crate::item::Item::Block(BlockType::Chest),
+    crate::item::Item::Block(BlockType::Campfire),
 ];
 
 /// texture ที่ใช้เป็น icon บนช่อง hotbar — เอาหน้าข้างก่อน (grass เห็นเป็น
 /// บล็อกหญ้าชัดกว่าหน้าบน) ไม่มีค่อย fallback หน้าบน / สีพื้นใน ui.rs
+/// Furnace/Chest: ใช้ variant หน้า (facing_variant ที่ face_id คงที่=2) ให้เห็นหน้าเด่นแทนด้านข้างเฉยๆ
 pub fn hotbar_icon_texture(block: BlockType) -> Option<&'static str> {
-    face_texture(block, 2, 0).or_else(|| face_texture(block, 0, 0))
+    match block {
+        BlockType::Furnace | BlockType::Chest => {
+            face_texture(block, 2, facing_variant(block, 2, 2)).or_else(|| face_texture(block, 0, 0))
+        }
+        _ => face_texture(block, 2, 0).or_else(|| face_texture(block, 0, 0)),
+    }
+}
+
+/// สร้างโมเดลของบล็อก (ใช้ทั้งของที่ตกพื้นและฉากลับ render icon) — คิวบ์เล็ก 6 หน้าตรงตาม
+/// texture จริงของบล็อกนั้น (ไม่ใช่ texture เดียวทาทั้งก้อน) ยกเว้น Campfire ที่ใช้ glTF scene จริง
+/// คืน Entity หลัก (parent) — ผู้เรียกใส่ component เพิ่มเอง (DroppedItem ฯลฯ)
+/// `layers`: แปะให้ parent + child ทุกตัวตรงๆ (ไม่พึ่ง inherit) กันฉากลับ render icon ปนกับโลกจริง
+pub fn spawn_block_model(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    block_mats: &BlockMaterials,
+    campfire_assets: &CampfireAssets,
+    block: BlockType,
+    pos: Vec3,
+    size: f32,
+    layers: bevy::camera::visibility::RenderLayers,
+) -> Entity {
+    if block == BlockType::Campfire {
+        return commands.spawn((
+            WorldAssetRoot(campfire_assets.scene.clone()),
+            Transform::from_translation(pos).with_scale(Vec3::splat(size)),
+            layers,
+        )).id();
+    }
+
+    const FACE_OFFSETS_F: [Vec3; 6] = [
+        Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, -1.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, -1.0),
+    ];
+    let rotations = [
+        Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+        Quat::IDENTITY,
+        Quat::from_rotation_y(std::f32::consts::PI),
+    ];
+
+    let parent = commands.spawn((Transform::from_translation(pos), Visibility::default(), layers.clone())).id();
+    let half = size / 2.0;
+    let quad = meshes.add(Rectangle::new(size, size));
+    for face_id in 0..6usize {
+        let variant = if matches!(block, BlockType::Furnace | BlockType::Chest) {
+            facing_variant(block, face_id, 2)
+        } else {
+            0
+        };
+        let material = face_texture(block, face_id, variant)
+            .and_then(|path| block_mats.0.get(path).cloned())
+            .unwrap_or_else(|| {
+                let c = block_color(block);
+                materials.add(StandardMaterial {
+                    base_color: Color::srgba(c[0], c[1], c[2], c[3]),
+                    unlit: true,
+                    ..default()
+                })
+            });
+        let child = commands.spawn((
+            Mesh3d(quad.clone()),
+            MeshMaterial3d(material),
+            Transform {
+                translation: FACE_OFFSETS_F[face_id] * half,
+                rotation: rotations[face_id],
+                ..default()
+            },
+            layers.clone(),
+        )).id();
+        commands.entity(parent).add_child(child);
+    }
+    parent
+}
+
+/// icon แต่ละบล็อกที่ render เป็นภาพ 3 มิติจริงไว้แล้ว (ต่อ BlockType) — ตั้งครั้งเดียวตอนเกมเริ่ม
+/// ไม่มี entry ของ Campfire ตั้งใจ (glTF scene ยังไม่ยืนยันว่า RenderLayers ทะลุเข้าไปในตัว scene
+/// ลูกๆ ได้จริงใน Bevy 0.19 — Campfire เลยยังคงใช้ fallback สีพื้นเดิมไปก่อน กันเสี่ยง)
+#[derive(Resource, Default)]
+pub struct ItemIconCache(pub HashMap<BlockType, Handle<Image>>);
+
+/// entity ของฉากลับ render icon ที่รอ despawn (รอ 2-3 เฟรมให้กล้อง render จริงก่อนถึงจะทิ้งได้ —
+/// spawn แล้ว despawn เฟรมเดียวกันจะโดน command buffer ตัดจบก่อนถึง render เลย ไม่ทันได้ render)
+#[derive(Resource, Default)]
+pub struct IconBakeState {
+    cleanup: Vec<Entity>,
+    frames_left: u32,
+}
+
+/// สร้างฉากลับ + กล้องเรนเดอร์ icon 3 มิติต่อบล็อกใน PLACEABLE_ITEMS (ครั้งเดียว) — ตั้ง
+/// ImageIconCache ให้พร้อมใช้ทันที (ตัวรูปจะโผล่เองหลังกล้องเรนเดอร์จริงไม่กี่เฟรม ไม่ต้องรอ)
+pub fn start_icon_bake(
+    mut done: Local<bool>,
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut icons: ResMut<ItemIconCache>,
+    mut bake_state: ResMut<IconBakeState>,
+    block_mats: Res<BlockMaterials>,
+    campfire_assets: Res<CampfireAssets>,
+) {
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+
+    if *done {
+        return;
+    }
+    *done = true;
+
+    let mut seen: std::collections::HashSet<BlockType> = std::collections::HashSet::new();
+    let mut layer: usize = 1; // layer 0 = ฉากเกมจริง เว้นไว้ไม่ใช้กับ icon
+    for item in PLACEABLE_ITEMS {
+        let crate::item::Item::Block(block) = item else { continue };
+        if block == BlockType::Campfire || !seen.insert(block) {
+            continue;
+        }
+
+        let mut image = Image::new_fill(
+            Extent3d { width: 128, height: 128, depth_or_array_layers: 1 },
+            TextureDimension::D2,
+            &[0, 0, 0, 0],
+            TextureFormat::Rgba8UnormSrgb,
+            bevy::asset::RenderAssetUsages::default(),
+        );
+        image.texture_descriptor.usage =
+            TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::RENDER_ATTACHMENT;
+        let image_handle = images.add(image);
+        icons.0.insert(block, image_handle.clone());
+
+        let render_layer = bevy::camera::visibility::RenderLayers::layer(layer);
+        layer += 1;
+
+        let model = spawn_block_model(
+            &mut commands, &mut meshes, &mut materials, &block_mats, &campfire_assets,
+            block, Vec3::ZERO, 1.0, render_layer.clone(),
+        );
+        bake_state.cleanup.push(model);
+
+        let light = commands.spawn((
+            PointLight { intensity: 200_000.0, range: 10.0, shadow_maps_enabled: false, ..default() },
+            Transform::from_xyz(1.5, 2.0, 1.5),
+            render_layer.clone(),
+        )).id();
+        bake_state.cleanup.push(light);
+
+        let camera = commands.spawn((
+            Camera3d::default(),
+            Camera {
+                clear_color: ClearColorConfig::Custom(Color::NONE),
+                ..default()
+            },
+            bevy::camera::RenderTarget::from(image_handle),
+            Transform::from_xyz(1.4, 1.1, 1.4).looking_at(Vec3::ZERO, Vec3::Y),
+            render_layer,
+        )).id();
+        bake_state.cleanup.push(camera);
+    }
+    bake_state.frames_left = 5;
+}
+
+/// despawn ฉากลับ/กล้อง render icon ทิ้งหลังรอครบเฟรม (icon ไม่เปลี่ยนตลอดเกม render ครั้งเดียวพอ)
+pub fn finish_icon_bake(mut commands: Commands, mut bake_state: ResMut<IconBakeState>) {
+    if bake_state.frames_left == 0 {
+        return;
+    }
+    bake_state.frames_left -= 1;
+    if bake_state.frames_left == 0 {
+        for e in bake_state.cleanup.drain(..) {
+            commands.entity(e).despawn();
+        }
+    }
 }
 
 /// input ของ hotbar: 1-9 เลือกช่อง, scroll เลื่อนช่อง (วนรอบ), คลิกกลาง pick block
@@ -2926,7 +3735,7 @@ pub fn hotbar_input_system(
     }
     if scroll != 0.0 && !over_egui {
         let dir = if scroll < 0.0 { 1 } else { -1 }; // scroll ลง = ช่องถัดไปทางขวา
-        hotbar.selected = (hotbar.selected as i32 + dir).rem_euclid(9) as usize;
+        hotbar.selected = (hotbar.selected as i32 + dir).rem_euclid(HOTBAR_SLOTS as i32) as usize;
     }
 
     // pick block: มีในแถบอยู่แล้วก็เลือกช่องนั้น ไม่งั้นใส่ทับช่องปัจจุบัน (แบบ Minecraft)
@@ -2935,7 +3744,8 @@ pub fn hotbar_input_system(
             // น้ำระดับไหนก็ตาม pick ได้เป็นน้ำเต็มบล็อก
             let block = if hit.block.is_water() { BlockType::Water8 } else { hit.block };
             if block != BlockType::Air {
-                if let Some(i) = hotbar.slots.iter().position(|s| s.map(|s| s.item) == Some(crate::item::Item::Block(block))) {
+                // ค้นเฉพาะแถบล่างจอ — pick ต้องได้ช่องที่ "เลือกได้" ไม่ใช่ช่องในกระเป๋า
+                if let Some(i) = hotbar.slots[..HOTBAR_SLOTS].iter().position(|s| s.map(|s| s.item) == Some(crate::item::Item::Block(block))) {
                     hotbar.selected = i;
                 } else if settings.game_mode == crate::GameMode::Creative {
                     // Creative เท่านั้น summon บล็อกใหม่เข้าช่องได้ (Survival ต้องหาเอง)
@@ -3224,7 +4034,22 @@ pub fn apply_block_edit(world: &mut VoxelWorld, edit: &crate::network::BlockEdit
     match edit {
         BlockEdit::SetBlock { pos, block } => {
             let [x, y, z] = *pos;
-            world.set_block(x, y, z, BlockType::from_u8(*block)).then(|| IVec3::new(x, y, z))
+            let new_block = BlockType::from_u8(*block);
+            // เขียนทับ Furnace/Chest ด้วยบล็อกอื่น (รวมทุบเป็น Air) — กัน facing/container ค้างใน map
+            if new_block != world.get_block(x, y, z) {
+                world.clear_container_and_facing(x, y, z);
+            }
+            world.set_block(x, y, z, new_block).then(|| IVec3::new(x, y, z))
+        }
+        BlockEdit::PlaceFacingBlock { pos, block, facing } => {
+            let [x, y, z] = *pos;
+            let bt = BlockType::from_u8(*block);
+            if world.set_block(x, y, z, bt) {
+                world.set_block_facing(x, y, z, *facing);
+                Some(IVec3::new(x, y, z))
+            } else {
+                None
+            }
         }
         BlockEdit::SetSubVoxel { pos, sub, val } => {
             let [x, y, z] = *pos;
@@ -3241,6 +4066,21 @@ pub fn apply_block_edit(world: &mut VoxelWorld, edit: &crate::network::BlockEdit
             }
             world.set_chiseled_sub_voxel(x, y, z, sub[0] as usize, sub[1] as usize, sub[2] as usize, *val);
             Some(IVec3::new(x, y, z))
+        }
+        BlockEdit::SetContainerSlot { pos, slot, item } => {
+            let [x, y, z] = *pos;
+            let stack = item.and_then(|w| w.to_stack());
+            match world.get_block(x, y, z) {
+                BlockType::Chest if (*slot as usize) < 27 => {
+                    world.set_chest_slot(x, y, z, *slot as usize, stack);
+                    Some(IVec3::new(x, y, z))
+                }
+                BlockType::Furnace if (*slot as usize) < 3 => {
+                    world.set_furnace_slot(x, y, z, *slot as usize, stack);
+                    Some(IVec3::new(x, y, z))
+                }
+                _ => None,
+            }
         }
     }
 }
@@ -3306,7 +4146,7 @@ pub fn remesh_chunks(
             old_vertices = chunk_data.num_vertices;
             old_indices = chunk_data.num_indices;
 
-            let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors, Some(&chunk_data.chiseled_blocks));
+            let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors, Some(&chunk_data.chiseled_blocks), Some(&chunk_data.facings));
             chunk_data.num_vertices = s.total_vertices();
             chunk_data.num_indices = s.total_indices();
             chunk_data.num_water_vertices = s.water.positions.len();
@@ -3433,41 +4273,68 @@ pub fn block_interaction_system(
     mut world: ResMut<VoxelWorld>,
     target: Res<TargetedBlock>,
     selected: Res<SelectedBlock>,
-    picker: Res<BlockPickerOpen>,
-    mut interaction_mode: ResMut<InteractionMode>,
-    (mouse_input, keyboard): (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>),
+    (mut inventory, mut open_container): (ResMut<InventoryOpen>, ResMut<OpenContainer>),
+    interaction_mode: Res<InteractionMode>,
+    (mouse_input, _keyboard): (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>),
     mut mp: MeshingParams,
-    camera_query: Query<&Transform, With<crate::camera::FreeCamera>>,
-    mut q_egui: Query<&mut bevy_egui::EguiContext, With<bevy::window::PrimaryWindow>>,
+    (camera_query, mut cursor_query, mut q_egui): (
+        Query<&Transform, With<crate::camera::FreeCamera>>,
+        Query<&mut bevy::window::CursorOptions, With<bevy::window::PrimaryWindow>>,
+        Query<&mut bevy_egui::EguiContext, With<bevy::window::PrimaryWindow>>,
+    ),
     mut active_fluids: ResMut<ActiveFluids>,
-    (net_server, net_client, mut net_out): (
+    (net_server, net_client, mut net_out, mut local_actions): (
         Option<Res<bevy_renet::RenetServer>>,
         Option<Res<bevy_renet::RenetClient>>,
         ResMut<crate::network::PendingNetEdits>,
+        ResMut<crate::network::PendingLocalActions>,
     ),
     mut pools: ResMut<ActivePools>,
     mut fx_writer: MessageWriter<crate::particles::BlockFx>,
     (settings, mut active_tnt, mut spawn_events, mut hotbar): (Res<crate::GameSettings>, ResMut<ActiveTnt>, MessageWriter<crate::item::SpawnDroppedItemEvent>, ResMut<Hotbar>),
+    campfire_assets: Res<CampfireAssets>,
+    (time, mut breaking): (Res<Time>, ResMut<BreakingProgress>),
 ) {
     let survival = settings.game_mode == crate::GameMode::Survival;
-    // หน้าต่างเลือกบล็อกเปิดอยู่ — คลิกเป็นของหน้าต่าง ไม่ใช่การขุด/วาง
-    if picker.0 {
+    // หน้าต่างช่องเก็บของเปิดอยู่ — คลิกเป็นของหน้าต่าง ไม่ใช่การขุด/วาง
+    if inventory.0 {
+        breaking.target = None;
         return;
     }
 
-
-
-    let Some(hit) = target.0 else { return };
+    let Some(hit) = target.0 else {
+        breaking.target = None;
+        return;
+    };
 
     let break_pressed = mouse_input.just_pressed(MouseButton::Left);
+    let break_held = mouse_input.pressed(MouseButton::Left);
     let place_pressed = mouse_input.just_pressed(MouseButton::Right);
-    if !break_pressed && !place_pressed {
+    // Survival โหมดปกติ = ทุบแบบกดค้างมี progress — Creative/Chisel/Wiring แตกทันทีเหมือนเดิม
+    let hold_mining = survival && *interaction_mode == InteractionMode::Normal && break_held;
+    if !hold_mining {
+        breaking.target = None; // ปล่อยปุ่ม/สลับโหมด — progress หาย
+    }
+    if !break_pressed && !place_pressed && !hold_mining {
         return;
+    }
+
+    if hold_mining {
+        // ท่าขุดส่งซ้ำเป็นจังหวะตลอดที่กดค้าง (ฝั่งรับตั้ง mining_timer 0.5s ต่อครั้ง
+        // — 0.3s ทำให้แขน remote แกว่งต่อเนื่องไม่สะดุด)
+        breaking.action_cooldown -= time.delta_secs();
+        if break_pressed || breaking.action_cooldown <= 0.0 {
+            local_actions.0.push(0); // 0 = Action::Mine
+            breaking.action_cooldown = 0.3;
+        }
+    } else if break_pressed {
+        local_actions.0.push(0); // 0 = Action::Mine
     }
 
     // คลิกบน egui = ใช้เมนูอยู่ ไม่ใช่เล่นเกม
     if let Some(mut egui_ctx) = q_egui.iter_mut().next() {
         if egui_ctx.get_mut().egui_wants_pointer_input() || egui_ctx.get_mut().is_pointer_over_egui() {
+            breaking.target = None;
             return;
         }
     }
@@ -3521,7 +4388,51 @@ pub fn block_interaction_system(
             if net_client.is_none() {
                 active_tnt.0.insert(hit.pos, Timer::from_seconds(fuse, TimerMode::Once));
             }
-        } else if break_pressed {
+        } else if break_pressed || hold_mining {
+            // ของที่ถืออยู่ — ใช้ทั้งคิดความเร็วขุดและกติกา drop (Survival)
+            let held_tool = match hotbar.slots[hotbar.selected].map(|s| s.item) {
+                Some(crate::item::Item::Tool(t)) => Some(t),
+                _ => None,
+            };
+            // Survival: กดค้างสะสม progress ตามเวลาขุด ครบ 1.0 ค่อยแตกจริง
+            // Creative: แตกทันทีเหมือนเดิม (done = true เลย)
+            let done = if hold_mining {
+                let total = break_time(hit.block, held_tool).max(0.05);
+                let mut progress = match breaking.target {
+                    Some((pos, p)) if pos == hit.pos => p,
+                    _ => 0.0, // เพิ่งเริ่ม/เล็งบล็อกใหม่ — เริ่มนับศูนย์
+                };
+                progress += time.delta_secs() / total;
+                if progress >= 1.0 {
+                    breaking.target = None;
+                    true
+                } else {
+                    breaking.target = Some((hit.pos, progress));
+                    false
+                }
+            } else {
+                true
+            };
+
+            if done {
+            // เก็บของใน container ไว้ก่อน apply_block_edit ล้าง (clear_container_and_facing)
+            // ดรอปเสมอทั้ง Creative/Survival — ต่างจากตัวบล็อกที่ดรอปเฉพาะ Survival เพราะ
+            // ของที่เก็บไว้เป็นของผู้เล่นจริง ไม่ใช่บล็อกที่ build อิสระได้
+            let mut container_drops: Vec<crate::item::Item> = Vec::new();
+            match hit.block {
+                BlockType::Chest => {
+                    if let Some(slots) = world.get_chest_slots(hit.pos.x, hit.pos.y, hit.pos.z) {
+                        container_drops.extend(slots.iter().filter_map(|s| s.map(|s| s.item)));
+                    }
+                }
+                BlockType::Furnace => {
+                    if let Some(slots) = world.get_furnace_slots(hit.pos.x, hit.pos.y, hit.pos.z) {
+                        container_drops.extend(slots.iter().filter_map(|s| s.map(|s| s.item)));
+                    }
+                }
+                _ => {}
+            }
+
             edit = Some(BlockEdit::SetBlock {
                 pos: hit.pos.to_array(),
                 block: BlockType::Air as u8,
@@ -3531,9 +4442,12 @@ pub fn block_interaction_system(
                 placed: BlockType::Air,
                 replaced: hit.block,
             });
-            
-            // ดรอปไอเทมออกมา (เฉพาะ Survival — Creative ขุดฟรีไม่มีของตก)
-            if survival {
+
+            // ดรอปไอเทม (เฉพาะ Survival) — บล็อกหมวดหิน/แร่ต้องถือ pickaxe ตอนแตก
+            // ถึงได้ของ (กติกา Minecraft) มือเปล่า/tool ผิดหมวด = บล็อกหายเปล่า
+            let drops_item = !block_requires_tool(hit.block)
+                || held_tool.is_some_and(|t| t.dig_class() == block_dig_class(hit.block));
+            if survival && drops_item {
                 spawn_events.write(crate::item::SpawnDroppedItemEvent {
                     item: crate::item::Item::Block(hit.block),
                     pos: hit.pos.as_vec3() + Vec3::new(0.5, 0.5, 0.5),
@@ -3543,6 +4457,18 @@ pub fn block_interaction_system(
                         (fastrand::f32() - 0.5) * 4.0,
                     ),
                 });
+            }
+            for item in container_drops {
+                spawn_events.write(crate::item::SpawnDroppedItemEvent {
+                    item,
+                    pos: hit.pos.as_vec3() + Vec3::new(0.5, 0.5, 0.5),
+                    velocity: Vec3::new(
+                        (fastrand::f32() - 0.5) * 4.0,
+                        2.0 + fastrand::f32() * 3.0,
+                        (fastrand::f32() - 0.5) * 4.0,
+                    ),
+                });
+            }
             }
         } else if place_pressed && selected.0 == BlockType::Air {
             // Interact! (กดคลิกขวาด้วยมือเปล่า)
@@ -3567,6 +4493,15 @@ pub fn block_interaction_system(
                     placed: BlockType::SwitchOff,
                     replaced: BlockType::SwitchOn,
                 });
+            } else if matches!(current, BlockType::Furnace | BlockType::Chest) {
+                // เปิดกล่อง — ไม่ใช่การแก้บล็อก ใช้ plumbing เดียวกับหน้าต่างช่องเก็บของ (กด E)
+                open_container.0 = Some(OpenContainerState { pos: hit.pos, kind: current });
+                inventory.0 = true;
+                if let Ok(mut cursor) = cursor_query.single_mut() {
+                    cursor.grab_mode = bevy::window::CursorGrabMode::None;
+                    cursor.visible = true;
+                }
+                return;
             }
         } else if place_pressed && selected.0 != BlockType::Air {
             let p = hit.pos + hit.normal;
@@ -3590,9 +4525,25 @@ pub fn block_interaction_system(
             }
 
             if !blocked {
-                edit = Some(BlockEdit::SetBlock {
-                    pos: p.to_array(),
-                    block: selected.0 as u8,
+                edit = Some(if matches!(selected.0, BlockType::Furnace | BlockType::Chest) {
+                    // หน้า "หน้า" หันหาผู้เล่นเสมอ: เทียบแกน X/Z ที่ต่างจากศูนย์กลางบล็อกมากกว่า
+                    let facing = camera_query.iter().next().map(|cam| {
+                        let center = p.as_vec3() + Vec3::splat(0.5);
+                        let d = cam.translation - center;
+                        if d.x.abs() >= d.z.abs() {
+                            if d.x >= 0.0 { 2u8 } else { 3u8 }
+                        } else if d.z >= 0.0 { 4u8 } else { 5u8 }
+                    }).unwrap_or(4);
+                    BlockEdit::PlaceFacingBlock {
+                        pos: p.to_array(),
+                        block: selected.0 as u8,
+                        facing,
+                    }
+                } else {
+                    BlockEdit::SetBlock {
+                        pos: p.to_array(),
+                        block: selected.0 as u8,
+                    }
                 });
                 fx = Some(crate::particles::BlockFx {
                     pos: p,
@@ -3650,14 +4601,15 @@ pub fn block_interaction_system(
     );
     if net_client.is_none() {
         if let Some(chunk) = world.chunks.get(&edited_chunk) {
-            save_chunk(edited_chunk, &chunk.blocks);
+            save_chunk_full(edited_chunk, chunk);
         }
     }
 
     remesh_chunks(&mut commands, &mut world, &mut mp, edit_affected_chunks(tp));
 
-    // บล็อกเปลี่ยนเฉพาะใน chunk ที่แก้ — อัปเดต PointLight เฉพาะตรงนั้น
+    // บล็อกเปลี่ยนเฉพาะใน chunk ที่แก้ — อัปเดต PointLight/โมเดล Campfire เฉพาะตรงนั้น
     refresh_chunk_lamp_lights(&mut commands, &mut world, edited_chunk);
+    refresh_chunk_campfire_models(&mut commands, &mut world, edited_chunk, &campfire_assets);
 }
 
 
@@ -3918,13 +4870,15 @@ pub fn tnt_detonation_system(
     mut mp: MeshingParams,
     mut active_fluids: ResMut<ActiveFluids>,
     mut pools: ResMut<ActivePools>,
-    (net_server, mut net_out): (
+    (net_server, mut net_out, mut net_fx): (
         Option<Res<bevy_renet::RenetServer>>,
         ResMut<crate::network::PendingNetEdits>,
+        ResMut<crate::network::PendingNetFx>,
     ),
     mut fx: MessageWriter<crate::particles::ExplosionFx>,
     mut debug: ResMut<ExplosionDebug>,
     jobs: Res<NukeJobs>,
+    campfire_assets: Res<CampfireAssets>,
 ) {
     if active_tnt.0.is_empty() {
         return;
@@ -4008,10 +4962,15 @@ pub fn tnt_detonation_system(
         // เอฟเฟกต์ลูกเดียวที่กึ่งกลางมวลของกอง — rays ไปขับ shockwave ต่อ
         let com = cluster.iter().map(|p| p.as_vec3()).sum::<Vec3>() / cluster.len() as f32
             + Vec3::splat(0.5);
+        let power = settings.tnt_power * (cluster.len() as f32).cbrt();
+        // client ไม่รันระบบนี้ (gate is_not_client) — ต้องส่งเอฟเฟกต์ให้ ไม่งั้นเห็นแค่บล็อกหาย
+        if net_server.is_some() {
+            net_fx.0.push(crate::network::ExplosionWire::new(com, &rays, power, false));
+        }
         fx.write(crate::particles::ExplosionFx {
             center: com,
             rays,
-            power: settings.tnt_power * (cluster.len() as f32).cbrt(),
+            power,
             is_nuke: false,
         });
     }
@@ -4043,12 +5002,13 @@ pub fn tnt_detonation_system(
 
     for cp in &edited_chunks {
         if let Some(chunk) = world.chunks.get(cp) {
-            save_chunk(*cp, &chunk.blocks);
+            save_chunk_full(*cp, chunk);
         }
     }
     remesh_chunks(&mut commands, &mut world, &mut mp, remesh);
     for cp in edited_chunks {
         refresh_chunk_lamp_lights(&mut commands, &mut world, cp);
+        refresh_chunk_campfire_models(&mut commands, &mut world, cp, &campfire_assets);
     }
 }
 
@@ -4163,13 +5123,15 @@ pub fn nuke_apply_system(
     mut active_fluids: ResMut<ActiveFluids>,
     mut pools: ResMut<ActivePools>,
     mut active_tnt: ResMut<ActiveTnt>,
-    (net_server, mut host_sync, mut net_out): (
+    (net_server, mut host_sync, mut net_out, mut net_fx): (
         Option<Res<bevy_renet::RenetServer>>,
         Option<ResMut<crate::network::HostSync>>,
         ResMut<crate::network::PendingNetEdits>,
+        ResMut<crate::network::PendingNetFx>,
     ),
     mut fx: MessageWriter<crate::particles::ExplosionFx>,
     mut debug: ResMut<ExplosionDebug>,
+    campfire_assets: Res<CampfireAssets>,
 ) {
     use crate::network::BlockEdit;
 
@@ -4225,6 +5187,14 @@ pub fn nuke_apply_system(
         } else {
             res.result.rays.clone()
         };
+        if net_server.is_some() {
+            net_fx.0.push(crate::network::ExplosionWire::new(
+                centerf,
+                &fx_rays,
+                res.energy,
+                true,
+            ));
+        }
         fx.write(crate::particles::ExplosionFx {
             center: centerf,
             rays: fx_rays,
@@ -4277,10 +5247,11 @@ pub fn nuke_apply_system(
             }
 
             if let Some(chunk) = world.chunks.get(&cp) {
-                save_chunk(cp, &chunk.blocks);
+                save_chunk_full(cp, chunk);
             }
             remesh_chunks(&mut commands, &mut world, &mut mp, remesh);
             refresh_chunk_lamp_lights(&mut commands, &mut world, cp);
+            refresh_chunk_campfire_models(&mut commands, &mut world, cp, &campfire_assets);
             // multiplayer: ส่ง chunk ทั้งก้อน (ราย edit เป็นแสนจะล้นท่อ reliable)
             if let (Some(server), Some(hs)) = (net_server.as_ref(), host_sync.as_mut()) {
                 crate::network::queue_chunk_to_all_clients(server, hs, cp);
@@ -5385,7 +6356,7 @@ mod tests {
         ];
 
         let chunk_pos = IVec2::new(3, -2);
-        let full = create_mesh_from_blocks(chunk_pos, &main, &neighbors, None);
+        let full = create_mesh_from_blocks(chunk_pos, &main, &neighbors, None, None);
         let (water, observed) = create_water_mesh(chunk_pos, &main, &neighbors, 0, CHUNK_HEIGHT - 1);
 
         assert!(!full.water.positions.is_empty(), "ฉากทดสอบต้องมีหน้าน้ำจริง");
