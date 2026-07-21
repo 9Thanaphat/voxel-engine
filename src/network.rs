@@ -7,11 +7,13 @@ use bevy_renet::renet::{ConnectionConfig, DefaultChannel, ServerEvent};
 use bevy_renet::{RenetClient, RenetServer, RenetServerEvent};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::voxel::{BlockType, VoxelWorld, CHUNK_VOLUME, CHUNK_WIDTH};
+use crate::voxel::{VoxelWorld, CHUNK_VOLUME, CHUNK_WIDTH};
+
 
 pub const SERVER_PORT: u16 = 5000;
 /// ต้องตรงกันทั้ง host และ client ไม่งั้น netcode ปฏิเสธการเชื่อมต่อ
-pub const PROTOCOL_ID: u64 = 0xB10C_CAFE_0002;
+/// (0003: Position/PlayerPositions เพิ่มของที่ถือ — โครง encode เปลี่ยน)
+pub const PROTOCOL_ID: u64 = 0xB10C_CAFE_0003;
 /// id ตัวแทน host ในข้อความ PlayerPositions (client จริงใช้ id ที่ไม่ใช่ 0)
 pub const HOST_PLAYER_ID: u64 = 0;
 
@@ -24,6 +26,8 @@ pub enum BlockEdit {
     SetBlock { pos: [i32; 3], block: u8 },
     /// ฝั่งรับต้อง convert_to_chiseled ก่อนถ้า block ยังไม่ใช่ Chiseled
     SetSubVoxel { pos: [i32; 3], sub: [u8; 3], val: u8 },
+    PlaceFacingBlock { pos: [i32; 3], block: u8, facing: u8 },
+    SetContainerSlot { pos: [i32; 3], slot: u8, item: Option<crate::item::WireItemStack> },
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -37,23 +41,66 @@ pub enum ServerMessage {
         terrain: crate::TerrainSource,
         spawn_pos: [f32; 3],
         time_of_day: f32,
+        game_mode: crate::GameMode,
     },
     ChunkData {
         chunk_pos: [i32; 2],
         blocks_rle: Vec<u8>,
         /// (block index ใน chunk, palette 4096 bytes)
         chiseled: Vec<(u32, Vec<u8>)>,
+        facings: Vec<(u32, u8)>,
+        containers: Vec<(u32, u8, Vec<Option<crate::item::WireItemStack>>)>,
     },
     BlockEditBatch { edits: Vec<BlockEdit> },
     PlayerJoined { client_id: u64, player_number: u32 },
     PlayerLeft { client_id: u64 },
-    PlayerPositions { players: Vec<(u64, [f32; 3], f32)> },
+    /// (id, ตำแหน่งตา, yaw, ของที่ถือเป็น wire (kind,id) — None = มือเปล่า)
+    PlayerPositions { players: Vec<(u64, [f32; 3], f32, Option<(u8, u8)>)> },
+    Chat { from: u32, text: String },
+    TimeOfDay { hours: f32 },
+    Explosion(ExplosionWire),
+    PlayerAction { client_id: u64, action: u8 },
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct WireRaySeg {
+    pub a: [f32; 3],
+    pub b: [f32; 3],
+    pub energy: f32,
+    pub dist0: f32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct ExplosionWire {
+    pub center: [f32; 3],
+    pub rays: Vec<WireRaySeg>,
+    pub power: f32,
+    pub is_nuke: bool,
+}
+
+impl ExplosionWire {
+    pub fn new(center: bevy::math::Vec3, rays: &[crate::voxel::RaySeg], power: f32, is_nuke: bool) -> Self {
+        Self {
+            center: center.to_array(),
+            rays: rays.iter().map(|r| WireRaySeg {
+                a: r.a.to_array(),
+                b: r.b.to_array(),
+                energy: r.energy,
+                dist0: r.dist0,
+            }).collect(),
+            power,
+            is_nuke,
+        }
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum ClientMessage {
     RequestEdit { edits: Vec<BlockEdit> },
-    Position { pos: [f32; 3], yaw: f32 },
+    /// held = ของที่ถือเป็น wire (kind,id) — แนบมากับตำแหน่ง 20Hz ไม่มี message แยก
+    Position { pos: [f32; 3], yaw: f32, held: Option<(u8, u8)> },
+    Chat { text: String },
+    Action { action: u8 },
 }
 
 pub fn encode<T: serde::Serialize>(msg: &T) -> Vec<u8> {
@@ -132,6 +179,12 @@ pub struct LanInfo(pub String);
 #[derive(Resource, Default)]
 pub struct PendingNetEdits(pub VecDeque<(Option<u64>, BlockEdit)>);
 
+#[derive(Resource, Default)]
+pub struct PendingLocalActions(pub Vec<u8>);
+
+#[derive(Resource, Default)]
+pub struct PendingNetFx(pub Vec<ExplosionWire>);
+
 /// edit ขาเข้าที่รอ apply + remesh
 #[derive(Resource, Default)]
 pub struct IncomingNetEdits(pub Vec<BlockEdit>);
@@ -157,6 +210,9 @@ pub struct ReceivedChunk {
     /// block array ดิบ (decode จาก RLE แล้ว, ยาว CHUNK_VOLUME)
     pub blocks: Vec<u8>,
     pub chiseled: HashMap<usize, Box<[u8; 4096]>>,
+    pub facings: HashMap<usize, u8>,
+    pub chest_slots: HashMap<usize, Box<[Option<crate::voxel::ItemStack>; 27]>>,
+    pub furnace_slots: HashMap<usize, Box<[Option<crate::voxel::ItemStack>; 3]>>,
 }
 
 /// สถานะฝั่ง client
@@ -187,6 +243,35 @@ pub struct RemotePlayer {
     pub player_number: u32,
     pub target_pos: Vec3,
     pub target_yaw: f32,
+    pub walk_phase: f32,
+    pub mining_timer: f32,
+    /// ของที่ผู้เล่นคนนี้ถืออยู่ (sync มากับ Position/PlayerPositions)
+    pub held: Option<crate::item::Item>,
+}
+
+#[derive(Resource)]
+pub struct PlayerModelAssets {
+    pub player: Handle<WorldAsset>,
+}
+
+pub fn setup_player_model_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
+    use bevy::gltf::GltfAssetLabel;
+    commands.insert_resource(PlayerModelAssets {
+        player: asset_server.load(GltfAssetLabel::Scene(0).from_asset("model/player_model.gltf")),
+    });
+}
+
+#[derive(Component, Default)]
+pub struct PlayerRig {
+    pub head: Option<Entity>,
+    pub upper_arm_left: Option<Entity>,
+    pub upper_arm_right: Option<Entity>,
+    pub upper_leg_left: Option<Entity>,
+    pub upper_leg_right: Option<Entity>,
+    /// ภาพของที่ถืออยู่ในมือขวา (spawn โดย update_remote_held_items)
+    pub held_entity: Option<Entity>,
+    /// item ที่ held_entity แสดงอยู่ — ต่างจาก RemotePlayer.held เมื่อไหร่ = สลับของ
+    pub held_item: Option<crate::item::Item>,
 }
 
 /// ป้ายชื่อ (UI text) ที่ตามหัว avatar ของ entity เป้าหมาย
@@ -247,9 +332,9 @@ fn chunk_of(pos: IVec3) -> IVec2 {
     )
 }
 
-fn edit_pos(edit: &BlockEdit) -> IVec3 {
+pub fn edit_pos(edit: &BlockEdit) -> IVec3 {
     match edit {
-        BlockEdit::SetBlock { pos, .. } | BlockEdit::SetSubVoxel { pos, .. } => IVec3::from_array(*pos),
+        BlockEdit::SetBlock { pos, .. } | BlockEdit::SetSubVoxel { pos, .. } | BlockEdit::PlaceFacingBlock { pos, .. } | BlockEdit::SetContainerSlot { pos, .. } => IVec3::from_array(*pos),
     }
 }
 
@@ -290,8 +375,10 @@ pub fn start_host(commands: &mut Commands, world: &VoxelWorld, mp_ui: &mut Multi
     };
 
     // chunk ที่ต่างจาก generation ล้วนๆ = มีไฟล์เซฟ หรือมี sub-voxel ใน memory
+    // ต้องอ่านโฟลเดอร์เซฟของโลกที่เล่นอยู่จริง (saves_dem/ หรือ saves/<ชื่อโลก>/)
+    // — เดิมอ่าน saves/ ตรงๆ host โลกอื่นเลยมองไม่เห็น chunk ที่เคยแก้บนดิสก์
     let mut dirty: HashSet<IVec2> = HashSet::new();
-    if let Ok(entries) = std::fs::read_dir(crate::voxel::project_root().join("saves")) {
+    if let Ok(entries) = std::fs::read_dir(crate::voxel::active_save_dir()) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
@@ -407,10 +494,52 @@ pub fn cleanup_remote_players(
     server: Option<Res<RenetServer>>,
     client: Option<Res<RenetClient>>,
     players: Query<Entity, With<RemotePlayer>>,
+    mut local_actions: ResMut<PendingLocalActions>,
 ) {
     if server.is_none() && client.is_none() {
         for entity in &players {
             commands.entity(entity).despawn();
+        }
+        // single player ไม่มีใคร drain คิว action (ระบบส่งรันเฉพาะตอน networked)
+        // — เคลียร์ทิ้งกันโตไม่จำกัด
+        local_actions.0.clear();
+    }
+}
+
+/// ของที่ avatar ถือในมือขวา — spawn/สลับตาม RemotePlayer.held ที่ sync มา
+pub fn update_remote_held_items(
+    mut commands: Commands,
+    mut players: Query<(&RemotePlayer, &mut PlayerRig)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
+    block_mats: Res<crate::voxel::BlockMaterials>,
+    campfire_assets: Res<crate::voxel::CampfireAssets>,
+) {
+    for (rp, mut rig) in players.iter_mut() {
+        // รอ rig พร้อมก่อน (โมเดลเพิ่งโหลด) — เฟรมถัดไปค่อยเกาะ
+        let Some(arm) = rig.upper_arm_right else { continue };
+        if rig.held_item == rp.held {
+            continue;
+        }
+        if let Some(entity) = rig.held_entity.take() {
+            commands.entity(entity).despawn();
+        }
+        rig.held_item = rp.held;
+        if let Some(item) = rp.held {
+            let size = match item {
+                crate::item::Item::Block(_) => 0.25,
+                _ => 0.6,
+            };
+            // ตำแหน่ง/มุมเดียวกับ pickaxe ที่เคย hardcode ติดแขน (จูนแล้วว่าดูดี)
+            let tf = Transform::from_xyz(0.0, -0.6, 0.4)
+                .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2));
+            let entity = crate::item::spawn_item_visual(
+                &mut commands, &mut meshes, &mut materials, &asset_server,
+                &block_mats, &campfire_assets, item, size, tf,
+            );
+            commands.entity(arm).add_child(entity);
+            rig.held_entity = Some(entity);
         }
     }
 }
@@ -429,30 +558,23 @@ fn nameplate_label(player_number: u32) -> String {
 
 fn spawn_remote_player(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    models: &Res<PlayerModelAssets>,
     client_id: u64,
     player_number: u32,
 ) {
-    // สีตาม id ให้แยกผู้เล่นออกจากกัน (host id 0 ก็ได้สีของตัวเอง)
-    let hue = (client_id.wrapping_mul(2654435761) % 360) as f32;
+    let _hue = (client_id.wrapping_mul(2654435761) % 360) as f32;
     let avatar = commands.spawn((
         RemotePlayer {
             client_id,
             player_number,
-            // ซ่อนใต้โลกจนกว่าจะได้ตำแหน่งจริงครั้งแรก
             target_pos: Vec3::new(0.0, -1000.0, 0.0),
             target_yaw: 0.0,
+            walk_phase: 0.0,
+            mining_timer: 0.0,
+            held: None,
         },
-        Mesh3d(meshes.add(Cuboid::new(
-            crate::camera::PLAYER_HALF * 2.0,
-            crate::camera::PLAYER_HEIGHT,
-            crate::camera::PLAYER_HALF * 2.0,
-        ))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::hsl(hue, 0.75, 0.55),
-            ..Default::default()
-        })),
+        PlayerRig::default(),
+        WorldAssetRoot(models.player.clone()),
         Transform::from_xyz(0.0, -1000.0, 0.0),
     )).id();
 
@@ -482,7 +604,7 @@ fn spawn_remote_player(
 /// และเก็บกวาดป้ายที่ avatar หายไปแล้ว (despawn ตอน disconnect ฯลฯ)
 pub fn nameplate_system(
     mut commands: Commands,
-    camera_query: Query<(&Camera, &GlobalTransform), With<crate::camera::FreeCamera>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<crate::camera::MainCamera>>,
     players: Query<(&Transform, &RemotePlayer)>,
     mut tags: Query<(Entity, &NameTag, &mut Text, &mut Node, &mut Visibility)>,
 ) {
@@ -552,8 +674,7 @@ pub fn on_server_event(
     host_sync: Option<ResMut<HostSync>>,
     settings: Res<crate::GameSettings>,
     camera_query: Query<&Transform, With<crate::camera::FreeCamera>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    models: Res<PlayerModelAssets>,
     remote_players: Query<(Entity, &RemotePlayer)>,
 ) {
     let (Some(mut server), Some(mut host_sync)) = (server, host_sync) else { return };
@@ -566,6 +687,8 @@ pub fn on_server_event(
             host_sync.player_numbers.insert(client_id, player_number);
             info!("client {client_id} เข้าร่วมเกมเป็น Player {player_number}");
 
+            // spawn ตรงตำแหน่ง host จริง — เดิม hardcode (0,150,0) ซึ่งในโลก DEM
+            // คือมุมแผนที่กลางทะเล ห่างจากตัว host หลายร้อยกิโลเมตร
             let spawn_pos = camera_query
                 .iter()
                 .next()
@@ -578,6 +701,7 @@ pub fn on_server_event(
                 terrain: settings.terrain_source,
                 spawn_pos: spawn_pos.to_array(),
                 time_of_day: settings.time_of_day,
+                game_mode: settings.game_mode,
             };
             server.send_message(client_id, DefaultChannel::ReliableOrdered, encode(&welcome));
 
@@ -611,7 +735,7 @@ pub fn on_server_event(
                 DefaultChannel::ReliableOrdered,
                 encode(&ServerMessage::PlayerJoined { client_id, player_number }),
             );
-            spawn_remote_player(&mut commands, &mut meshes, &mut materials, client_id, player_number);
+            spawn_remote_player(&mut commands, &models, client_id, player_number);
         }
         ServerEvent::ClientDisconnected { client_id, reason } => {
             let client_id = *client_id;
@@ -635,13 +759,20 @@ pub fn on_server_event(
 /// (chunk ที่ host ยัง unload อยู่ = ปฏิเสธ — v1 ยอมรับข้อจำกัดนี้)
 fn validate_edit(edit: &BlockEdit, world: &VoxelWorld) -> bool {
     let (pos, val_ok) = match edit {
-        BlockEdit::SetBlock { pos, block } => (*pos, BlockType::from_u8(*block) as u8 == *block),
-        BlockEdit::SetSubVoxel { pos, sub, val } => (
-            *pos,
-            sub.iter().all(|s| *s < 16) && BlockType::from_u8(*val) as u8 == *val,
-        ),
+        BlockEdit::SetBlock { pos, block } => {
+            (IVec3::from_array(*pos), *block <= 26)
+        }
+        BlockEdit::SetSubVoxel { pos, val, .. } => {
+            (IVec3::from_array(*pos), *val <= 26)
+        }
+        BlockEdit::PlaceFacingBlock { pos, block, facing } => {
+            (IVec3::from_array(*pos), *block <= 26 && *facing < 6)
+        }
+        BlockEdit::SetContainerSlot { pos, .. } => {
+            (IVec3::from_array(*pos), true)
+        }
     };
-    let p = IVec3::from_array(pos);
+    let p = IVec3::from_array(pos.to_array());
     val_ok
         && p.y >= 0
         && p.y < crate::voxel::CHUNK_HEIGHT as i32
@@ -654,31 +785,68 @@ pub fn host_receive_client_messages(
     mut pending: ResMut<PendingNetEdits>,
     world: Res<VoxelWorld>,
     mut remote_players: Query<&mut RemotePlayer>,
+    host_sync: Res<HostSync>,
+    mut chat_ui: ResMut<crate::ui::ChatState>,
 ) {
     for client_id in server.clients_id() {
         while let Some(bytes) = server.receive_message(client_id, DefaultChannel::ReliableOrdered) {
             let Some(msg) = decode::<ClientMessage>(&bytes) else { continue };
-            let ClientMessage::RequestEdit { edits } = msg else { continue };
-            if edits.len() > 16 {
-                warn!("client {client_id} ส่ง edit batch ใหญ่ผิดปกติ ({}) — ทิ้ง", edits.len());
-                continue;
-            }
-            for edit in edits {
-                if !validate_edit(&edit, &world) {
-                    continue;
+            match msg {
+                ClientMessage::RequestEdit { edits } => {
+                    if edits.len() > 16 {
+                        warn!("client {client_id} ส่ง edit batch ใหญ่ผิดปกติ ({}) — ทิ้ง", edits.len());
+                        continue;
+                    }
+                    for edit in edits {
+                        if !validate_edit(&edit, &world) {
+                            continue;
+                        }
+                        incoming.0.push(edit.clone());
+                        pending.0.push_back((Some(client_id), edit));
+                    }
                 }
-                incoming.0.push(edit.clone());
-                pending.0.push_back((Some(client_id), edit));
+                // แชทจาก client: host เป็นคนกระจายให้ทุกคนรวมคนส่งเอง (client ไม่ขึ้น
+                // จอตัวเองจนกว่าจะได้ echo กลับ — ลำดับข้อความจะได้ตรงกันทุกจอ ดู command.rs)
+                ClientMessage::Chat { text } => {
+                    let text = sanitize_chat(&text);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let from = host_sync.player_numbers.get(&client_id).copied().unwrap_or(0);
+                    server.broadcast_message(
+                        DefaultChannel::ReliableOrdered,
+                        encode(&ServerMessage::Chat { from, text: text.clone() }),
+                    );
+                    chat_ui.push_player(from, text);
+                }
+                // ท่าทาง (ขุด) จาก client: เล่นบน avatar ฝั่ง host เอง + ส่งต่อให้ client อื่น
+                ClientMessage::Action { action } => {
+                    server.broadcast_message_except(
+                        client_id,
+                        DefaultChannel::ReliableOrdered,
+                        encode(&ServerMessage::PlayerAction { client_id, action }),
+                    );
+                    if action == 0 {
+                        for mut rp in remote_players.iter_mut() {
+                            if rp.client_id == client_id {
+                                rp.mining_timer = 0.5;
+                            }
+                        }
+                    }
+                }
+                // Position มาทาง Unreliable เท่านั้น — โผล่ช่องนี้ = ผิดปกติ ทิ้ง
+                ClientMessage::Position { .. } => {}
             }
         }
         while let Some(bytes) = server.receive_message(client_id, DefaultChannel::Unreliable) {
-            let Some(ClientMessage::Position { pos, yaw }) = decode::<ClientMessage>(&bytes) else {
+            let Some(ClientMessage::Position { pos, yaw, held }) = decode::<ClientMessage>(&bytes) else {
                 continue;
             };
             for mut rp in remote_players.iter_mut() {
                 if rp.client_id == client_id {
                     rp.target_pos = Vec3::from_array(pos);
                     rp.target_yaw = yaw;
+                    rp.held = held.and_then(|(k, i)| crate::item::item_from_wire(k, i));
                 }
             }
         }
@@ -718,6 +886,8 @@ pub fn host_send_queued_chunks(
                         .iter()
                         .map(|(k, v)| (*k as u32, v.to_vec()))
                         .collect(),
+                    facings: Vec::new(),
+                    containers: Vec::new(),
                 }
             } else if let Some(bytes) = crate::voxel::load_chunk_bytes(chunk_pos) {
                 // chunk ไม่ได้โหลดบน host แต่มีไฟล์เซฟ — ส่งจาก disk
@@ -726,6 +896,8 @@ pub fn host_send_queued_chunks(
                     chunk_pos: chunk_pos.to_array(),
                     blocks_rle: rle_encode(&bytes),
                     chiseled: Vec::new(),
+                    facings: Vec::new(),
+                    containers: Vec::new(),
                 }
             } else {
                 continue; // dirty entry ที่ไม่มีข้อมูลแล้ว (เช่นไฟล์ถูกลบ)
@@ -768,16 +940,19 @@ pub fn host_broadcast_positions(
     mut server: ResMut<RenetServer>,
     camera_query: Query<(&Transform, &crate::camera::FreeCamera)>,
     remote_players: Query<&RemotePlayer>,
+    hotbar: Res<crate::voxel::Hotbar>,
 ) {
     if !timer.0.tick(time.delta()).just_finished() {
         return;
     }
     let mut players = Vec::new();
     if let Some((transform, cam)) = camera_query.iter().next() {
-        players.push((HOST_PLAYER_ID, transform.translation.to_array(), cam.yaw));
+        let held = hotbar.slots[hotbar.selected].map(|s| crate::item::item_to_wire(s.item));
+        players.push((HOST_PLAYER_ID, transform.translation.to_array(), cam.yaw, held));
     }
     for rp in &remote_players {
-        players.push((rp.client_id, rp.target_pos.to_array(), rp.target_yaw));
+        let held = rp.held.map(crate::item::item_to_wire);
+        players.push((rp.client_id, rp.target_pos.to_array(), rp.target_yaw, held));
     }
     server.broadcast_message(
         DefaultChannel::Unreliable,
@@ -801,13 +976,14 @@ pub fn client_receive_messages(
     mut chunk_remesh: ResMut<IncomingChunkRemesh>,
     mut world: ResMut<VoxelWorld>,
     mut camera_query: Query<&mut Transform, With<crate::camera::FreeCamera>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    models: Res<PlayerModelAssets>,
     mut remote_players: Query<(Entity, &mut RemotePlayer)>,
+    mut chat_ui: ResMut<crate::ui::ChatState>,
+    mut fx_writer: MessageWriter<crate::particles::ExplosionFx>,
 ) {
     while let Some(bytes) = client.receive_message(DefaultChannel::ReliableOrdered) {
         match decode::<ServerMessage>(&bytes) {
-            Some(ServerMessage::Welcome { client_id: _, player_number, noise, terrain, spawn_pos, time_of_day }) => {
+            Some(ServerMessage::Welcome { client_id: _, player_number, noise, terrain, spawn_pos, time_of_day, game_mode: _ }) => {
                 client_sync.my_number = player_number;
                 settings.noise = noise;
                 settings.terrain_source = terrain;
@@ -823,7 +999,7 @@ pub fn client_receive_messages(
                 next_state.set(crate::GameState::InGame);
                 // avatar ของ host และผู้เล่นคนอื่นจะมาถึงเป็น PlayerJoined ต่อจากนี้
             }
-            Some(ServerMessage::ChunkData { chunk_pos, blocks_rle, chiseled }) => {
+            Some(ServerMessage::ChunkData { chunk_pos, blocks_rle, chiseled, facings, containers }) => {
                 let pos = IVec2::from_array(chunk_pos);
                 let Some(blocks) = rle_decode(&blocks_rle) else {
                     warn!("ChunkData {pos:?} decode ไม่ผ่าน — ทิ้ง");
@@ -844,7 +1020,25 @@ pub fn client_receive_messages(
                     chunk.chiseled_blocks = chiseled_map.clone();
                     chunk_remesh.0.push(pos);
                 }
-                client_sync.full_chunks.insert(pos, ReceivedChunk { blocks, chiseled: chiseled_map });
+                client_sync.full_chunks.insert(pos, ReceivedChunk {
+                    blocks,
+                    chiseled: chiseled_map,
+                    facings: facings.into_iter().map(|(i, f)| (i as usize, f)).collect(),
+                    chest_slots: containers.iter().filter(|(_, k, _)| *k == 0).map(|(i, _, slots)| {
+                        let mut arr = Box::new([None; 27]);
+                        for (idx, slot) in slots.iter().enumerate().take(27) {
+                            arr[idx] = (*slot).and_then(|s| s.to_stack());
+                        }
+                        (*i as usize, arr)
+                    }).collect(),
+                    furnace_slots: containers.iter().filter(|(_, k, _)| *k == 1).map(|(i, _, slots)| {
+                        let mut arr = Box::new([None; 3]);
+                        for (idx, slot) in slots.iter().enumerate().take(3) {
+                            arr[idx] = (*slot).and_then(|s| s.to_stack());
+                        }
+                        (*i as usize, arr)
+                    }).collect(),
+                });
             }
             Some(ServerMessage::BlockEditBatch { edits }) => incoming.0.extend(edits),
             Some(ServerMessage::PlayerJoined { client_id, player_number }) => {
@@ -859,7 +1053,7 @@ pub fn client_receive_messages(
                         }
                     }
                     if !found {
-                        spawn_remote_player(&mut commands, &mut meshes, &mut materials, client_id, player_number);
+                        spawn_remote_player(&mut commands, &models, client_id, player_number);
                     }
                 }
             }
@@ -867,6 +1061,38 @@ pub fn client_receive_messages(
                 for (entity, rp) in remote_players.iter() {
                     if rp.client_id == client_id {
                         commands.entity(entity).despawn();
+                    }
+                }
+            }
+            Some(ServerMessage::Chat { from, text }) => {
+                chat_ui.push_player(from, text);
+            }
+            Some(ServerMessage::TimeOfDay { hours }) => {
+                settings.time_of_day = hours;
+            }
+            Some(ServerMessage::Explosion(wire)) => {
+                fx_writer.write(crate::particles::ExplosionFx {
+                    center: Vec3::from_array(wire.center),
+                    rays: wire
+                        .rays
+                        .iter()
+                        .map(|s| crate::voxel::RaySeg {
+                            a: Vec3::from_array(s.a),
+                            b: Vec3::from_array(s.b),
+                            energy: s.energy,
+                            dist0: s.dist0,
+                        })
+                        .collect(),
+                    power: wire.power,
+                    is_nuke: wire.is_nuke,
+                });
+            }
+            Some(ServerMessage::PlayerAction { client_id, action }) => {
+                for (_, mut rp) in remote_players.iter_mut() {
+                    if rp.client_id == client_id {
+                        if action == 0 {
+                            rp.mining_timer = 0.5;
+                        }
                     }
                 }
             }
@@ -878,7 +1104,7 @@ pub fn client_receive_messages(
         let Some(ServerMessage::PlayerPositions { players }) = decode::<ServerMessage>(&bytes) else {
             continue;
         };
-        for (id, pos, yaw) in players {
+        for (id, pos, yaw, held) in players {
             if id == client_sync.my_id {
                 continue;
             }
@@ -887,13 +1113,14 @@ pub fn client_receive_messages(
                 if rp.client_id == id {
                     rp.target_pos = Vec3::from_array(pos);
                     rp.target_yaw = yaw;
+                    rp.held = held.and_then(|(k, i)| crate::item::item_from_wire(k, i));
                     found = true;
                 }
             }
             if !found {
                 // ตำแหน่ง (unreliable) มาถึงก่อน PlayerJoined (reliable) ได้ —
                 // spawn ไปก่อนด้วยเลข 0 ("Player ?") เดี๋ยว PlayerJoined ตามมาเติม
-                spawn_remote_player(&mut commands, &mut meshes, &mut materials, id, 0);
+                spawn_remote_player(&mut commands, &models, id, 0);
             }
         }
     }
@@ -904,16 +1131,19 @@ pub fn client_send_position(
     mut timer: ResMut<PositionSendTimer>,
     mut client: ResMut<RenetClient>,
     camera_query: Query<(&Transform, &crate::camera::FreeCamera)>,
+    hotbar: Res<crate::voxel::Hotbar>,
 ) {
     if !timer.0.tick(time.delta()).just_finished() {
         return;
     }
     if let Some((transform, cam)) = camera_query.iter().next() {
+        let held = hotbar.slots[hotbar.selected].map(|s| crate::item::item_to_wire(s.item));
         client.send_message(
             DefaultChannel::Unreliable,
             encode(&ClientMessage::Position {
                 pos: transform.translation.to_array(),
                 yaw: cam.yaw,
+                held,
             }),
         );
     }
@@ -928,6 +1158,15 @@ pub fn client_send_edits(mut client: ResMut<RenetClient>, mut pending: ResMut<Pe
         client.send_message(
             DefaultChannel::ReliableOrdered,
             encode(&ClientMessage::RequestEdit { edits: batch.to_vec() }),
+        );
+    }
+}
+
+pub fn client_send_actions(mut client: ResMut<RenetClient>, mut pending: ResMut<PendingLocalActions>) {
+    for action in pending.0.drain(..) {
+        client.send_message(
+            DefaultChannel::ReliableOrdered,
+            encode(&ClientMessage::Action { action }),
         );
     }
 }
@@ -1057,7 +1296,10 @@ pub fn apply_incoming_net_edits(
                     && water_like(crate::voxel::BlockType::from_u8(*block))
             }
             BlockEdit::SetSubVoxel { .. } => false,
+            BlockEdit::PlaceFacingBlock { .. } => false,
+            BlockEdit::SetContainerSlot { .. } => false,
         };
+        let _affects_mesh = !matches!(edit, BlockEdit::SetContainerSlot { .. });
         let Some(tp) = crate::voxel::apply_block_edit(&mut world, &edit) else { continue };
         // edit จาก client แตะเขตสระ (host เท่านั้นที่มีสระ — client list ว่างเสมอ)
         pools.invalidate_touching(tp);
@@ -1113,10 +1355,145 @@ pub fn apply_incoming_net_edits(
     // full remesh ครอบชั้นน้ำอยู่แล้ว — อย่าทำ chunk เดิมซ้ำสองรอบ
     water_remesh.retain(|c| !to_remesh.contains(c));
 
-    crate::voxel::remesh_chunks(&mut commands, &mut world, &mut mp, to_remesh);
-    let _ = crate::voxel::remesh_water_only(&mut commands, &mut world, &mut mp, water_remesh);
+    // chunk ที่เพื่อนบ้านยังโหลดไม่ครบถูก skip — คืนเข้าคิวไว้ลองใหม่เฟรมหน้า
+    // ไม่งั้น block data ใหม่แล้วแต่ mesh ค้างภาพเก่า (แพทเทิร์นเดียวกับคิวน้ำ
+    // ใน fluid_simulation_system); lamp refresh เลื่อนตามไปรอบที่ remesh สำเร็จ
+    let skipped = crate::voxel::remesh_chunks(&mut commands, &mut world, &mut mp, to_remesh);
+    for cp in &skipped {
+        edited_chunks.remove(cp);
+    }
+    chunk_remesh.0.extend(skipped);
+    let skipped_water =
+        crate::voxel::remesh_water_only(&mut commands, &mut world, &mut mp, water_remesh);
+    // น้ำที่ skip เข้าคิวเดียวกัน (รอบหน้ากลายเป็น full remesh — แพงกว่านิดแต่ไม่หาย)
+    chunk_remesh.0.extend(skipped_water);
     for cp in edited_chunks {
         crate::voxel::refresh_chunk_lamp_lights(&mut commands, &mut world, cp);
+    }
+}
+
+pub fn host_broadcast_actions(
+    mut server: ResMut<RenetServer>,
+    mut pending: ResMut<PendingLocalActions>,
+) {
+    for action in pending.0.drain(..) {
+        server.broadcast_message(
+            DefaultChannel::ReliableOrdered,
+            encode(&ServerMessage::PlayerAction { client_id: HOST_PLAYER_ID, action }),
+        );
+    }
+}
+
+pub fn player_rig_setup_system(
+    mut players: Query<(Entity, &mut PlayerRig)>,
+    children_query: Query<&Children>,
+    name_query: Query<&Name>,
+) {
+    for (player_entity, mut rig) in players.iter_mut() {
+        if rig.head.is_some()
+            && rig.upper_arm_left.is_some()
+            && rig.upper_arm_right.is_some()
+            && rig.upper_leg_left.is_some()
+            && rig.upper_leg_right.is_some()
+        {
+            continue; // Already fully setup
+        }
+
+        // BFS จากบนลงล่างจริงๆ (FIFO) + ยึด "ตัวแรกที่เจอ" — ใน glTF node กลุ่ม
+        // (pivot หัวไหล่/สะโพก) กับ mesh ท่อนบนข้างในมัน "ชื่อเดียวกัน" ต้องจับ
+        // node กลุ่มซึ่งเป็น ancestor เท่านั้น ถ้าจับ mesh จะหมุนแค่ครึ่งท่อน
+        // (ท่อนล่างค้างนิ่ง — บั๊กเดิม: ใช้ Vec::pop เป็น DFS แล้วเขียนทับด้วยตัวหลัง)
+        let mut queue = VecDeque::from([player_entity]);
+        while let Some(entity) = queue.pop_front() {
+            if let Ok(name) = name_query.get(entity) {
+                match name.as_str() {
+                    "head" => rig.head = rig.head.or(Some(entity)),
+                    "upper_arm_right" => rig.upper_arm_right = rig.upper_arm_right.or(Some(entity)),
+                    "upper_arm_left" => rig.upper_arm_left = rig.upper_arm_left.or(Some(entity)),
+                    "upper_leg_right" => rig.upper_leg_right = rig.upper_leg_right.or(Some(entity)),
+                    "upper_leg_left" => rig.upper_leg_left = rig.upper_leg_left.or(Some(entity)),
+                    _ => {}
+                }
+            }
+            if let Ok(children) = children_query.get(entity) {
+                queue.extend(children.iter());
+            }
+        }
+    }
+}
+
+/// อนิเมชัน avatar 4 สถานะ: idle (แขนขานิ่ง), walk (แกว่งสลับ), mine (แขนขวาทุบ),
+/// mine+walk (ขา+แขนซ้ายเดินต่อ แขนขวาทุบทับ) — แขนขวาให้ท่าทุบชนะเสมอ
+pub fn player_animation_system(
+    time: Res<Time>,
+    mut players: Query<(&mut RemotePlayer, &PlayerRig, &Transform)>,
+    mut transforms: Query<&mut Transform, Without<RemotePlayer>>,
+) {
+    let dt = time.delta_secs();
+
+    let set_rot_x = |transforms: &mut Query<&mut Transform, Without<RemotePlayer>>,
+                         bone: Option<Entity>,
+                         angle: f32| {
+        if let Some(entity) = bone {
+            if let Ok(mut tf) = transforms.get_mut(entity) {
+                tf.rotation = Quat::from_rotation_x(angle);
+            }
+        }
+    };
+
+    for (mut player, rig, player_transform) in players.iter_mut() {
+        // เป้าของ interpolation อยู่ระดับ "กลางตัว" (target_pos ที่ส่งกันคือระดับตา)
+        // — บั๊กเดิมเทียบ translation กับ target_pos ตรงๆ เลยห่างกัน ~0.7 ตลอดกาล
+        // ระยะไม่เคยต่ำกว่า threshold = ท่าเดินค้างแม้ยืนนิ่ง
+        let target = player.target_pos
+            - Vec3::Y * (crate::camera::EYE_HEIGHT - crate::camera::PLAYER_HEIGHT / 2.0);
+        let delta = player_transform.translation - target;
+        // ดูเฉพาะแนวราบ — ตก/กระโดดไม่ใช่ท่าเดิน; ยังไม่เคยได้ตำแหน่งจริงก็ไม่เดิน
+        let walking = player.target_pos.y > -900.0
+            && Vec2::new(delta.x, delta.z).length() > 0.05;
+
+        if player.mining_timer > 0.0 {
+            player.mining_timer -= dt;
+        }
+        let mining = player.mining_timer > 0.0;
+
+        if walking {
+            // wrap ไว้ไม่ให้ phase สะสมยาว (เดินนานๆ f32 เสียความละเอียด)
+            player.walk_phase = (player.walk_phase + dt * 10.0) % std::f32::consts::TAU;
+        } else {
+            // idle: ลู่เข้าหาจุด sin=0 ที่ "ใกล้ที่สุด" (คูณของ π) — เดิมลาก
+            // phase สะสมทั้งก้อนกลับ 0 แขนขาเลยสะบัดย้อนหลายรอบตอนหยุดเดิน
+            let settle = (player.walk_phase / std::f32::consts::PI).round() * std::f32::consts::PI;
+            player.walk_phase += (settle - player.walk_phase) * (dt * 5.0).min(1.0);
+        }
+        let walk_angle = player.walk_phase.sin() * 0.6;
+
+        // ขา + แขนซ้าย: ตามท่าเดิน/idle เสมอ (เคสทุบระหว่างเดิน = ขายังเดินต่อ)
+        set_rot_x(&mut transforms, rig.upper_leg_left, walk_angle);
+        set_rot_x(&mut transforms, rig.upper_leg_right, -walk_angle);
+        set_rot_x(&mut transforms, rig.upper_arm_left, -walk_angle);
+
+        // แขนขวา: ท่าทุบทับทุกอย่าง ไม่ทุบค่อยตามเดิน/idle
+        if mining {
+            let mine_swing = (time.elapsed_secs() * 15.0).sin();
+            let mine_angle = std::f32::consts::FRAC_PI_4
+                - (mine_swing * 0.5 + 0.5) * std::f32::consts::FRAC_PI_2;
+            set_rot_x(&mut transforms, rig.upper_arm_right, mine_angle);
+        } else {
+            set_rot_x(&mut transforms, rig.upper_arm_right, walk_angle);
+        }
+    }
+}
+
+pub fn host_broadcast_fx(
+    mut server: ResMut<RenetServer>,
+    mut pending: ResMut<PendingNetFx>,
+) {
+    for fx in pending.0.drain(..) {
+        server.broadcast_message(
+            DefaultChannel::ReliableOrdered,
+            encode(&ServerMessage::Explosion(fx)),
+        );
     }
 }
 
@@ -1150,4 +1527,8 @@ mod tests {
         assert!(rle_decode(&[5, 0, 0]).is_none()); // run = 0
         assert!(rle_decode(&rle_encode(&[1u8; 10])).is_none()); // ยาวไม่ถึง CHUNK_VOLUME
     }
+}
+
+pub fn sanitize_chat(text: &str) -> String {
+    text.trim().chars().take(100).collect()
 }

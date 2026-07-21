@@ -9,6 +9,8 @@ mod dem;
 mod electricity;
 mod lod;
 mod item;
+mod world_save;
+mod command;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -28,7 +30,7 @@ pub enum TerrainSource {
 
 /// โหมดเล่น: Creative = palette วาง/ขุดไม่จำกัด, Survival = นับจำนวนจริง เก็บ/หัก stack
 /// (เป็นค่า client-local — inventory ไม่ sync ข้าม network)
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum GameMode {
     Creative,
     Survival,
@@ -39,6 +41,8 @@ pub struct NoiseParams {
     pub frequency: f64,
     pub amplitude: f64,
     pub octaves: u32,
+    /// seed ของ world gen — คุมทั้งความสูง biome และถ้ำ (ดู `TerrainSampler::new`)
+    pub seed: u32,
 }
 
 #[derive(Resource)]
@@ -65,6 +69,9 @@ pub struct GameSettings {
     /// ภูมิประเทศระยะไกล (LOD แบบ Distant Horizons)
     pub lod_enabled: bool,
     pub lod_distance_m: f32,
+    /// เข้าเกมผ่านเมนู Dev Mode — เปิดหน้าต่าง Game Settings เต็ม (สไลเดอร์ noise,
+    /// Regenerate, wireframe ฯลฯ) ส่วนโลกปกติเห็นแค่ Options พื้นฐานตอนกด ESC
+    pub dev_mode: bool,
 }
 
 impl Default for GameSettings {
@@ -78,6 +85,7 @@ impl Default for GameSettings {
                 frequency: 0.015,
                 amplitude: 40.0,
                 octaves: 4,
+                seed: 1,
             },
             time_of_day: 10.0,
             fluid_tick_seconds: 0.1,
@@ -86,8 +94,9 @@ impl Default for GameSettings {
             show_tnt_rays: false,
             nuke_yield: 500.0,
             nuke_fuse_seconds: 5.0,
-            lod_enabled: true,
+            lod_enabled: false,
             lod_distance_m: 33_000.0,
+            dev_mode: false,
         }
     }
 }
@@ -104,15 +113,40 @@ fn unpaused(paused: Res<Paused>) -> bool {
     !paused.0
 }
 
-fn reset_paused(mut paused: ResMut<Paused>) {
+/// egui กำลังรับ text input อยู่ไหม (ช่องแชท, IP, GPS lat/lon)
+/// ตั้งทุกเฟรมโดย [`ui::track_egui_typing`]
+#[derive(Resource, Default)]
+pub struct EguiTyping(pub bool);
+
+/// คีย์บอร์ดว่างให้ gameplay ใช้ไหม — กันตัวอักษรที่พิมพ์ในช่องข้อความ
+/// ทะลุไปเปลี่ยนช่อง hotbar / ขยับกล้อง
+fn keyboard_free(chat: Res<ui::ChatState>, typing: Res<EguiTyping>) -> bool {
+    !chat.open && !typing.0
+}
+
+fn reset_paused(
+    mut paused: ResMut<Paused>,
+    mut show_options: ResMut<ui::ShowOptions>,
+    mut inventory: ResMut<voxel::InventoryOpen>,
+    mut open_container: ResMut<voxel::OpenContainer>,
+) {
     paused.0 = false;
+    show_options.0 = false;
+    inventory.0 = false;
+    open_container.0 = None;
+}
+
+/// หน้าต่างช่องเก็บของปิดอยู่ — คลิก/เลข 1-9/scroll เป็นของโลก ไม่ใช่ของหน้าต่าง
+fn inventory_closed(open: Res<voxel::InventoryOpen>) -> bool {
+    !open.0
 }
 
 /// `--realworld`: เข้าโลก DEM ตั้งแต่เริ่ม (ใช้คู่ --host ไว้เทสอัตโนมัติ)
 fn apply_cli_world_flags(mut settings: ResMut<GameSettings>) {
     if std::env::args().any(|a| a == "--realworld") {
         settings.terrain_source = TerrainSource::RealWorld;
-        voxel::DEM_SAVE_DIR.store(true, std::sync::atomic::Ordering::Relaxed);
+        settings.dev_mode = true;
+        voxel::set_legacy_save_dir(true);
     }
 }
 
@@ -120,6 +154,12 @@ fn apply_cli_world_flags(mut settings: ResMut<GameSettings>) {
 pub enum GameState {
     #[default]
     MainMenu,
+    /// รายการ world ที่เคยสร้าง + ปุ่มสร้างใหม่
+    SinglePlayerMenu,
+    /// ฟอร์มตั้งชื่อ/seed/mode ของ world ใหม่
+    CreateWorldMenu,
+    /// ทางเข้าเดิม (Quick Start noise / Real World) สำหรับจูนค่าและเทส
+    DevMenu,
     MultiplayerMenu,
     InGame,
 }
@@ -140,6 +180,14 @@ fn asset_root() -> String {
         }
     }
     "assets".to_string()
+}
+
+fn setup_cluster_settings(mut settings: ResMut<bevy_light::cluster::GlobalClusterSettings>) {
+    // ปิด GPU clustering ทั้งระบบ ให้ bevy fallback เป็น CPU clustering —
+    // เส้นทาง GPU readback ของมัน (prepare_clusters_for_gpu_clustering) คือจุดที่
+    // DeviceLost บน RX 570 + driver 22.20 ตอนเปิดเกมสองหน้าต่าง (host+client)
+    // ยืนยันจาก smoke test 2026-07-21: ตายซ้ำได้ทุกครั้งภายในไม่กี่วิหลัง join
+    settings.gpu_clustering = None;
 }
 
 fn main() {
@@ -169,7 +217,11 @@ fn main() {
         .init_resource::<voxel::TargetedBlock>()
         .init_resource::<voxel::SelectedBlock>()
         .init_resource::<voxel::Hotbar>()
-        .init_resource::<voxel::BlockPickerOpen>()
+        .init_resource::<voxel::InventoryOpen>()
+        .init_resource::<voxel::OpenContainer>()
+        .init_resource::<voxel::ItemIconCache>()
+        .init_resource::<voxel::IconBakeState>()
+        .init_resource::<ui::HeldStack>()
         .init_resource::<voxel::InteractionMode>()
         .init_resource::<voxel::ActiveFluids>()
         .init_resource::<voxel::ActiveTnt>()
@@ -180,10 +232,19 @@ fn main() {
         .init_resource::<ui::ScreenFlash>()
         .init_resource::<ui::TeleportUi>()
         .init_resource::<ui::ShowDebugMenu>()
+        .init_resource::<ui::ShowOptions>()
+        .init_resource::<ui::ChatState>()
+        .init_resource::<command::CommandQueue>()
+        .init_resource::<EguiTyping>()
+        .init_resource::<ui::WorldList>()
+        .init_resource::<ui::CreateWorldUi>()
         .init_resource::<voxel::ActivePools>()
+        .init_resource::<voxel::BreakingProgress>()
         .init_resource::<Paused>()
         .init_resource::<network::MultiplayerUi>()
         .init_resource::<network::PendingNetEdits>()
+        .init_resource::<network::PendingLocalActions>()
+        .init_resource::<network::PendingNetFx>()
         .init_resource::<network::IncomingNetEdits>()
         .init_resource::<network::IncomingChunkRemesh>()
         .init_resource::<network::PositionSendTimer>()
@@ -215,7 +276,11 @@ fn main() {
         .add_message::<particles::BlockFx>()
         .add_message::<particles::ExplosionFx>()
         .add_systems(Startup, (
+            setup_cluster_settings,
             voxel::setup_voxel,
+            voxel::setup_campfire_assets,
+            voxel::setup_break_overlay,
+            network::setup_player_model_assets,
             camera::setup_camera,
             ui::setup_ui,
             particles::setup_particles,
@@ -232,18 +297,37 @@ fn main() {
             ui::update_screen_flash.after(particles::trigger_screen_flash),
             particles::despawn_finished_fx,
             particles::attach_lamp_sparkles,
+            particles::attach_campfire_flames,
         ))
         .add_systems(
             Update,
             (
                 // input ผู้เล่นหยุดตอน pause แต่ HUD text อัปเดตต่อ
                 (
-                    camera::camera_movement_system,
-                    camera::camera_look_system,
                     camera::cursor_grab_system,
                     voxel::hotbar_input_system,
-                ).run_if(unpaused),
-                ui::update_hotbar_ui,
+                ).run_if(unpaused).run_if(keyboard_free).run_if(inventory_closed),
+                // ไม่ gate: แรงโน้มถ่วงต้องเดินต่อตอน pause/พิมพ์แชท ไม่งั้นค้างกลางอากาศ
+                // (ระบบเช็ค Paused/ChatState/EguiTyping เองเพื่อหยุดแค่การอ่านปุ่ม)
+                camera::camera_movement_system,
+                // mouse-look ปิดตัวเองอยู่แล้วเมื่อ cursor ไม่ถูก grab (camera.rs)
+                camera::camera_look_system.run_if(unpaused),
+                ui::chat_open_system.run_if(keyboard_free),
+                // E ตอนพิมพ์แชทต้องลงช่องข้อความ ไม่ใช่เปิดช่องเก็บของ
+                ui::inventory_toggle_system.run_if(keyboard_free),
+                ui::inventory_click_system,
+                ui::container_click_system,
+                // ต้องหลัง cursor_grab_system: ESC ในระบบนั้นปลดล็อคเมาส์ทุกครั้ง
+                // ปิด inventory ด้วย ESC แล้วต้องได้เมาส์ล็อคกลับ ไม่ใช่ค้างเป็นลูกศร
+                ui::inventory_close_system.after(camera::cursor_grab_system),
+                ui::update_inventory_ui.after(voxel::start_icon_bake),
+                ui::update_container_ui.after(voxel::start_icon_bake),
+                ui::update_held_icon.after(voxel::start_icon_bake),
+                ui::age_chat_lines,
+                ui::update_chat_ui,
+                command::run_commands,
+                ui::update_hotbar_ui.after(voxel::start_icon_bake),
+                ui::bake_palette_icons.after(voxel::start_icon_bake),
                 ui::update_coordinate_ui_system,
                 ui::update_fps_text,
                 ui::update_block_target_text,
@@ -254,11 +338,17 @@ fn main() {
             OnEnter(GameState::InGame),
             (reset_paused, voxel::position_player_for_terrain),
         )
+        // ออกจากโลก: เซฟที่ค้าง + ล้างโลกทิ้ง ไม่งั้นค้างเป็นฉากหลังเมนูหลัก
+        .add_systems(
+            OnExit(GameState::InGame),
+            (voxel::unload_world_on_exit, lod::clear_lod_on_exit, voxel::clear_breaking_on_exit),
+        )
         .add_systems(
             Update,
             (
                 voxel::voxel_raycast_system,
                 voxel::block_interaction_system.run_if(unpaused),
+                voxel::update_break_overlay.after(voxel::block_interaction_system),
                 voxel::world_reset_system,
                 voxel::world_generation_system,
                 voxel::process_generated_chunks_system,
@@ -272,6 +362,8 @@ fn main() {
                 voxel::explosion_debug_system,
                 lod::update_lod_tiles,
                 dem::dem_stream_system,
+                voxel::start_icon_bake,
+                voxel::finish_icon_bake,
             ).run_if(in_state(GameState::InGame)),
         )
         // ---- Networking ----
@@ -282,6 +374,8 @@ fn main() {
                 network::host_receive_client_messages,
                 network::host_send_queued_chunks,
                 network::host_broadcast_edits.after(network::host_receive_client_messages),
+                network::host_broadcast_fx,
+                network::host_broadcast_actions,
                 network::host_broadcast_positions,
             ).run_if(resource_exists::<bevy_renet::RenetServer>),
         )
@@ -290,6 +384,7 @@ fn main() {
             (
                 network::client_receive_messages,
                 network::client_send_edits,
+                network::client_send_actions,
                 network::client_send_position,
                 network::client_connection_watchdog,
             ).run_if(resource_exists::<bevy_renet::RenetClient>),
@@ -309,22 +404,31 @@ fn main() {
             network::stop_host_system,
             network::auto_host_system,
             network::nameplate_system,
+            network::player_rig_setup_system,
+            network::player_animation_system,
+            network::update_remote_held_items.after(network::player_rig_setup_system),
         ))
         .add_systems(Startup, apply_cli_world_flags.before(network::autostart_from_args))
         .add_systems(Startup, network::autostart_from_args)
         .add_systems(
             bevy_egui::EguiPrimaryContextPass,
             (
+                ui::track_egui_typing,
                 ui::egui_settings_system.run_if(in_state(GameState::InGame)),
-                // pause ต้องรันก่อน picker: ESC ตอน picker เปิด = ปิด picker ไม่ใช่เปิด pause
-                ui::pause_menu_system
+                ui::options_menu_system.run_if(in_state(GameState::InGame)),
+                // chat ต้องรันก่อน pause: ESC ตอนแชทเปิด = ปิดแชท ไม่ใช่เปิด pause
+                ui::chat_input_system
                     .run_if(in_state(GameState::InGame))
-                    .before(ui::block_picker_system),
-                ui::block_picker_system.run_if(in_state(GameState::InGame)),
+                    .before(ui::pause_menu_system),
+                ui::pause_menu_system.run_if(in_state(GameState::InGame)),
                 ui::main_menu_system.run_if(in_state(GameState::MainMenu)),
+                ui::singleplayer_menu_system.run_if(in_state(GameState::SinglePlayerMenu)),
+                ui::create_world_menu_system.run_if(in_state(GameState::CreateWorldMenu)),
+                ui::dev_menu_system.run_if(in_state(GameState::DevMenu)),
                 ui::multiplayer_menu_system.run_if(in_state(GameState::MultiplayerMenu)),
             ),
         )
+        .add_systems(OnEnter(GameState::SinglePlayerMenu), ui::refresh_world_list)
         .add_systems(
             Update,
             (ui::toggle_ingame_ui, ui::handle_f3_system),
