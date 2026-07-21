@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 /// ประเภทของขั้วไฟฟ้า
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +101,7 @@ pub fn instant_power_update_system(
     mut world: ResMut<crate::voxel::VoxelWorld>,
     mut commands: Commands,
     mut mp: crate::voxel::MeshingParams,
+    campfire_assets: Res<crate::voxel::CampfireAssets>,
 ) {
     if events.is_empty() {
         return;
@@ -138,8 +139,7 @@ pub fn instant_power_update_system(
     while let Some(current) = queue.pop_front() {
         let Some(device) = grid.devices.get_mut(&current.block_pos) else { continue };
 
-        let mut external_hops = Vec::new();
-
+        let external_hops;
         // อัปเดตขั้วปัจจุบันให้มีไฟ
         if let Some(terminal) = device.terminals.get_mut(&current.target_local_pos) {
             terminal.is_powered = true;
@@ -202,6 +202,7 @@ pub fn instant_power_update_system(
                 crate::voxel::remesh_chunks(&mut commands, &mut world, &mut mp, affected.clone());
                 for chunk_pos in affected {
                     crate::voxel::refresh_chunk_lamp_lights(&mut commands, &mut world, chunk_pos);
+                    crate::voxel::refresh_chunk_campfire_models(&mut commands, &mut world, chunk_pos, &campfire_assets);
                 }
             }
         }

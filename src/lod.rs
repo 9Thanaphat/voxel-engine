@@ -130,6 +130,22 @@ pub struct LodTiles {
     passes: u32,
 }
 
+/// ทิ้ง tile ทั้งหมด + bump version ให้ผลของ task ที่ยังวิ่งอยู่ถูกทิ้งตาม
+fn clear_tiles(commands: &mut Commands, lod: &mut LodTiles) {
+    for (_, e) in lod.tiles.drain() {
+        commands.entity(e).despawn();
+    }
+    lod.pending.clear();
+    lod.version = lod.version.wrapping_add(1);
+}
+
+/// ออกจากโลก — ภูเขาระยะไกลต้องหายไปด้วย ไม่งั้นค้างเป็นฉากหลังเมนูหลัก
+/// (last_spec = None บังคับให้สร้างใหม่ตอนเข้าโลกหน้า แม้ค่า noise เท่าเดิม)
+pub fn clear_lod_on_exit(mut commands: Commands, mut lod: ResMut<LodTiles>) {
+    clear_tiles(&mut commands, &mut lod);
+    lod.last_spec = None;
+}
+
 pub fn setup_lod(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
     let (s, r) = mpsc::channel();
     commands.insert_resource(LodTiles {
@@ -410,7 +426,9 @@ pub fn update_lod_tiles(
     let lod = &mut *lod;
 
     // ---- รับผลจาก task (ทุกเฟรม — ผลมาถึงแล้วโชว์เลย) ----
+    let mut spawned = 0;
     loop {
+        if spawned >= 2 { break; }
         let res = { lod.receiver.lock().unwrap().try_recv() };
         let Ok(res) = res else { break };
         let key = (res.ring, res.coord);
@@ -431,6 +449,7 @@ pub fn update_lod_tiles(
             ))
             .id();
         lod.tiles.insert(key, entity);
+        spawned += 1;
     }
 
     // ---- เช็คชุด tile ที่ควรมี (เป็นคาบ ไม่ใช่ทุกเฟรม) ----
@@ -449,11 +468,7 @@ pub fn update_lod_tiles(
         || regenerate.0
         || lod.last_spec.is_some_and(|s| s != spec);
     if clear_all {
-        for (_, e) in lod.tiles.drain() {
-            commands.entity(e).despawn();
-        }
-        lod.pending.clear();
-        lod.version = lod.version.wrapping_add(1);
+        clear_tiles(&mut commands, lod);
         lod.last_spec = Some(spec);
         if !settings.lod_enabled {
             return;

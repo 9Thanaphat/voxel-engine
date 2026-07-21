@@ -91,6 +91,8 @@ pub struct ParticleAssets {
     mushroom_cap: Handle<EffectAsset>,
     base_surge: Handle<EffectAsset>,
     dynamic_updraft: Handle<EffectAsset>,
+    /// ไฟลุกต่อเนื่องจาก Campfire (เกาะ PointLight เหมือน sparkle แต่สีไฟจริง)
+    flame: Handle<EffectAsset>,
     /// texture ขาว 1x1 คู่กับ tint = สีบล็อก สำหรับบล็อกที่ยังไม่มี texture
     white: Handle<Image>,
 }
@@ -246,6 +248,51 @@ fn sparkle_effect() -> EffectAsset {
         .init(init_age)
         .init(init_lifetime)
         .init(init_color)
+        .render(SizeOverLifetimeModifier {
+            gradient: size,
+            screen_space_size: false,
+        })
+}
+
+/// ไฟจาก Campfire — ต่อเนื่อง (rate เหมือน sparkle) แต่ไล่สีแบบไฟจริง (ส้มจ้า → แดงหม่น →
+/// จางหาย, additive) เหมือน fireball_effect ลอยขึ้นเบาๆ ไม่กระจายแรงเหมือนระเบิด
+fn flame_effect() -> EffectAsset {
+    let writer = ExprWriter::new();
+
+    let init_pos = SetPositionSphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        radius: writer.lit(0.12).expr(),
+        dimension: ShapeDimension::Volume,
+    };
+
+    let vel = writer.lit(Vec3::Y * 0.3) + writer.lit(Vec3::Y * 0.3) * writer.rand(ScalarType::Float);
+    let init_vel = SetAttributeModifier::new(Attribute::VELOCITY, vel.expr());
+
+    let init_age = SetAttributeModifier::new(Attribute::AGE, writer.lit(0.0).expr());
+    let lifetime = writer.lit(0.4).uniform(writer.lit(0.8)).expr();
+    let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
+
+    // สีไฟ (HDR): ส้มจ้า -> แดงหม่น -> จางหาย เหมือน fireball_effect แต่จางกว่า (เปลวเล็กต่อเนื่อง)
+    let mut color = bevy_hanabi::Gradient::new();
+    color.add_key(0.0, Vec4::new(6.0, 3.0, 0.6, 1.0));
+    color.add_key(0.4, Vec4::new(3.0, 1.0, 0.2, 1.0));
+    color.add_key(1.0, Vec4::new(1.0, 0.2, 0.05, 0.0));
+
+    let mut size = bevy_hanabi::Gradient::new();
+    size.add_key(0.0, Vec3::splat(0.12));
+    size.add_key(1.0, Vec3::splat(0.02));
+
+    EffectAsset::new(32, SpawnerSettings::rate(12.0.into()), writer.finish())
+        .with_name("campfire_flame")
+        .init(init_pos)
+        .init(init_vel)
+        .init(init_age)
+        .init(init_lifetime)
+        .render(ColorOverLifetimeModifier {
+            gradient: color,
+            blend: ColorBlendMode::Add,
+            mask: ColorBlendMask::RGBA,
+        })
         .render(SizeOverLifetimeModifier {
             gradient: size,
             screen_space_size: false,
@@ -547,6 +594,7 @@ pub fn setup_particles(
         mushroom_cap: effects.add(mushroom_cap_effect()),
         base_surge: effects.add(base_surge_effect()),
         dynamic_updraft: effects.add(dynamic_updraft_effect()),
+        flame: effects.add(flame_effect()),
         white,
     });
 }
@@ -834,7 +882,7 @@ pub fn update_explosion_flash(
     mut commands: Commands,
     time: Res<Time>,
     mut query: Query<(Entity, &mut ExplosionFlash, &mut PointLight)>,
-    mut ambient: Query<&mut AmbientLight, With<crate::camera::FreeCamera>>,
+    mut ambient: Query<&mut AmbientLight, With<crate::camera::MainCamera>>,
 ) {
     let mut boost = 0.0f32;
     for (entity, mut flash, mut light) in &mut query {
@@ -887,14 +935,19 @@ pub fn despawn_finished_fx(
     }
 }
 
+/// แท็ก PointLight ที่มาจากบล็อก Campfire (ใส่ให้ใน refresh_chunk_lamp_lights) — ให้
+/// attach_campfire_flames จับแทน attach_lamp_sparkles (ไฟจริงต้องคนละเอฟเฟกต์กับ sparkle ของ lamp สี)
+#[derive(Component)]
+pub struct CampfireFlameSource;
+
 /// เกาะ sparkle ให้ PointLight ที่เพิ่ง spawn — ในเกม PointLight มีแต่ไฟ lamp
 /// (refresh_chunk_lamp_lights) จึงใช้ Added<PointLight> ได้ตรงๆ; despawn ของ
 /// parent เก็บ child ให้เองอยู่แล้ว ไม่ต้องแก้บัญชี lamp_lights
 pub fn attach_lamp_sparkles(
     mut commands: Commands,
     assets: Res<ParticleAssets>,
-    // เว้นแฟลชระเบิด — เป็น PointLight ชั่วคราว ไม่ใช่ lamp
-    query: Query<(Entity, &PointLight), (Added<PointLight>, Without<ExplosionFlash>)>,
+    // เว้นแฟลชระเบิด — เป็น PointLight ชั่วคราว ไม่ใช่ lamp; เว้น Campfire — ได้ไฟจริงแทน sparkle
+    query: Query<(Entity, &PointLight), (Added<PointLight>, Without<ExplosionFlash>, Without<CampfireFlameSource>)>,
 ) {
     for (entity, light) in &query {
         let c = light.color.to_linear();
@@ -906,6 +959,20 @@ pub fn attach_lamp_sparkles(
                 props,
                 Transform::default(),
             ))
+            .id();
+        commands.entity(entity).add_child(child);
+    }
+}
+
+/// เกาะ particle ไฟให้ PointLight ของ Campfire โดยเฉพาะ (คู่กับ attach_lamp_sparkles ด้านบน)
+pub fn attach_campfire_flames(
+    mut commands: Commands,
+    assets: Res<ParticleAssets>,
+    query: Query<Entity, (Added<PointLight>, With<CampfireFlameSource>)>,
+) {
+    for entity in &query {
+        let child = commands
+            .spawn((ParticleEffect::new(assets.flame.clone()), Transform::default()))
             .id();
         commands.entity(entity).add_child(child);
     }

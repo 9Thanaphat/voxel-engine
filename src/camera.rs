@@ -24,7 +24,11 @@ pub struct FreeCamera {
     /// true = บินอิสระ, false = เดิน (gravity + collision) — สลับด้วย F
     pub fly: bool,
     pub velocity_y: f32,
+    pub third_person: bool,
 }
+
+#[derive(Component)]
+pub struct MainCamera;
 
 impl Default for FreeCamera {
     fn default() -> Self {
@@ -35,6 +39,7 @@ impl Default for FreeCamera {
             yaw: 0.0,
             fly: true,
             velocity_y: 0.0,
+            third_person: false,
         }
     }
 }
@@ -83,7 +88,20 @@ fn aabb_collides(world: &VoxelWorld, feet: Vec3) -> bool {
     for bx in x0..=x1 {
         for by in y0..=y1 {
             for bz in z0..=z1 {
-                if world.get_block(bx, by, bz).is_solid() {
+                let block = world.get_block(bx, by, bz);
+                if !block.is_solid() {
+                    continue;
+                }
+                // บล็อกส่วนใหญ่เป็นคิวบ์เต็ม [0,0,0]..[1,1,1] — บล็อกรูปทรงพิเศษ (เช่น
+                // Campfire) มีกล่อง collision เล็กกว่าจริง (ดู block_collision_box)
+                let (bmin_local, bmax_local) = crate::voxel::block_collision_box(block);
+                let base = Vec3::new(bx as f32, by as f32, bz as f32);
+                let bmin = base + bmin_local;
+                let bmax = base + bmax_local;
+                if min.x < bmax.x && max.x > bmin.x
+                    && min.y < bmax.y && max.y > bmin.y
+                    && min.z < bmax.z && max.z > bmin.z
+                {
                     return true;
                 }
             }
@@ -107,14 +125,25 @@ fn move_axis(world: &VoxelWorld, feet: &mut Vec3, axis: usize, amount: f32) -> b
     false
 }
 
+/// ระบบนี้ **รันตลอดแม้ตอน pause/พิมพ์แชท** — แรงโน้มถ่วงกับ collision อยู่ในนี้
+/// ถ้าปิดทั้งระบบ ผู้เล่นจะค้างกลางอากาศตอนกด ESC ระหว่างกำลังตก
+/// (เห็นชัดตอน multiplayer: คนอื่นเห็นเราลอยนิ่ง) ที่ต้องหยุดคือ "การอ่านปุ่ม" เท่านั้น
 pub fn camera_movement_system(
     time: Res<Time>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
     world: Res<VoxelWorld>,
     mut query: Query<(&mut FreeCamera, &mut Transform)>,
+    paused: Res<crate::Paused>,
+    chat: Res<crate::ui::ChatState>,
+    typing: Res<crate::EguiTyping>,
+    inventory: Res<crate::voxel::InventoryOpen>,
 ) {
+    let input_ok = !paused.0 && !chat.open && !typing.0 && !inventory.0;
+    // ปุ่มถูกอ่านเฉพาะตอนคุมตัวละครได้ — ฟิสิกส์ข้างล่างเดินต่อไม่สนใจค่านี้
+    let pressed = |key| input_ok && keyboard_input.pressed(key);
+
     for (mut camera, mut transform) in query.iter_mut() {
-        if keyboard_input.just_pressed(KeyCode::KeyF) {
+        if input_ok && keyboard_input.just_pressed(KeyCode::KeyF) {
             camera.fly = !camera.fly;
             camera.velocity_y = 0.0;
         }
@@ -127,25 +156,25 @@ pub fn camera_movement_system(
         let flat_forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
         let flat_right = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
 
-        if keyboard_input.pressed(KeyCode::KeyW) {
+        if pressed(KeyCode::KeyW) {
             direction += flat_forward;
         }
-        if keyboard_input.pressed(KeyCode::KeyS) {
+        if pressed(KeyCode::KeyS) {
             direction -= flat_forward;
         }
-        if keyboard_input.pressed(KeyCode::KeyD) {
+        if pressed(KeyCode::KeyD) {
             direction += flat_right;
         }
-        if keyboard_input.pressed(KeyCode::KeyA) {
+        if pressed(KeyCode::KeyA) {
             direction -= flat_right;
         }
 
         if camera.fly {
             // บินขึ้น/ลง
-            if keyboard_input.pressed(KeyCode::Space) {
+            if pressed(KeyCode::Space) {
                 direction += Vec3::Y;
             }
-            if keyboard_input.pressed(KeyCode::ShiftLeft) {
+            if pressed(KeyCode::ShiftLeft) {
                 direction -= Vec3::Y;
             }
 
@@ -187,7 +216,7 @@ pub fn camera_movement_system(
                 probe.y -= 0.02;
                 aabb_collides(&world, probe)
             };
-            if grounded && keyboard_input.pressed(KeyCode::Space) {
+            if grounded && pressed(KeyCode::Space) {
                 camera.velocity_y = JUMP_SPEED;
             }
 
@@ -199,7 +228,9 @@ pub fn camera_movement_system(
 pub fn camera_look_system(
     cursor_query: Query<&CursorOptions, With<PrimaryWindow>>,
     mut mouse_events: MessageReader<MouseMotion>,
-    mut query: Query<(&mut FreeCamera, &mut Transform)>,
+    key: Res<ButtonInput<KeyCode>>,
+    mut query: Query<(&mut FreeCamera, &mut Transform, Option<&Children>)>,
+    mut child_query: Query<&mut Transform, (With<MainCamera>, Without<FreeCamera>)>,
 ) {
     if let Ok(cursor) = cursor_query.single() {
         // ถ้าเมาส์ไม่ได้ถูกล็อคอยู่ ให้ข้ามไปไม่ต้องหมุนกล้อง
@@ -216,7 +247,11 @@ pub fn camera_look_system(
     }
 
     if delta != Vec2::ZERO {
-        for (mut camera, mut transform) in query.iter_mut() {
+        for (mut camera, mut transform, children) in &mut query {
+            if key.just_pressed(KeyCode::F5) {
+                camera.third_person = !camera.third_person;
+            }
+
             camera.yaw -= delta.x * camera.sensitivity;
             camera.pitch -= delta.y * camera.sensitivity;
 
@@ -229,14 +264,24 @@ pub fn camera_look_system(
             // อัปเดต rotation
             transform.rotation = Quat::from_axis_angle(Vec3::Y, camera.yaw)
                 * Quat::from_axis_angle(Vec3::X, camera.pitch);
+
+            if let Some(children) = children {
+                for &child in children {
+                    if let Ok(mut child_tf) = child_query.get_mut(child) {
+                        if camera.third_person {
+                            child_tf.translation = Vec3::new(0.0, 0.0, 5.0);
+                        } else {
+                            child_tf.translation = Vec3::ZERO;
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
 pub fn setup_camera(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let transform =
         Transform::from_xyz(-2.0, 250.0, -2.0).looking_at(Vec3::new(8.0, 200.0, 8.0), Vec3::Y);
@@ -246,15 +291,24 @@ pub fn setup_camera(
     // ไม่งั้นขยับเมาส์ครั้งแรกกล้องจะสะบัดกลับไปที่ yaw=0, pitch=0
     let (yaw, pitch, _roll) = transform.rotation.to_euler(EulerRot::YXZ);
 
-    commands.spawn((
-        Camera3d::default(),
+    let player = commands.spawn((
+        FreeCamera {
+            yaw,
+            pitch,
+            ..default()
+        },
         transform,
+    )).id();
+
+    let camera = commands.spawn((
+        MainCamera,
+        Camera3d::default(),
         // มองไกลถึงขอบ tile DEM (~33 กม.) — default 1000 มองไม่เห็น LOD ไกล
         Projection::Perspective(PerspectiveProjection {
             far: 50_000.0,
             ..default()
         }),
-        // หมอกระยะไกล: เนียนรอยต่อ LOD + ให้ภูเขาไกลจางแบบof จริง
+        // หมอกระยะไกล: เนียนรอยต่อ LOD + ให้ภูเขาไกลจางแบบ of จริง
         bevy::pbr::DistanceFog {
             color: Color::srgba(0.72, 0.80, 0.90, 1.0),
             falloff: bevy::pbr::FogFalloff::Linear {
@@ -263,8 +317,9 @@ pub fn setup_camera(
             },
             ..default()
         },
+        Transform::default(),
         // SSAO ไม่รองรับ MSAA (DepthPrepass/NormalPrepass ถูกใส่ให้เองผ่าน required components)
-        bevy::pbr::ScreenSpaceAmbientOcclusion::default(),
+        // bevy::pbr::ScreenSpaceAmbientOcclusion::default(), // Disabled due to DeviceLost crash
         Msaa::Off,
         // ให้บล็อกเรืองแสง (emissive > 1.0) ฟุ้งแสง — Hdr ถูกใส่ให้อัตโนมัติ
         bevy::post_process::bloom::Bloom::NATURAL,
@@ -274,20 +329,9 @@ pub fn setup_camera(
             brightness: 400.0,
             ..default()
         },
-        FreeCamera {
-            yaw,
-            pitch,
-            ..default()
-        },
-    )).with_child((
-        Mesh3d(meshes.add(Cuboid::new(PLAYER_HALF * 2.0, PLAYER_HEIGHT, PLAYER_HALF * 2.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.2, 0.6, 1.0), // Blue box
-            ..default()
-        })),
-        // กล้องอยู่ที่ระดับสายตา (EYE_HEIGHT) จากเท้า
-        // ส่วนกล่องถูกสร้างโดยมีจุดศูนย์กลางอยู่ที่กึ่งกลางความสูง (PLAYER_HEIGHT / 2)
-        // จึงต้อง offset Y ลงมา
-        Transform::from_xyz(0.0, (PLAYER_HEIGHT / 2.0) - EYE_HEIGHT, 0.0),
-    ));
+    )).id();
+
+    commands.entity(player).add_child(camera);
+    // First person — ไม่ต้อง spawn model ให้ local player
+    // (model จะใช้กับ remote player เท่านั้น ผ่าน network::spawn_remote_player)
 }
