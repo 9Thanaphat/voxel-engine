@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use crate::voxel::{BlockType, ItemStack};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum ToolType {
     Chisel,
     CopperWire,
@@ -62,7 +62,7 @@ impl ToolType {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Item {
     Block(BlockType),
     Tool(ToolType),
@@ -140,17 +140,27 @@ impl Item {
         icons: &crate::voxel::ItemIconCache,
         asset_server: &AssetServer,
     ) -> Option<Handle<Image>> {
-        match self {
-            Item::Block(b) => icons.0.get(b).cloned(),
-            // tool ใช้ .png แบนผ่าน icon_texture ทางเดียวกันทุกตัว
-            Item::Tool(_) => self.icon_texture().map(|path| asset_server.load(path)),
+        // ลองหาใน cache ก่อน (บล็อกทั้งหมด และ Pickaxe จะมีภาพที่ render ไว้แล้ว)
+        if let Some(handle) = icons.0.get(self) {
+            return Some(handle.clone());
         }
+        
+        // ถ้าไม่มีใน cache ให้ fallback กลับไปใช้ icon_texture (พวกแผ่นแบน)
+        self.icon_texture().map(|path| asset_server.load(path))
     }
 
     pub fn color(&self) -> [f32; 4] {
         match self {
             Item::Block(b) => crate::voxel::block_color(*b),
             Item::Tool(_) => [1.0, 1.0, 1.0, 1.0],
+        }
+    }
+
+    pub fn render_as_2d_sprite(&self) -> bool {
+        match self {
+            Item::Block(crate::voxel::BlockType::TallGrass) => true,
+            Item::Tool(t) if tool_model_path(*t).is_none() => true,
+            _ => false,
         }
     }
 }
@@ -242,7 +252,7 @@ fn update_held_item_view(
     mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
     block_mats: Res<crate::voxel::BlockMaterials>,
-    campfire_assets: Res<crate::voxel::CampfireAssets>,
+    campfire_assets: Res<crate::voxel::BlockModelAssets>,
 ) {
     let current = hotbar.slots[hotbar.selected].map(|s| s.item);
     if current != view.item {
@@ -337,12 +347,41 @@ pub fn spawn_item_visual(
     materials: &mut Assets<StandardMaterial>,
     asset_server: &AssetServer,
     block_mats: &crate::voxel::BlockMaterials,
-    campfire_assets: &crate::voxel::CampfireAssets,
+    campfire_assets: &crate::voxel::BlockModelAssets,
     item: Item,
     size: f32,
     transform: Transform,
 ) -> Entity {
     use bevy::light::NotShadowCaster;
+    
+    if item.render_as_2d_sprite() {
+        let material = match item.icon_texture() {
+            Some(path) => materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                base_color_texture: Some(asset_server.load(path)),
+                alpha_mode: AlphaMode::Blend, // PNG โปร่งใส
+                unlit: true,
+                cull_mode: None, // เห็นทั้งสองด้าน
+                ..default()
+            }),
+            None => {
+                let c = item.color();
+                materials.add(StandardMaterial {
+                    base_color: Color::srgba(c[0], c[1], c[2], c[3]),
+                    unlit: true,
+                    cull_mode: None,
+                    ..default()
+                })
+            }
+        };
+        return commands.spawn((
+            Mesh3d(meshes.add(Rectangle::new(size, size))),
+            MeshMaterial3d(material),
+            transform,
+            NotShadowCaster,
+        )).id();
+    }
+
     match item {
         // บล็อก → คิวบ์จิ๋ว 6 หน้า texture ถูกต้อง (ขนาด bake ในตัว mesh ไม่ใช่ scale)
         Item::Block(block) => {
@@ -363,34 +402,8 @@ pub fn spawn_item_visual(
                 NotShadowCaster,
             )).id()
         }
-        // tool อื่น → แผ่นแบน icon png
-        Item::Tool(_) => {
-            let material = match item.icon_texture() {
-                Some(path) => materials.add(StandardMaterial {
-                    base_color: Color::WHITE,
-                    base_color_texture: Some(asset_server.load(path)),
-                    alpha_mode: AlphaMode::Blend, // PNG โปร่งใส
-                    unlit: true,
-                    cull_mode: None, // เห็นทั้งสองด้าน
-                    ..default()
-                }),
-                None => {
-                    let c = item.color();
-                    materials.add(StandardMaterial {
-                        base_color: Color::srgba(c[0], c[1], c[2], c[3]),
-                        unlit: true,
-                        cull_mode: None,
-                        ..default()
-                    })
-                }
-            };
-            commands.spawn((
-                Mesh3d(meshes.add(Rectangle::new(size, size))),
-                MeshMaterial3d(material),
-                transform,
-                NotShadowCaster,
-            )).id()
-        }
+        // tool อื่นและ TallGrass ถูกจัดการใน render_as_2d_sprite() ข้างบนแล้ว
+        _ => unreachable!(),
     }
 }
 
@@ -401,7 +414,7 @@ fn spawn_dropped_item_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
     block_mats: Res<crate::voxel::BlockMaterials>,
-    campfire_assets: Res<crate::voxel::CampfireAssets>,
+    campfire_assets: Res<crate::voxel::BlockModelAssets>,
 ) {
     for ev in events.read() {
         // ขนาดของตกพื้น: บล็อกคิวบ์เล็ก, tool โมเดลจริงใหญ่หน่อย, แผ่นแบนกลางๆ

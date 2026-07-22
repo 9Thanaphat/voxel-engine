@@ -224,6 +224,8 @@ fn main() {
         .init_resource::<ui::HeldStack>()
         .init_resource::<voxel::InteractionMode>()
         .init_resource::<voxel::ActiveFluids>()
+        .init_resource::<voxel::PendingBlockUpdates>()
+        .init_resource::<voxel::ActivePools>()
         .init_resource::<voxel::ActiveTnt>()
         .init_resource::<voxel::ExplosionDebug>()
         .init_resource::<particles::ActiveShockwaves>()
@@ -326,6 +328,7 @@ fn main() {
                 ui::update_held_icon.after(voxel::start_icon_bake),
                 ui::age_chat_lines,
                 ui::update_chat_ui,
+                ui::update_underwater_overlay,
                 command::run_commands,
                 ui::update_hotbar_ui.after(voxel::start_icon_bake),
                 ui::bake_palette_icons.after(voxel::start_icon_bake),
@@ -340,12 +343,12 @@ fn main() {
         )
         .add_systems(
             OnEnter(GameState::InGame),
-            (reset_paused, voxel::position_player_for_terrain, ui::show_controls_hint),
+            (reset_paused, voxel::position_player_for_terrain, world_save::load_game_system.after(voxel::position_player_for_terrain), ui::show_controls_hint),
         )
         // ออกจากโลก: เซฟที่ค้าง + ล้างโลกทิ้ง ไม่งั้นค้างเป็นฉากหลังเมนูหลัก
         .add_systems(
             OnExit(GameState::InGame),
-            (voxel::unload_world_on_exit, lod::clear_lod_on_exit, voxel::clear_breaking_on_exit),
+            (world_save::save_on_exit_system, voxel::unload_world_on_exit, lod::clear_lod_on_exit, voxel::clear_breaking_on_exit),
         )
         .add_systems(
             Update,
@@ -368,6 +371,9 @@ fn main() {
                 dem::dem_stream_system,
                 voxel::start_icon_bake,
                 voxel::finish_icon_bake,
+                voxel::propagate_render_layers,
+                world_save::auto_save_system,
+                voxel::block_update_system,
             ).run_if(in_state(GameState::InGame)),
         )
         // ---- Networking ----

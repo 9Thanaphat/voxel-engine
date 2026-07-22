@@ -124,6 +124,9 @@ pub struct HeldStack(pub Option<crate::voxel::ItemStack>);
 #[derive(Component)]
 pub struct ScreenFlashOverlay;
 
+#[derive(Component)]
+pub struct UnderwaterOverlay;
+
 /// ความจ้าที่ค้างอยู่บนจอ (ตั้งโดยระบบ trigger ใน particles.rs, decay ที่นี่)
 #[derive(Resource, Default)]
 pub struct ScreenFlash {
@@ -350,6 +353,20 @@ pub fn setup_ui(mut commands: Commands) {
         BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.0)),
         bevy::ui::GlobalZIndex(100),
         ScreenFlashOverlay,
+        InGameUi,
+        Visibility::Hidden,
+    ));
+
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.4, 0.8, 0.4)),
+        bevy::ui::GlobalZIndex(10), // ต่ำกว่า flash
+        UnderwaterOverlay,
         InGameUi,
         Visibility::Hidden,
     ));
@@ -1396,6 +1413,7 @@ pub fn hotbar_item_name_system(
     if inventory_open.0 {
         *timer = 0.0;
     }
+    
     let current = (hotbar.selected, hotbar.slots[hotbar.selected].map(|s| s.item));
     if *last != Some(current) {
         // เฟรมแรกของแอป (last = None) ไม่ต้องเด้ง — ตั้ง baseline เฉยๆ
@@ -1415,9 +1433,29 @@ pub fn hotbar_item_name_system(
     if *timer > 0.0 {
         *timer -= time.delta_secs();
     }
-    let want = if *timer > 0.0 { Visibility::Visible } else { Visibility::Hidden };
+    let want = if *timer > 0.0 && !inventory_open.0 { Visibility::Visible } else { Visibility::Hidden };
     if let Ok(mut vis) = root_query.single_mut() {
         if *vis != want { *vis = want; }
+    }
+}
+
+pub fn update_underwater_overlay(
+    camera_query: Query<&Transform, With<crate::camera::FreeCamera>>,
+    world: Res<crate::voxel::VoxelWorld>,
+    mut overlay_query: Query<&mut Visibility, With<UnderwaterOverlay>>,
+) {
+    let mut in_water = false;
+    if let Some(transform) = camera_query.iter().next() {
+        let block = world.get_block(
+            transform.translation.x.floor() as i32,
+            transform.translation.y.floor() as i32,
+            transform.translation.z.floor() as i32,
+        );
+        in_water = block.is_water();
+    }
+    
+    for mut vis in &mut overlay_query {
+        *vis = if in_water { Visibility::Visible } else { Visibility::Hidden };
     }
 }
 

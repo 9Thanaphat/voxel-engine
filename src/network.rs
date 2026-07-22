@@ -514,7 +514,7 @@ pub fn update_remote_held_items(
     mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
     block_mats: Res<crate::voxel::BlockMaterials>,
-    campfire_assets: Res<crate::voxel::CampfireAssets>,
+    campfire_assets: Res<crate::voxel::BlockModelAssets>,
 ) {
     for (rp, mut rig) in players.iter_mut() {
         // รอ rig พร้อมก่อน (โมเดลเพิ่งโหลด) — เฟรมถัดไปค่อยเกาะ

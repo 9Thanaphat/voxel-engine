@@ -119,3 +119,106 @@ pub fn parse_seed(input: &str) -> u32 {
     trimmed.hash(&mut hasher);
     hasher.finish() as u32
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PlayerSaveData {
+    pub position: [f32; 3],
+    pub pitch: f32,
+    pub yaw: f32,
+    pub fly: bool,
+    pub velocity_y: f32,
+    pub third_person: bool,
+    pub hotbar_selected: usize,
+    pub hotbar_items: Vec<Option<crate::item::WireItemStack>>,
+}
+
+pub fn save_player_and_electricity(
+    grid: &crate::electricity::ElectricalGrid,
+    transform: &bevy::prelude::Transform,
+    camera: &crate::camera::FreeCamera,
+    hotbar: &crate::voxel::Hotbar,
+) {
+    let dir = crate::voxel::active_save_dir();
+        if let Ok(bytes) = bincode::serialize(grid) {
+            let _ = std::fs::write(dir.join("electricity.bin"), bytes);
+        }
+        let items: Vec<_> = hotbar.slots.iter().map(|s| s.map(crate::item::WireItemStack::from_stack)).collect();
+        let player_data = PlayerSaveData {
+            position: transform.translation.into(),
+            pitch: camera.pitch,
+            yaw: camera.yaw,
+            fly: camera.fly,
+            velocity_y: camera.velocity_y,
+            third_person: camera.third_person,
+            hotbar_selected: hotbar.selected,
+            hotbar_items: items,
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&player_data) {
+            let _ = std::fs::write(dir.join("player.json"), json);
+        }
+}
+
+pub fn auto_save_system(
+    time: bevy::prelude::Res<bevy::prelude::Time>,
+    mut timer: bevy::prelude::Local<f32>,
+    grid: bevy::prelude::Res<crate::electricity::ElectricalGrid>,
+    camera_q: bevy::prelude::Query<(&bevy::prelude::Transform, &crate::camera::FreeCamera)>,
+    hotbar: bevy::prelude::Res<crate::voxel::Hotbar>,
+    mut chat: bevy::prelude::ResMut<crate::ui::ChatState>,
+) {
+    *timer += time.delta_secs();
+    if *timer >= 120.0 { // 2 minutes
+        *timer = 0.0;
+        if let Ok((transform, camera)) = camera_q.single() {
+            save_player_and_electricity(&grid, transform, camera, &hotbar);
+            chat.push_system("Auto-saved game.");
+        }
+    }
+}
+
+pub fn save_on_exit_system(
+    grid: bevy::prelude::Res<crate::electricity::ElectricalGrid>,
+    camera_q: bevy::prelude::Query<(&bevy::prelude::Transform, &crate::camera::FreeCamera)>,
+    hotbar: bevy::prelude::Res<crate::voxel::Hotbar>,
+) {
+    if let Ok((transform, camera)) = camera_q.single() {
+        save_player_and_electricity(&grid, transform, camera, &hotbar);
+    }
+}
+
+pub fn load_game_system(
+    mut grid: bevy::prelude::ResMut<crate::electricity::ElectricalGrid>,
+    mut camera_q: bevy::prelude::Query<(&mut bevy::prelude::Transform, &mut crate::camera::FreeCamera)>,
+    mut hotbar: bevy::prelude::ResMut<crate::voxel::Hotbar>,
+    mut topo_writer: bevy::prelude::MessageWriter<crate::electricity::PowerTopologyChanged>,
+) {
+    let dir = crate::voxel::active_save_dir();
+        if let Ok(bytes) = std::fs::read(dir.join("electricity.bin")) {
+            if let Ok(loaded_grid) = bincode::deserialize(&bytes) {
+                *grid = loaded_grid;
+                topo_writer.write(crate::electricity::PowerTopologyChanged);
+            }
+        }
+        if let Ok(json) = std::fs::read_to_string(dir.join("player.json")) {
+            if let Ok(data) = serde_json::from_str::<PlayerSaveData>(&json) {
+                if let Ok((mut transform, mut camera)) = camera_q.single_mut() {
+                    transform.translation = bevy::prelude::Vec3::from(data.position);
+                    camera.pitch = data.pitch;
+                    camera.yaw = data.yaw;
+                    camera.fly = data.fly;
+                    camera.velocity_y = data.velocity_y;
+                    camera.third_person = data.third_person;
+                    
+                    use bevy::prelude::*;
+                    transform.rotation = Quat::from_axis_angle(Vec3::Y, camera.yaw) * Quat::from_axis_angle(Vec3::X, camera.pitch);
+                }
+                
+                hotbar.selected = data.hotbar_selected;
+                for (i, wire_item) in data.hotbar_items.into_iter().enumerate() {
+                    if i < hotbar.slots.len() {
+                        hotbar.slots[i] = wire_item.and_then(|w| w.to_stack());
+                    }
+                }
+            }
+        }
+}

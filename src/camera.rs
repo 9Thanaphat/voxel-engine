@@ -184,6 +184,17 @@ pub fn camera_movement_system(
             }
         } else {
             let mut feet = transform.translation - Vec3::Y * EYE_HEIGHT;
+            let head_block = world.get_block(
+                transform.translation.x.floor() as i32,
+                transform.translation.y.floor() as i32,
+                transform.translation.z.floor() as i32,
+            );
+            let feet_block = world.get_block(
+                feet.x.floor() as i32,
+                (feet.y + 0.1).floor() as i32,
+                feet.z.floor() as i32,
+            );
+            let in_water = head_block.is_water() || feet_block.is_water();
 
             // chunk ใต้ตัวยังไม่โหลด — หยุดฟิสิกส์ไว้ก่อน กันตกทะลุโลก
             let chunk = IVec2::new(
@@ -195,13 +206,18 @@ pub fn camera_movement_system(
             }
 
             let dt = time.delta_secs();
-            let horiz = if direction != Vec3::ZERO {
+            let mut horiz = if direction != Vec3::ZERO {
                 direction.normalize() * WALK_SPEED * dt
             } else {
                 Vec3::ZERO
             };
-
-            camera.velocity_y = (camera.velocity_y - GRAVITY * dt).max(-50.0);
+            
+            if in_water {
+                horiz *= 0.6; // เดินช้าลงในน้ำ
+                camera.velocity_y = (camera.velocity_y - GRAVITY * 0.2 * dt).max(-4.0); // จมช้าลง
+            } else {
+                camera.velocity_y = (camera.velocity_y - GRAVITY * dt).max(-50.0);
+            }
 
             move_axis(&world, &mut feet, 0, horiz.x);
             move_axis(&world, &mut feet, 2, horiz.z);
@@ -216,7 +232,9 @@ pub fn camera_movement_system(
                 probe.y -= 0.02;
                 aabb_collides(&world, probe)
             };
-            if grounded && pressed(KeyCode::Space) {
+            if in_water && pressed(KeyCode::Space) {
+                camera.velocity_y = 3.5; // ว่ายน้ำขึ้น
+            } else if grounded && pressed(KeyCode::Space) {
                 camera.velocity_y = JUMP_SPEED;
             }
 

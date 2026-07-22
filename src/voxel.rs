@@ -229,9 +229,9 @@ pub const BLOCK_DEFS: [BlockDef; 35] = [
         overlay_side: &[] },
     BlockDef { name: "Switch (OFF)", color: [0.6, 0.6, 0.6, 1.0], solid: true, transparent: false, emission: None, hardness: 1.0,
         tex_top: &["textures/switch-off.png"], tex_side: &["textures/switch-off.png"], tex_bottom: &["textures/switch-off.png"], overlay_side: &[] },
-    BlockDef { name: "SmartLamp (OFF)", color: [0.2, 0.2, 0.2, 1.0], solid: true, transparent: false, emission: None, hardness: 1.0,
+    BlockDef { name: "SmartLamp (OFF)", color: [0.2, 0.2, 0.2, 1.0], solid: true, transparent: true, emission: None, hardness: 1.0,
         tex_top: &["textures/lamp-off.png"], tex_side: &["textures/lamp-off.png"], tex_bottom: &["textures/lamp-off.png"], overlay_side: &[] },
-    BlockDef { name: "SmartLamp (ON)", color: [0.9, 0.9, 0.9, 1.0], solid: true, transparent: false, emission: Some([1.5, 1.5, 1.5]), hardness: 1.0,
+    BlockDef { name: "SmartLamp (ON)", color: [0.9, 0.9, 0.9, 1.0], solid: true, transparent: true, emission: Some([1.5, 1.5, 1.5]), hardness: 1.0,
         tex_top: &["textures/lamp-on.png"], tex_side: &["textures/lamp-on.png"], tex_bottom: &["textures/lamp-on.png"], overlay_side: &[] },
     BlockDef { name: "Switch (ON)", color: [0.3, 0.9, 0.3, 1.0], solid: true, transparent: false, emission: None, hardness: 1.0,
         tex_top: &["textures/switch-on.png"], tex_side: &["textures/switch-on.png"], tex_bottom: &["textures/switch-on.png"], overlay_side: &[] },
@@ -1246,7 +1246,7 @@ pub fn create_mesh_from_blocks(
                     let block = blocks.get(c[0] as usize, c[1] as usize, c[2] as usize);
                     // TallGrass ไม่ใช่ลูกบาศก์ — วาดแยกเป็นกากบาทท้ายฟังก์ชัน
                     // Chiseled ข้ามไปก่อน วาดแยกทีหลัง
-                    if block == BlockType::Air || block == BlockType::TallGrass || block == BlockType::Chiseled || block == BlockType::Campfire {
+                    if block == BlockType::Air || block == BlockType::TallGrass || block == BlockType::Chiseled || block == BlockType::Campfire || block == BlockType::SmartLamp || block == BlockType::SmartLampOn {
                         continue;
                     }
 
@@ -1764,7 +1764,7 @@ fn generate_chunk_blocks(
 ///
 /// วนเฉพาะแถบ y [y_min, y_max] (superset ของน้ำจริง จาก metadata grow-only)
 /// คืน (buffer, ช่วง y ที่เจอน้ำจริง) ไว้ tighten metadata — อิงการเจอ cell น้ำ
-/// ไม่ใช่การมี face (น้ำจมไร้หน้าก็ยังต้องอยู่ใน band ไม่งั้นรูโผล่ตอน seam เปลี่ยน)
+/// ไม่ใช่การมี face (น้ำจมไร้หน้าก็ยังต้องอยู่ใน band miếng khôngรูโผล่ตอน seam เปลี่ยน)
 pub fn create_water_mesh(
     chunk_pos: IVec2,
     blocks: &ChunkBlocks,
@@ -2949,6 +2949,12 @@ pub fn refresh_chunk_lamp_lights(
     chunk.blocks.for_each_matching(|b| lamp_emission(b).is_some(), |x, y, z, block| {
         let Some(color) = lamp_emission(block) else { return };
 
+        let y_offset = if block == BlockType::SmartLamp || block == BlockType::SmartLampOn {
+            0.625 // ปรับตำแหน่ง PointLight ให้ตรงกับตำแหน่งหลอดไฟใน model
+        } else {
+            0.5
+        };
+
         let entity = commands.spawn((
             PointLight {
                 color,
@@ -2959,7 +2965,7 @@ pub fn refresh_chunk_lamp_lights(
             },
             Transform::from_xyz(
                 base_x + x as f32 + 0.5,
-                y as f32 + 0.5,
+                y as f32 + y_offset,
                 base_z + z as f32 + 0.5,
             ),
         )).id();
@@ -2981,7 +2987,7 @@ pub fn refresh_chunk_campfire_models(
     commands: &mut Commands,
     world: &mut VoxelWorld,
     chunk_pos: IVec2,
-    assets: &CampfireAssets,
+    assets: &BlockModelAssets,
 ) {
     if let Some(old) = world.campfire_models.remove(&chunk_pos) {
         for entity in old {
@@ -2995,31 +3001,57 @@ pub fn refresh_chunk_campfire_models(
     let base_z = (chunk_pos.y * CHUNK_WIDTH as i32) as f32;
 
     let mut models = Vec::new();
-    chunk.blocks.for_each_matching(|b| b == BlockType::Campfire, |x, y, z, _block| {
-        let entity = commands.spawn((
-            WorldAssetRoot(assets.scene.clone()),
-            Transform::from_xyz(
-                base_x + x as f32 + 0.5,
-                y as f32,
-                base_z + z as f32 + 0.5,
-            ),
-        )).id();
-        models.push(entity);
-    });
+    chunk.blocks.for_each_matching(
+        |b| b == BlockType::Campfire || b == BlockType::SmartLamp || b == BlockType::SmartLampOn, 
+        |x, y, z, block| {
+            let scene = if block == BlockType::Campfire {
+                assets.campfire_scene.clone()
+            } else {
+                assets.light_bulb_scene.clone()
+            };
+
+            let rotation = if block == BlockType::SmartLamp || block == BlockType::SmartLampOn {
+                let idx = ChunkData::get_index(x, y, z);
+                let facing = chunk.facings.get(&idx).copied().unwrap_or(4);
+                // 2 = +X, 3 = -X, 4 = +Z, 5 = -Z
+                match facing {
+                    2 => std::f32::consts::PI / 2.0,
+                    3 => -std::f32::consts::PI / 2.0,
+                    4 => 0.0,
+                    5 => std::f32::consts::PI,
+                    _ => 0.0,
+                }
+            } else {
+                0.0
+            };
+
+            let entity = commands.spawn((
+                WorldAssetRoot(scene),
+                Transform::from_xyz(
+                    base_x + x as f32 + 0.5,
+                    y as f32,
+                    base_z + z as f32 + 0.5,
+                ).with_rotation(Quat::from_rotation_y(rotation)),
+            )).id();
+            models.push(entity);
+        }
+    );
     if !models.is_empty() {
         world.campfire_models.insert(chunk_pos, models);
     }
 }
 
-/// scene ของ Campfire แคชไว้ครั้งเดียว (กัน asset_server.load(path) ซ้ำทุกครั้งที่ chunk refresh)
+/// แคช Asset ของโมเดล 3D ต่างๆ ไว้ที่เดียวกัน
 #[derive(Resource)]
-pub struct CampfireAssets {
-    pub scene: Handle<WorldAsset>,
+pub struct BlockModelAssets {
+    pub campfire_scene: Handle<WorldAsset>,
+    pub light_bulb_scene: Handle<WorldAsset>,
 }
 
 pub fn setup_campfire_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.insert_resource(CampfireAssets {
-        scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("model/campfire.gltf")),
+    commands.insert_resource(BlockModelAssets {
+        campfire_scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("model/campfire.gltf")),
+        light_bulb_scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("model/light_blub.gltf")),
     });
 }
 
@@ -3037,7 +3069,7 @@ pub fn process_generated_chunks_system(
     mut client_sync: Option<ResMut<crate::network::ClientSync>>,
     mut active_fluids: ResMut<ActiveFluids>,
     mut active_tnt: ResMut<ActiveTnt>,
-    campfire_assets: Res<CampfireAssets>,
+    campfire_assets: Res<BlockModelAssets>,
 ) {
     // Process Blocks
     let mut received_blocks = Vec::new();
@@ -3538,7 +3570,7 @@ pub fn spawn_block_model(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     block_mats: &BlockMaterials,
-    campfire_assets: &CampfireAssets,
+    campfire_assets: &BlockModelAssets,
     block: BlockType,
     pos: Vec3,
     size: f32,
@@ -3546,7 +3578,15 @@ pub fn spawn_block_model(
 ) -> Entity {
     if block == BlockType::Campfire {
         return commands.spawn((
-            WorldAssetRoot(campfire_assets.scene.clone()),
+            WorldAssetRoot(campfire_assets.campfire_scene.clone()),
+            Transform::from_translation(pos).with_scale(Vec3::splat(size)),
+            layers,
+        )).id();
+    }
+
+    if block == BlockType::SmartLamp || block == BlockType::SmartLampOn {
+        return commands.spawn((
+            WorldAssetRoot(campfire_assets.light_bulb_scene.clone()),
             Transform::from_translation(pos).with_scale(Vec3::splat(size)),
             layers,
         )).id();
@@ -3604,7 +3644,7 @@ pub fn spawn_block_model(
 /// ไม่มี entry ของ Campfire ตั้งใจ (glTF scene ยังไม่ยืนยันว่า RenderLayers ทะลุเข้าไปในตัว scene
 /// ลูกๆ ได้จริงใน Bevy 0.19 — Campfire เลยยังคงใช้ fallback สีพื้นเดิมไปก่อน กันเสี่ยง)
 #[derive(Resource, Default)]
-pub struct ItemIconCache(pub HashMap<BlockType, Handle<Image>>);
+pub struct ItemIconCache(pub HashMap<crate::item::Item, Handle<Image>>);
 
 /// entity ของฉากลับ render icon ที่รอ despawn (รอ 2-3 เฟรมให้กล้อง render จริงก่อนถึงจะทิ้งได้ —
 /// spawn แล้ว despawn เฟรมเดียวกันจะโดน command buffer ตัดจบก่อนถึง render เลย ไม่ทันได้ render)
@@ -3625,7 +3665,8 @@ pub fn start_icon_bake(
     mut icons: ResMut<ItemIconCache>,
     mut bake_state: ResMut<IconBakeState>,
     block_mats: Res<BlockMaterials>,
-    campfire_assets: Res<CampfireAssets>,
+    campfire_assets: Res<BlockModelAssets>,
+    asset_server: Res<AssetServer>,
 ) {
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 
@@ -3634,11 +3675,22 @@ pub fn start_icon_bake(
     }
     *done = true;
 
-    let mut seen: std::collections::HashSet<BlockType> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<crate::item::Item> = std::collections::HashSet::new();
     let mut layer: usize = 1; // layer 0 = ฉากเกมจริง เว้นไว้ไม่ใช้กับ icon
     for item in PLACEABLE_ITEMS {
-        let crate::item::Item::Block(block) = item else { continue };
-        if block == BlockType::Campfire || !seen.insert(block) {
+        if !seen.insert(item) {
+            continue;
+        }
+
+        // เฉพาะบล็อก (ที่ไม่ใช่หญ้าสูง) กับ Pickaxe ที่จะเรนเดอร์ 3D
+        let is_pickaxe = matches!(item, crate::item::Item::Tool(crate::item::ToolType::Pickaxe));
+        let is_block = match item {
+            crate::item::Item::Block(crate::voxel::BlockType::TallGrass) => false,
+            crate::item::Item::Block(_) => true,
+            _ => false,
+        };
+        
+        if !is_block && !is_pickaxe {
             continue;
         }
 
@@ -3652,15 +3704,28 @@ pub fn start_icon_bake(
         image.texture_descriptor.usage =
             TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::RENDER_ATTACHMENT;
         let image_handle = images.add(image);
-        icons.0.insert(block, image_handle.clone());
+        icons.0.insert(item, image_handle.clone());
 
         let render_layer = bevy::camera::visibility::RenderLayers::layer(layer);
         layer += 1;
 
-        let model = spawn_block_model(
-            &mut commands, &mut meshes, &mut materials, &block_mats, &campfire_assets,
-            block, Vec3::ZERO, 1.0, render_layer.clone(),
-        );
+        let model = if let crate::item::Item::Block(block) = item {
+            spawn_block_model(
+                &mut commands, &mut meshes, &mut materials, &block_mats, &campfire_assets,
+                block, Vec3::ZERO, 1.0, render_layer.clone(),
+            )
+        } else {
+            use bevy::gltf::GltfAssetLabel;
+            use bevy::light::NotShadowCaster;
+            let path = crate::item::tool_model_path(crate::item::ToolType::Pickaxe).unwrap();
+            let asset = asset_server.load(GltfAssetLabel::Scene(0).from_asset(path));
+            commands.spawn((
+                WorldAssetRoot(asset),
+                Transform::from_translation(Vec3::ZERO).with_scale(Vec3::splat(1.0)),
+                render_layer.clone(),
+                NotShadowCaster,
+            )).id()
+        };
         bake_state.cleanup.push(model);
 
         let light = commands.spawn((
@@ -3682,7 +3747,7 @@ pub fn start_icon_bake(
         )).id();
         bake_state.cleanup.push(camera);
     }
-    bake_state.frames_left = 5;
+    bake_state.frames_left = 120; // รอ 2 วินาที (60fps) เพื่อให้ GLTF โหลดและ propagate RenderLayers ทัน
 }
 
 /// despawn ฉากลับ/กล้อง render icon ทิ้งหลังรอครบเฟรม (icon ไม่เปลี่ยนตลอดเกม render ครั้งเดียวพอ)
@@ -3694,6 +3759,18 @@ pub fn finish_icon_bake(mut commands: Commands, mut bake_state: ResMut<IconBakeS
     if bake_state.frames_left == 0 {
         for e in bake_state.cleanup.drain(..) {
             commands.entity(e).despawn();
+        }
+    }
+}
+
+pub fn propagate_render_layers(
+    mut commands: Commands,
+    q_parents: Query<&bevy::camera::visibility::RenderLayers>,
+    q_children: Query<(Entity, &ChildOf), Without<bevy::camera::visibility::RenderLayers>>,
+) {
+    for (entity, parent) in q_children.iter() {
+        if let Ok(layers) = q_parents.get(parent.0) {
+            commands.entity(entity).insert(layers.clone());
         }
     }
 }
@@ -3818,7 +3895,7 @@ pub fn voxel_raycast_system(
 
     let max_dist = 6.0;
 
-    if *interaction_mode == InteractionMode::SubVoxel {
+    if *interaction_mode == InteractionMode::SubVoxel || *interaction_mode == InteractionMode::Wiring {
         let max_steps = 600;
         let step = 0.01;
         let mut prev_macro = IVec3::new(origin.x.floor() as i32, origin.y.floor() as i32, origin.z.floor() as i32);
@@ -3872,14 +3949,15 @@ pub fn voxel_raycast_system(
                         sub_pos: Some(s_pos),
                     });
 
-                    // Draw sub-voxel box
-                    let min = Vec3::new(
-                        mx as f32 + sx as f32 / 16.0,
-                        my as f32 + sy as f32 / 16.0,
-                        mz as f32 + sz as f32 / 16.0,
-                    );
-                    let max = min + Vec3::splat(1.0 / 16.0);
-                    gizmos.cube(Transform::from_translation((min + max) * 0.5).with_scale(max - min), Color::BLACK);
+                    if *interaction_mode == InteractionMode::SubVoxel {
+                        let min = Vec3::new(
+                            mx as f32 + sx as f32 / 16.0,
+                            my as f32 + sy as f32 / 16.0,
+                            mz as f32 + sz as f32 / 16.0,
+                        );
+                        let max = min + Vec3::splat(1.0 / 16.0);
+                        gizmos.cube(Transform::from_translation((min + max) * 0.5).with_scale(max - min), Color::BLACK);
+                    }
                     
                     return;
                 }
@@ -3935,7 +4013,7 @@ pub fn voxel_raycast_system(
         }
 
         let block = world.get_block(map_x, map_y, map_z);
-        if block != BlockType::Air {
+        if block != BlockType::Air && !block.is_water() {
             hit = true;
             break;
         }
@@ -4292,8 +4370,8 @@ pub fn block_interaction_system(
     mut pools: ResMut<ActivePools>,
     mut fx_writer: MessageWriter<crate::particles::BlockFx>,
     (settings, mut active_tnt, mut spawn_events, mut hotbar): (Res<crate::GameSettings>, ResMut<ActiveTnt>, MessageWriter<crate::item::SpawnDroppedItemEvent>, ResMut<Hotbar>),
-    campfire_assets: Res<CampfireAssets>,
-    (time, mut breaking): (Res<Time>, ResMut<BreakingProgress>),
+    campfire_assets: Res<BlockModelAssets>,
+    (time, mut breaking, mut block_updates): (Res<Time>, ResMut<BreakingProgress>, ResMut<PendingBlockUpdates>),
 ) {
     let survival = settings.game_mode == crate::GameMode::Survival;
     // หน้าต่างช่องเก็บของเปิดอยู่ — คลิกเป็นของหน้าต่าง ไม่ใช่การขุด/วาง
@@ -4523,9 +4601,15 @@ pub fn block_interaction_system(
                         && pmin.z < bmax.z && pmax.z > bmin.z;
                 }
             }
+            if !blocked && selected.0 == BlockType::TallGrass {
+                let below = world.get_block(p.x, p.y - 1, p.z);
+                if below != BlockType::Grass && below != BlockType::Dirt {
+                    blocked = true;
+                }
+            }
 
             if !blocked {
-                edit = Some(if matches!(selected.0, BlockType::Furnace | BlockType::Chest) {
+                edit = Some(if matches!(selected.0, BlockType::Furnace | BlockType::Chest | BlockType::SmartLamp) {
                     // หน้า "หน้า" หันหาผู้เล่นเสมอ: เทียบแกน X/Z ที่ต่างจากศูนย์กลางบล็อกมากกว่า
                     let facing = camera_query.iter().next().map(|cam| {
                         let center = p.as_vec3() + Vec3::splat(0.5);
@@ -4588,8 +4672,10 @@ pub fn block_interaction_system(
     //   ถ้าปลุกไว้เฉยๆ set จะโตไม่หยุดเพราะไม่มีระบบมา drain
     if net_client.is_none() {
         active_fluids.0.insert(tp);
+        block_updates.0.insert(tp);
         for dir in [IVec3::new(1,0,0), IVec3::new(-1,0,0), IVec3::new(0,1,0), IVec3::new(0,-1,0), IVec3::new(0,0,1), IVec3::new(0,0,-1)] {
             active_fluids.0.insert(tp + dir);
+            block_updates.0.insert(tp + dir);
         }
     }
 
@@ -4615,6 +4701,9 @@ pub fn block_interaction_system(
 
 #[derive(Resource, Default)]
 pub struct ActiveFluids(pub std::collections::HashSet<IVec3>);
+
+#[derive(Resource, Default)]
+pub struct PendingBlockUpdates(pub std::collections::HashSet<IVec3>);
 
 // --------------------------------------------------------
 // TNT / ระเบิด — โมเดล ray แบกพลังงาน + สะท้อนบนหน้าบล็อก
@@ -4869,6 +4958,7 @@ pub fn tnt_detonation_system(
     mut active_tnt: ResMut<ActiveTnt>,
     mut mp: MeshingParams,
     mut active_fluids: ResMut<ActiveFluids>,
+    mut block_updates: ResMut<PendingBlockUpdates>,
     mut pools: ResMut<ActivePools>,
     (net_server, mut net_out, mut net_fx): (
         Option<Res<bevy_renet::RenetServer>>,
@@ -4878,7 +4968,7 @@ pub fn tnt_detonation_system(
     mut fx: MessageWriter<crate::particles::ExplosionFx>,
     mut debug: ResMut<ExplosionDebug>,
     jobs: Res<NukeJobs>,
-    campfire_assets: Res<CampfireAssets>,
+    campfire_assets: Res<BlockModelAssets>,
 ) {
     if active_tnt.0.is_empty() {
         return;
@@ -4981,8 +5071,10 @@ pub fn tnt_detonation_system(
         let Some(tp) = apply_block_edit(&mut world, edit) else { continue };
         pools.invalidate_touching(tp);
         active_fluids.0.insert(tp);
+        block_updates.0.insert(tp);
         for d in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
             active_fluids.0.insert(tp + d);
+            block_updates.0.insert(tp + d);
         }
         remesh.extend(edit_affected_chunks(tp));
         edited_chunks.insert(IVec2::new(
@@ -5120,7 +5212,7 @@ pub fn nuke_apply_system(
     jobs: Res<NukeJobs>,
     mut apps: ResMut<NukeApplication>,
     mut mp: MeshingParams,
-    mut active_fluids: ResMut<ActiveFluids>,
+    (mut active_fluids, mut _block_updates): (ResMut<ActiveFluids>, ResMut<PendingBlockUpdates>),
     mut pools: ResMut<ActivePools>,
     mut active_tnt: ResMut<ActiveTnt>,
     (net_server, mut host_sync, mut net_out, mut net_fx): (
@@ -5131,7 +5223,7 @@ pub fn nuke_apply_system(
     ),
     mut fx: MessageWriter<crate::particles::ExplosionFx>,
     mut debug: ResMut<ExplosionDebug>,
-    campfire_assets: Res<CampfireAssets>,
+    campfire_assets: Res<BlockModelAssets>,
 ) {
     use crate::network::BlockEdit;
 
@@ -6255,6 +6347,39 @@ pub fn fluid_simulation_system(
         &mut remesh_queue, &mut net_out, is_host,
     );
     // remesh ชั้นน้ำถูกระบายรายเฟรมที่หัวฟังก์ชัน (ไม่ยิงก้อนใหญ่ท้าย tick แล้ว)
+}
+
+pub fn block_update_system(
+    mut world: ResMut<VoxelWorld>,
+    mut updates: ResMut<PendingBlockUpdates>,
+    mut spawn_events: MessageWriter<crate::item::SpawnDroppedItemEvent>,
+    mut net_out: ResMut<crate::network::PendingNetEdits>,
+    net_client: Option<Res<bevy_renet::RenetClient>>,
+) {
+    if net_client.is_some() { return; } // เฉพาะ host/single player
+    for p in updates.0.drain() {
+        let block = world.get_block(p.x, p.y, p.z);
+        if block == BlockType::TallGrass {
+            let below = world.get_block(p.x, p.y - 1, p.z);
+            if below != BlockType::Grass && below != BlockType::Dirt {
+                // ฐานหาย -> ทุบหญ้าทิ้ง
+                world.set_block(p.x, p.y, p.z, BlockType::Air);
+                spawn_events.write(crate::item::SpawnDroppedItemEvent {
+                    item: crate::item::Item::Block(BlockType::TallGrass),
+                    pos: p.as_vec3() + Vec3::new(0.5, 0.5, 0.5),
+                    velocity: Vec3::new(
+                        (fastrand::f32() - 0.5) * 4.0,
+                        2.0 + fastrand::f32() * 3.0,
+                        (fastrand::f32() - 0.5) * 4.0,
+                    ),
+                });
+                net_out.0.push_back((None, crate::network::BlockEdit::SetBlock {
+                    pos: p.to_array(),
+                    block: BlockType::Air as u8,
+                }));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

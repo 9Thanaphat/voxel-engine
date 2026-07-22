@@ -132,6 +132,11 @@ fn debris_effect() -> EffectAsset {
 
     let update_accel = AccelModifier::new(writer.lit(Vec3::Y * -14.0).expr());
     let update_drag = LinearDragModifier::new(writer.lit(1.5).expr());
+    // สุ่มแผ่น texture ย่อย (Flipbook) 4x4 = 16 แผ่น (index 0-15)
+    let init_sprite = SetAttributeModifier::new(
+        Attribute::SPRITE_INDEX,
+        (writer.rand(ScalarType::Float) * writer.lit(16.0)).cast(ScalarType::Int).expr(),
+    );
 
     let texture_slot = writer.lit(0u32).expr();
     let mut module = writer.finish();
@@ -151,11 +156,15 @@ fn debris_effect() -> EffectAsset {
         .init(init_lifetime)
         .init(init_color)
         .init(init_rotation)
+        .init(init_sprite)
         .update(update_accel)
         .update(update_drag)
         .render(ParticleTextureModifier {
             texture_slot,
             sample_mapping: ImageSampleMapping::Modulate,
+        })
+        .render(FlipbookModifier {
+            sprite_grid_size: UVec2::new(4, 4),
         })
         .render(OrientModifier {
             mode: OrientMode::FaceCameraPosition,

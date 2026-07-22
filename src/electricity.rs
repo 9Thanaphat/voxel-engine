@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 /// ประเภทของขั้วไฟฟ้า
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PortType {
     Input,
     Output,
@@ -10,19 +10,20 @@ pub enum PortType {
 }
 
 /// ปลายทางที่สายไฟไปเชื่อมต่อ
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ConnectionTarget {
     pub block_pos: IVec3, // พิกัด Global ของบล็อกที่เป็นอุปกรณ์
     pub target_local_pos: IVec3, // พิกัด sub-voxel ภายในบล็อกนั้น (0..15)
 }
 
 /// ข้อมูลของขั้วไฟฟ้า 1 ขั้ว
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Terminal {
     pub local_pos: IVec3,
     pub port_type: PortType,
     pub connected_to: Vec<ConnectionTarget>,
     pub is_powered: bool,
+    pub max_connections: usize,
 }
 
 impl Terminal {
@@ -32,12 +33,18 @@ impl Terminal {
             port_type,
             connected_to: Vec::new(),
             is_powered: false,
+            max_connections: 4, // ค่าเริ่มต้นคือต่อได้ 4 เส้น
         }
+    }
+
+    pub fn with_max_connections(mut self, max: usize) -> Self {
+        self.max_connections = max;
+        self
     }
 }
 
 /// ประเภทของ Logic ภายในอุปกรณ์
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeviceLogic {
     Source, // จ่ายไฟเสมอ (เช่น เครื่องกำเนิดไฟฟ้า, สวิตช์ที่เปิดอยู่)
     Switch { is_on: bool }, // จ่ายไฟก็ต่อเมื่อ is_on == true
@@ -46,11 +53,12 @@ pub enum DeviceLogic {
 }
 
 /// ข้อมูลอุปกรณ์ไฟฟ้าทั้งหมดในโลก (เก็บโดยใช้พิกัด Global IVec3 เป็น Key)
-#[derive(Resource, Default)]
+#[derive(Resource, Default, serde::Serialize, serde::Deserialize)]
 pub struct ElectricalGrid {
     pub devices: HashMap<IVec3, ElectricalDevice>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ElectricalDevice {
     pub terminals: HashMap<IVec3, Terminal>,
     pub logic_type: DeviceLogic,
@@ -101,7 +109,7 @@ pub fn instant_power_update_system(
     mut world: ResMut<crate::voxel::VoxelWorld>,
     mut commands: Commands,
     mut mp: crate::voxel::MeshingParams,
-    campfire_assets: Res<crate::voxel::CampfireAssets>,
+    campfire_assets: Res<crate::voxel::BlockModelAssets>,
 ) {
     if events.is_empty() {
         return;
@@ -151,8 +159,8 @@ pub fn instant_power_update_system(
         let mut internal_outputs_to_trigger = Vec::new();
         
         // --- Logic ภายในอุปกรณ์ ---
-        // ถ้าเป็น Relay หรือ Source กระแสไฟสามารถวิ่งทะลุข้ามขั้วอื่นๆ ในบล็อกเดียวกันได้
-        if device.logic_type == DeviceLogic::Relay || device.logic_type == DeviceLogic::Source {
+        // ถ้าเป็น Relay, Source หรือ Lamp กระแสไฟสามารถวิ่งทะลุข้ามขั้วอื่นๆ ในบล็อกเดียวกันได้ (ต่ออนุกรม)
+        if device.logic_type == DeviceLogic::Relay || device.logic_type == DeviceLogic::Source || device.logic_type == DeviceLogic::Lamp {
             for (other_pos, other_term) in device.terminals.iter() {
                 // หาขั้วอื่นที่ไม่ใช่ขั้วที่เพิ่งวิ่งเข้ามา และเป็นขั้วที่จ่ายไฟออกได้
                 if *other_pos != current.target_local_pos && 
@@ -240,12 +248,24 @@ pub fn wiring_interaction_system(
     let block_pos = hit.pos;
 
     // 1. ตรวจสอบว่าบล็อกที่เล็งอยู่นั้นมีอุปกรณ์ไฟฟ้าหรือไม่
-    // และถ้ามี ให้ดึงพิกัดขั้วแรกสุดมาเลย (ผู้เล่นจะได้ไม่ต้องเล็งเป้าให้ตรงขั้ว 100%)
+    // และถ้ามี ให้หาขั้ว (Terminal) ที่อยู่ใกล้กับจุดที่เป้าเล็งชี้อยู่มากที่สุด
     let target_local_pos = if let Some(device) = grid.devices.get(&block_pos) {
-        if let Some((&local_pos, _)) = device.terminals.iter().next() {
-            Some(local_pos)
-        } else {
+        if device.terminals.is_empty() {
             None
+        } else if let Some(sub_pos) = hit.sub_pos {
+            let mut closest = None;
+            let mut min_dist_sq = 1000; // เพิ่มรัศมีให้ครอบคลุมทั้งบล็อก (จากเดิม 10)
+            for &local_pos in device.terminals.keys() {
+                let dist_sq = (local_pos - sub_pos).length_squared();
+                if dist_sq < min_dist_sq {
+                    min_dist_sq = dist_sq;
+                    closest = Some(local_pos);
+                }
+            }
+            closest
+        } else {
+            // เผื่อบัคไม่มี sub_pos ให้ดึงอันแรกมาใช้
+            device.terminals.keys().next().copied()
         }
     } else {
         None
@@ -276,24 +296,49 @@ pub fn wiring_interaction_system(
         // [State 2] จบการลากสายไฟ (เชื่อมต่อ 2 ขั้ว)
         if let Some(start_target) = wiring_state.start_port {
             if start_target != clicked_target {
-                // ผูกสายฝั่ง A ไป B
-                if let Some(dev_a) = grid.devices.get_mut(&start_target.block_pos) {
-                    if let Some(term_a) = dev_a.terminals.get_mut(&start_target.target_local_pos) {
-                        term_a.connected_to.push(clicked_target);
+                
+                // ตรวจสอบก่อนว่าขั้วเต็มหรือยัง
+                let mut can_connect = true;
+                if let Some(dev_a) = grid.devices.get(&start_target.block_pos) {
+                    if let Some(term_a) = dev_a.terminals.get(&start_target.target_local_pos) {
+                        if term_a.connected_to.len() >= term_a.max_connections {
+                            println!("Wiring failed: Start terminal is full.");
+                            can_connect = false;
+                        }
                     }
                 }
-                
-                // ผูกสายฝั่ง B กลับมา A (Undirected Graph)
-                if let Some(dev_b) = grid.devices.get_mut(&clicked_target.block_pos) {
-                    if let Some(term_b) = dev_b.terminals.get_mut(&clicked_target.target_local_pos) {
-                        term_b.connected_to.push(start_target);
+                if let Some(dev_b) = grid.devices.get(&clicked_target.block_pos) {
+                    if let Some(term_b) = dev_b.terminals.get(&clicked_target.target_local_pos) {
+                        if term_b.connected_to.len() >= term_b.max_connections {
+                            println!("Wiring failed: Target terminal is full.");
+                            can_connect = false;
+                        }
                     }
                 }
 
-                println!("Successfully connected wire!");
-                
-                // กระตุ้นให้ BFS ประมวลผลกราฟไฟฟ้าใหม่ทันที
-                fx_writer.write(PowerTopologyChanged);
+                if can_connect {
+                    // ผูกสายฝั่ง A ไป B
+                    if let Some(dev_a) = grid.devices.get_mut(&start_target.block_pos) {
+                        if let Some(term_a) = dev_a.terminals.get_mut(&start_target.target_local_pos) {
+                            // เช็คซ้ำกันต่อสายเบิ้ล (ถ้าต่ออยู่แล้วไม่เชื่อมซ้ำ)
+                            if !term_a.connected_to.contains(&clicked_target) {
+                                term_a.connected_to.push(clicked_target);
+                            }
+                        }
+                    }
+                    
+                    // ผูกสายฝั่ง B กลับมา A (Undirected Graph)
+                    if let Some(dev_b) = grid.devices.get_mut(&clicked_target.block_pos) {
+                        if let Some(term_b) = dev_b.terminals.get_mut(&clicked_target.target_local_pos) {
+                            if !term_b.connected_to.contains(&start_target) {
+                                term_b.connected_to.push(start_target);
+                            }
+                        }
+                    }
+                    
+                    println!("Successfully connected wire!");
+                    fx_writer.write(PowerTopologyChanged);
+                }
             }
         }
         
@@ -356,6 +401,7 @@ pub fn draw_wires_system(
     wiring_state: Res<WiringState>,
     target: Res<crate::voxel::TargetedBlock>,
     camera_query: Query<&GlobalTransform, With<crate::camera::FreeCamera>>,
+    interaction_mode: Res<crate::voxel::InteractionMode>,
 ) {
     // 1. วาดสายไฟทั้งหมดในระบบ
     // ใช้ HashSet กันการวาดสายไฟเส้นเดิมซ้ำ 2 รอบ (เพราะเป็นกราฟแบบ Undirected)
@@ -415,12 +461,40 @@ pub fn draw_wires_system(
             draw_catenary(&mut gizmos, start_world, end_world, Color::srgba(1.0, 1.0, 0.0, 0.5));
         }
     }
+
+    // 3. วาดกรอบ Highlight ขั้วไฟที่กำลังเล็งอยู่ (เฉพาะตอนถือสายไฟ)
+    if *interaction_mode == crate::voxel::InteractionMode::Wiring {
+        if let Some(hit) = target.0 {
+            if let Some(device) = grid.devices.get(&hit.pos) {
+                if let Some(sub_pos) = hit.sub_pos {
+                    let mut closest = None;
+                    let mut min_dist_sq = 1000; // เพิ่มรัศมีให้ครอบคลุมทั้งบล็อก
+                    for &local_pos in device.terminals.keys() {
+                        let dist_sq = (local_pos - sub_pos).length_squared();
+                        if dist_sq < min_dist_sq {
+                            min_dist_sq = dist_sq;
+                            closest = Some(local_pos);
+                        }
+                    }
+                    if let Some(local_pos) = closest {
+                        let world_pos = get_terminal_world_pos(&ConnectionTarget { block_pos: hit.pos, target_local_pos: local_pos });
+                        // วาดกล่องเขียวเรืองแสงล้อมรอบขั้วที่เล็งอยู่
+                        gizmos.cube(
+                            Transform::from_translation(world_pos).with_scale(Vec3::splat(0.12)),
+                            Color::srgb(0.0, 1.0, 0.0),
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub fn block_fx_listener_system(
     mut events: MessageReader<crate::particles::BlockFx>,
     mut grid: ResMut<ElectricalGrid>,
     mut topo_writer: MessageWriter<PowerTopologyChanged>,
+    world: Res<crate::voxel::VoxelWorld>,
 ) {
     use crate::voxel::BlockType::*;
     let mut changed = false;
@@ -458,12 +532,39 @@ pub fn block_fx_listener_system(
                     terminals: HashMap::new(),
                     logic_type,
                 };
-                let port_type = match fx.placed {
-                    SwitchOff | SwitchOn => PortType::Output,
-                    SmartLamp | SmartLampOn => PortType::Input,
-                    _ => unreachable!(),
-                };
-                device.terminals.insert(IVec3::new(8, 8, 8), Terminal::new(IVec3::new(8, 8, 8), port_type));
+                if matches!(fx.placed, SmartLamp | SmartLampOn) {
+                    // อ่าน Facing จาก world เพื่อหมุนพิกัดขั้วตามโมเดล 3D ที่ถูกหมุนตอนวาง
+                    let facing = world.get_block_facing(pos.x, pos.y, pos.z).unwrap_or(4);
+                    let angle = match facing {
+                        2 => std::f32::consts::PI / 2.0,
+                        3 => -std::f32::consts::PI / 2.0,
+                        4 => 0.0,
+                        5 => std::f32::consts::PI,
+                        _ => 0.0,
+                    };
+                    let cos = angle.cos();
+                    let sin = angle.sin();
+                    let rotate = |x: f32, z: f32| -> (i32, i32) {
+                        let fx = x - 7.5;
+                        let fz = z - 7.5;
+                        let rx = fx * cos - fz * sin;
+                        let rz = fx * sin + fz * cos;
+                        ((rx + 7.5).round() as i32, (rz + 7.5).round() as i32)
+                    };
+                    
+                    let (x1, z1) = rotate(15.0, 8.0);
+                    let (x2, z2) = rotate(1.0, 8.0);
+                    
+                    device.terminals.insert(IVec3::new(x1, 2, z1), Terminal::new(IVec3::new(x1, 2, z1), PortType::Bidirectional).with_max_connections(1));
+                    device.terminals.insert(IVec3::new(x2, 2, z2), Terminal::new(IVec3::new(x2, 2, z2), PortType::Bidirectional).with_max_connections(1));
+                } else {
+                    let port_type = match fx.placed {
+                        SwitchOff | SwitchOn => PortType::Output,
+                        _ => unreachable!(),
+                    };
+                    // สวิตช์จ่ายไฟให้ต่อแยกออกไปได้หลายๆ ทาง (สมมติ 8 เส้น)
+                    device.terminals.insert(IVec3::new(8, 8, 8), Terminal::new(IVec3::new(8, 8, 8), port_type).with_max_connections(8));
+                }
                 grid.devices.insert(pos, device);
                 changed = true;
             }
