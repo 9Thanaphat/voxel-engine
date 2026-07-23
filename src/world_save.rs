@@ -34,6 +34,65 @@ pub fn worlds_root() -> PathBuf {
     crate::voxel::project_root().join("saves")
 }
 
+// ============================================================================
+// World-gen preset — เซฟค่า world gen (noise/terrain/render) เป็นไฟล์ json ไว้เรียกใช้ซ้ำ
+// (คนละเรื่องกับ "โลก" ที่เซฟ chunk — อันนี้แค่ค่า generate) เก็บใน `worldgen_presets/`
+// ============================================================================
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct WorldGenPreset {
+    pub render_mode: crate::RenderMode,
+    pub terrain_source: crate::TerrainSource,
+    pub noise: crate::NoiseParams,
+    pub render_distance: i32,
+}
+
+impl WorldGenPreset {
+    pub fn from_settings(s: &crate::GameSettings) -> Self {
+        Self {
+            render_mode: s.render_mode,
+            terrain_source: s.terrain_source,
+            noise: s.noise,
+            render_distance: s.render_distance,
+        }
+    }
+}
+
+pub fn worldgen_presets_root() -> PathBuf {
+    crate::voxel::project_root().join("worldgen_presets")
+}
+
+pub fn list_worldgen_presets() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(worldgen_presets_root()) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .collect();
+    names.sort();
+    names
+}
+
+pub fn save_worldgen_preset(name: &str, preset: &WorldGenPreset) -> std::io::Result<()> {
+    let root = worldgen_presets_root();
+    std::fs::create_dir_all(&root)?;
+    let json = serde_json::to_string_pretty(preset)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    std::fs::write(root.join(format!("{}.json", slugify(name))), json)
+}
+
+pub fn load_worldgen_preset(name: &str) -> Option<WorldGenPreset> {
+    let json = std::fs::read_to_string(worldgen_presets_root().join(format!("{}.json", slugify(name)))).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+pub fn delete_worldgen_preset(name: &str) -> std::io::Result<()> {
+    std::fs::remove_file(worldgen_presets_root().join(format!("{}.json", slugify(name))))
+}
+
 /// ชื่อโฟลเดอร์จากชื่อโลก — กันอักขระที่ใช้ใน path ไม่ได้ (ชื่อไทยกลายเป็น `_` หมด
 /// จึง fallback เป็น "world" แล้วให้ตัวเลขท้ายกันชนแทน ชื่อจริงอยู่ใน world.json)
 fn slugify(name: &str) -> String {

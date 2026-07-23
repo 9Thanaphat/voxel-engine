@@ -13,8 +13,9 @@ mod world_save;
 mod command;
 pub mod light;
 pub mod tree;
+mod sky;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RenderMode {
     /// สร้าง block volume เต็ม chunk + AO — โหมดเล่นจริง
     Full,
@@ -57,6 +58,8 @@ pub struct GameSettings {
     pub noise: NoiseParams,
     /// เวลาในเกม หน่วยชั่วโมง 0-24 (6 = พระอาทิตย์ขึ้น, 12 = เที่ยง, 18 = ตก)
     pub time_of_day: f32,
+    /// ตัวคูณความเร็วรอบวัน-คืน (1.0 = ปกติ ~20 นาที/วัน, 0 = หยุดเวลานิ่ง) — ปรับด้วย /daynight
+    pub day_speed: f32,
     /// คาบ tick ของ fluid sim (วินาที) — น้อย = น้ำไหลเร็ว, มาก = ช้า/เบาเครื่อง
     pub fluid_tick_seconds: f32,
     /// พลังงานต่อ ray ของระเบิด TNT (มีผลฝั่ง host/single — ผล broadcast เป็น edit)
@@ -90,6 +93,7 @@ impl Default for GameSettings {
                 seed: 1,
             },
             time_of_day: 10.0,
+            day_speed: 1.0,
             fluid_tick_seconds: 0.1,
             tnt_power: 10.0,
             tnt_fuse_seconds: 2.0,
@@ -236,6 +240,7 @@ fn main() {
         .init_resource::<ui::ScreenFlash>()
         .init_resource::<ui::TeleportUi>()
         .init_resource::<ui::ShowDebugMenu>()
+        .init_resource::<ui::HudHidden>()
         .init_resource::<ui::ShowOptions>()
         .init_resource::<ui::ChatState>()
         .init_resource::<command::CommandQueue>()
@@ -276,6 +281,7 @@ fn main() {
             bevy_renet::netcode::NetcodeClientPlugin,
             bevy_hanabi::HanabiPlugin,
             item::ItemPlugin,
+            sky::SkyPlugin,
         ))
         .init_state::<GameState>()
         .add_message::<particles::BlockFx>()
@@ -455,6 +461,8 @@ fn main() {
             (
                 ui::toggle_ingame_ui,
                 ui::handle_f3_system,
+                ui::handle_f1_system,
+                ui::handle_f2_screenshot,
                 ui::hotbar_item_name_system,
                 ui::quit_after_save,
             ),

@@ -22,6 +22,10 @@ pub struct DebugMenuUi;
 #[derive(Resource, Default)]
 pub struct ShowDebugMenu(pub bool);
 
+/// F1 ซ่อน HUD ทั้งจอ (ครอสแฮร์/hotbar/แชท/debug) — ไว้ถ่ายรูปสวยๆ แบบ Minecraft
+#[derive(Resource, Default)]
+pub struct HudHidden(pub bool);
+
 /// กรอบช่อง hotbar (index 0..9) — border เปลี่ยนสีตามช่องที่เลือก
 #[derive(Component)]
 pub struct HotbarSlotUi(pub usize);
@@ -1103,6 +1107,7 @@ pub fn update_inventory_ui(
     open_container: Res<crate::voxel::OpenContainer>,
     hotbar: Res<crate::voxel::Hotbar>,
     settings: Res<crate::GameSettings>,
+    hud_hidden: Res<HudHidden>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     icons: Res<crate::voxel::ItemIconCache>,
@@ -1126,9 +1131,9 @@ pub fn update_inventory_ui(
             *vis = want;
         }
     }
-    // hotbar ล่างจอซ้ำกับแถวในหน้าต่าง — ซ่อนไว้ตลอดที่หน้าต่างเปิด
+    // hotbar ล่างจอซ้ำกับแถวในหน้าต่าง — ซ่อนตอนหน้าต่างเปิด หรือตอนกด F1 ซ่อน HUD
     for mut vis in &mut hud_hotbar_query {
-        let want = if show { Visibility::Hidden } else { Visibility::Inherited };
+        let want = if show || hud_hidden.0 { Visibility::Hidden } else { Visibility::Inherited };
         if *vis != want {
             *vis = want;
         }
@@ -1562,10 +1567,12 @@ pub fn update_screen_flash(
 pub fn toggle_ingame_ui(
     state: Res<State<crate::GameState>>,
     show_debug: Res<ShowDebugMenu>,
+    hud_hidden: Res<HudHidden>,
     mut query: Query<(Entity, &mut Visibility, Option<&DebugMenuUi>), With<InGameUi>>,
 ) {
-    if state.is_changed() || state.is_added() || show_debug.is_changed() {
-        let is_ingame = *state.get() == crate::GameState::InGame;
+    if state.is_changed() || state.is_added() || show_debug.is_changed() || hud_hidden.is_changed() {
+        // F1 ซ่อน HUD ทับทุกอย่าง (แม้เข้าเกมอยู่)
+        let is_ingame = *state.get() == crate::GameState::InGame && !hud_hidden.0;
         for (_, mut vis, is_debug) in &mut query {
             if is_debug.is_some() {
                 *vis = if is_ingame && show_debug.0 { Visibility::Inherited } else { Visibility::Hidden };
@@ -1574,6 +1581,45 @@ pub fn toggle_ingame_ui(
             }
         }
     }
+}
+
+/// F1 = สลับซ่อน/โชว์ HUD ทั้งจอ (กันชนตอนพิมพ์แชทเหมือน F3)
+pub fn handle_f1_system(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut hud_hidden: ResMut<HudHidden>,
+    chat: Res<ChatState>,
+) {
+    if chat.open {
+        return;
+    }
+    if keyboard.just_pressed(KeyCode::F1) {
+        hud_hidden.0 = !hud_hidden.0;
+    }
+}
+
+/// F2 = ถ่าย screenshot เก็บลงโฟลเดอร์ screenshots/ (ตั้งชื่อด้วย epoch millis กันชนกัน)
+/// จับภาพหน้าจอปัจจุบันตามที่เห็น — อยากได้ภาพไม่มี HUD กด F1 ซ่อนก่อน
+pub fn handle_f2_screenshot(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut commands: Commands,
+    mut chat: ResMut<ChatState>,
+) {
+    if chat.open || !keyboard.just_pressed(KeyCode::F2) {
+        return;
+    }
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if let Err(e) = std::fs::create_dir_all("screenshots") {
+        chat.push_error(format!("Screenshot failed: {e}"));
+        return;
+    }
+    let path = format!("screenshots/screenshot-{millis}.png");
+    commands
+        .spawn(bevy::render::view::window::screenshot::Screenshot::primary_window())
+        .observe(bevy::render::view::window::screenshot::save_to_disk(path.clone()));
+    chat.push_system(format!("Screenshot saved: {path}"));
 }
 
 pub fn handle_f3_system(
@@ -2866,6 +2912,154 @@ pub fn options_menu_system(
         });
 }
 
+/// section "World Gen Presets" — เซฟ/โหลดค่า world gen เป็นไฟล์ (คืน true = โหลดแล้วต้อง regen)
+fn worldgen_preset_ui(
+    ui: &mut bevy_egui::egui::Ui,
+    settings: &mut crate::GameSettings,
+    regenerate: &mut crate::RegenerateWorld,
+    name: &mut String,
+    status: &mut String,
+) -> bool {
+    use bevy_egui::egui;
+    let mut regen = false;
+    egui::CollapsingHeader::new("World Gen Presets").show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Name:");
+            ui.text_edit_singleline(name);
+            if ui.button("Save").clicked() {
+                let n = if name.trim().is_empty() { "worldgen" } else { name.as_str() };
+                let preset = crate::world_save::WorldGenPreset::from_settings(settings);
+                match crate::world_save::save_worldgen_preset(n, &preset) {
+                    Ok(_) => *status = format!("Saved '{n}'"),
+                    Err(e) => *status = format!("Save failed: {e}"),
+                }
+            }
+        });
+        for pname in crate::world_save::list_worldgen_presets() {
+            ui.horizontal(|ui| {
+                if ui.button(format!("Load  {pname}")).clicked() {
+                    if let Some(p) = crate::world_save::load_worldgen_preset(&pname) {
+                        settings.render_mode = p.render_mode;
+                        settings.noise = p.noise;
+                        settings.render_distance = p.render_distance;
+                        // สลับ terrain ผ่าน select_terrain (จัดโฟลเดอร์เซฟ + ตั้ง regenerate ให้)
+                        if p.terrain_source != settings.terrain_source {
+                            select_terrain(settings, regenerate, p.terrain_source);
+                        }
+                        regen = true;
+                        *name = pname.clone();
+                        *status = format!("Loaded '{pname}'");
+                    }
+                }
+                if ui.button("🗑").on_hover_text("delete preset").clicked() {
+                    let _ = crate::world_save::delete_worldgen_preset(&pname);
+                    *status = format!("Deleted '{pname}'");
+                }
+            });
+        }
+        if !status.is_empty() {
+            ui.label(egui::RichText::new(status.as_str()).small().weak());
+        }
+    });
+    regen
+}
+
+/// section "Sky / Atmosphere" ใน Game Settings (dev mode) — ปรับ live + เซฟ preset เป็นไฟล์
+fn sky_atmosphere_ui(
+    ui: &mut bevy_egui::egui::Ui,
+    settings: &mut crate::GameSettings,
+    sky: &mut crate::sky::SkySettings,
+    preset_name: &mut String,
+    status: &mut String,
+) {
+    use bevy_egui::egui;
+    egui::CollapsingHeader::new("Sky / Atmosphere").show(ui, |ui| {
+        ui.add(egui::Slider::new(&mut settings.time_of_day, 0.0..=24.0).text("Time of Day (h)"));
+        ui.add(egui::Slider::new(&mut settings.day_speed, 0.0..=50.0).text("Day Speed"));
+
+        ui.label("Sky gradient — day (top / horizon / bottom)");
+        ui.horizontal(|ui| {
+            ui.color_edit_button_rgb(&mut sky.day_top);
+            ui.color_edit_button_rgb(&mut sky.day_horizon);
+            ui.color_edit_button_rgb(&mut sky.day_bottom);
+        });
+        ui.label("Sky gradient — night (top / horizon / bottom)");
+        ui.horizontal(|ui| {
+            ui.color_edit_button_rgb(&mut sky.night_top);
+            ui.color_edit_button_rgb(&mut sky.night_horizon);
+            ui.color_edit_button_rgb(&mut sky.night_bottom);
+        });
+        ui.horizontal(|ui| {
+            ui.color_edit_button_rgb(&mut sky.sunset_tint);
+            ui.label("sunrise/sunset tint");
+        });
+
+        ui.separator();
+        ui.label("Sun");
+        ui.add(egui::Slider::new(&mut sky.sun_size, 0.990..=1.0).text("size (cos, high = small)"));
+        ui.add(egui::Slider::new(&mut sky.sun_brightness, 0.0..=12.0).text("brightness"));
+
+        ui.separator();
+        ui.label("Stars");
+        ui.add(egui::Slider::new(&mut sky.star_intensity, 0.0..=4.0).text("intensity"));
+        ui.add(egui::Slider::new(&mut sky.star_density, 0.90..=0.999).text("density (high = fewer)"));
+        ui.add(egui::Slider::new(&mut sky.star_size_min, 0.02..=0.2).text("size min"));
+        ui.add(egui::Slider::new(&mut sky.star_size_max, 0.05..=0.4).text("size max"));
+        ui.add(egui::Slider::new(&mut sky.twinkle_rate_base, 0.0..=3.0).text("twinkle rate"));
+        ui.add(egui::Slider::new(&mut sky.twinkle_rate_range, 0.0..=3.0).text("twinkle rate variance"));
+        ui.add(egui::Slider::new(&mut sky.twinkle_amp, 0.0..=0.6).text("twinkle amount"));
+
+        ui.separator();
+        ui.label("Star trail (grows with Day Speed)");
+        ui.add(egui::Slider::new(&mut sky.trail_sensitivity, 0.0..=0.005).text("sensitivity"));
+        ui.add(egui::Slider::new(&mut sky.trail_max, 0.0..=0.25).text("max length"));
+
+        ui.separator();
+        ui.add(egui::Slider::new(&mut sky.milkyway_brightness, 0.0..=1.0).text("Milky Way (0 = off)"));
+
+        ui.separator();
+        ui.label("Moon");
+        ui.add(egui::Slider::new(&mut sky.moon_size, 0.0..=0.2).text("size"));
+        ui.add(egui::Slider::new(&mut sky.moon_brightness, 0.0..=3.0).text("brightness (0 = off)"));
+
+        ui.separator();
+        ui.label("Presets");
+        ui.horizontal(|ui| {
+            ui.label("Name:");
+            ui.text_edit_singleline(preset_name);
+            if ui.button("Save").clicked() {
+                let name = if preset_name.trim().is_empty() { "preset" } else { preset_name.as_str() };
+                match crate::sky::save_preset(name, sky) {
+                    Ok(_) => *status = format!("Saved '{name}'"),
+                    Err(e) => *status = format!("Save failed: {e}"),
+                }
+            }
+            if ui.button("Reset default").clicked() {
+                *sky = crate::sky::SkySettings::default();
+                *status = "Reset to default".into();
+            }
+        });
+        for name in crate::sky::list_presets() {
+            ui.horizontal(|ui| {
+                if ui.button(format!("Load  {name}")).clicked() {
+                    if let Some(loaded) = crate::sky::load_preset(&name) {
+                        *sky = loaded;
+                        *preset_name = name.clone();
+                        *status = format!("Loaded '{name}'");
+                    }
+                }
+                if ui.button("🗑").on_hover_text("delete preset").clicked() {
+                    let _ = crate::sky::delete_preset(&name);
+                    *status = format!("Deleted '{name}'");
+                }
+            });
+        }
+        if !status.is_empty() {
+            ui.label(egui::RichText::new(status.as_str()).small().weak());
+        }
+    });
+}
+
 pub fn egui_settings_system(
     mut contexts: bevy_egui::EguiContexts,
     mut commands: Commands,
@@ -2885,6 +3079,14 @@ pub fn egui_settings_system(
         ResMut<crate::network::MultiplayerUi>,
     ),
     mut confirm_clear: Local<bool>,
+    // รวมเป็น tuple เดียว — Bevy จำกัด system param ที่ 16 ตัว
+    (mut sky_settings, mut preset_name, mut sky_status, mut worldgen_name, mut worldgen_status): (
+        ResMut<crate::sky::SkySettings>,
+        Local<String>,
+        Local<String>,
+        Local<String>,
+        Local<String>,
+    ),
 ) {
     // โลกปกติใช้ Options พื้นฐานจาก pause menu แทน (ดู [`options_menu_system`])
     if !settings.dev_mode {
@@ -3017,6 +3219,9 @@ pub fn egui_settings_system(
             }
         });
 
+        ui.separator();
+        regen |= worldgen_preset_ui(ui, &mut settings, &mut regenerate, &mut worldgen_name, &mut worldgen_status);
+
         if regen && !networked {
             regenerate.0 = true;
         }
@@ -3072,6 +3277,10 @@ pub fn egui_settings_system(
                 .logarithmic(true)
                 .text("Water Tick (s)"),
         );
+
+        ui.separator();
+
+        sky_atmosphere_ui(ui, &mut settings, &mut sky_settings, &mut preset_name, &mut sky_status);
 
         ui.separator();
 

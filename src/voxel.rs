@@ -3209,10 +3209,10 @@ pub fn advance_time_system(
     if net_client.is_some() {
         return;
     }
-    let mut t = settings.time_of_day + time.delta_secs() * 24.0 / GAME_DAY_SECONDS;
-    if t >= 24.0 {
-        t -= 24.0;
-    }
+    // day_speed = ตัวคูณความเร็วรอบวัน (0 = หยุดเวลานิ่ง) ปรับผ่าน /daynight
+    let mut t = settings.time_of_day
+        + time.delta_secs() * 24.0 / GAME_DAY_SECONDS * settings.day_speed;
+    t = t.rem_euclid(24.0);
     settings.time_of_day = t;
 }
 
@@ -3241,6 +3241,7 @@ pub fn sun_tint(time_of_day: f32) -> (f32, Color) {
 pub fn update_sun_system(
     settings: Res<crate::GameSettings>,
     mut ambient_query: Query<&mut AmbientLight>,
+    mut fog_query: Query<&mut bevy::pbr::DistanceFog>,
     mut clear_color: ResMut<ClearColor>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     chunk_mat: Option<Res<ChunkMaterial>>,
@@ -3286,11 +3287,20 @@ pub fn update_sun_system(
         }
     }
 
-    // สีท้องฟ้า: กลางคืนน้ำเงินเข้ม -> กลางวันฟ้าสด
+    // สีท้องฟ้า (fallback ก่อน skydome พร้อม / ส่วนที่ skydome ไม่ครอบ)
     let night = Vec3::new(0.02, 0.02, 0.06);
     let day = Vec3::new(0.35, 0.55, 0.90);
     let sky = night.lerp(day, elevation);
     clear_color.0 = Color::srgb(sky.x, sky.y, sky.z);
+
+    // หมอกระยะไกล: ให้กลืนกับสีขอบฟ้าของ skydome ทุกช่วงเวลา
+    // (ไม่งั้นกลางคืนภูเขา DEM ไกลจะยังจางเป็นสีฟ้าตายตัว ไม่เข้ากับฟ้ามืด)
+    let fog_day = Vec3::new(0.66, 0.80, 0.94);
+    let fog_night = Vec3::new(0.04, 0.05, 0.10);
+    let fog = fog_night.lerp(fog_day, elevation);
+    for mut df in fog_query.iter_mut() {
+        df.color = Color::srgb(fog.x, fog.y, fog.z);
+    }
 }
 
 /// ล้างโลกทั้งหมดเพื่อ generate ใหม่ (ตอนเปลี่ยน render mode หรือค่า noise)

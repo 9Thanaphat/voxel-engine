@@ -8,6 +8,11 @@ saves/
 saves_dem/
 
 /screenshot/
+/screenshots/
+
+# sky / world-gen tuning presets (สร้างจาก dev menu ตอนรัน)
+/sky_presets/
+/worldgen_presets/
 
 /assets/dem/tiles/
 /assets/dem/water/

@@ -21,6 +21,7 @@ const HELP: &[&str] = &[
     "/give <block|tool> [count] - put an item in the selected slot (tools: pickaxe, axe, shovel, chisel, wire)",
     "/setblock <x> <y> <z> <block> - place a block (host only)",
     "/time <0-24> - set time of day (host only)",
+    "/daynight <speed> - day-night cycle speed (1 = normal, 0 = frozen, host only)",
     "/seed - show the world seed",
 ];
 
@@ -103,6 +104,7 @@ fn dispatch(
         "gamemode" => cmd_gamemode(&args, chat, world),
         "give" => cmd_give(&args, chat, world),
         "time" => cmd_time(&args, chat, world, server, is_client),
+        "daynight" => cmd_daynight(&args, chat, world, is_client),
         "setblock" => cmd_setblock(&args, chat, world, is_client),
         other => chat.push_error(format!("unknown command '{other}' - try /help")),
     }
@@ -235,6 +237,36 @@ fn cmd_time(
         );
     }
     chat.push_system(format!("Time set to {hours:.1}"));
+}
+
+/// ปรับความเร็วรอบวัน-คืน — host only เพราะมีแต่ host/single ที่เดินเวลาเอง
+/// (client รับเวลาจาก host ผ่าน sync ไม่ได้เดินเอง จึงตั้งเองไม่มีผล)
+fn cmd_daynight(
+    args: &[&str],
+    chat: &mut crate::ui::ChatState,
+    world: &mut CommandWorld,
+    is_client: bool,
+) {
+    if is_client {
+        chat.push_error("/daynight is host only");
+        return;
+    }
+    let Some(speed) = args.first().and_then(|a| a.parse::<f32>().ok()) else {
+        chat.push_error("usage: /daynight <speed>  (1 = normal, 2 = twice as fast, 0 = frozen)");
+        return;
+    };
+    if !(0.0..=1000.0).contains(&speed) {
+        chat.push_error("speed must be between 0 and 1000");
+        return;
+    }
+    world.settings.day_speed = speed;
+    if speed == 0.0 {
+        chat.push_system("Day-night cycle frozen".to_string());
+    } else {
+        // GAME_DAY_SECONDS = 1200 วิ (20 นาที) ที่ speed 1.0
+        let minutes = 1200.0 / speed / 60.0;
+        chat.push_system(format!("Day-night speed x{speed} ({minutes:.1} min per day)"));
+    }
 }
 
 fn cmd_setblock(
