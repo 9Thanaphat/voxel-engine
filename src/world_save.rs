@@ -191,6 +191,7 @@ pub fn load_game_system(
     mut camera_q: bevy::prelude::Query<(&mut bevy::prelude::Transform, &mut crate::camera::FreeCamera)>,
     mut hotbar: bevy::prelude::ResMut<crate::voxel::Hotbar>,
     mut topo_writer: bevy::prelude::MessageWriter<crate::electricity::PowerTopologyChanged>,
+    mut world: bevy::prelude::ResMut<crate::voxel::VoxelWorld>,
 ) {
     let dir = crate::voxel::active_save_dir();
         if let Ok(bytes) = std::fs::read(dir.join("electricity.bin")) {
@@ -221,4 +222,8 @@ pub fn load_game_system(
                 }
             }
         }
+        // โครงกิ่งย้ายไปเก็บต่อ chunk (chunk_x_z.tree.bin) แล้ว — อ่าน JSON ก้อนเก่า
+        // ครั้งเดียวเพื่อไม่ให้กิ่งที่ผู้เล่นเคยวางในโลกเดิมเสียโครงไป ข้อมูลจะย้ายเข้า
+        // ไฟล์ต่อ chunk เองตอน chunk นั้นถูกเซฟครั้งถัดไป และไม่มีการเขียน JSON กลับอีก
+        world.branch_network = crate::tree::BranchNetwork::load(&dir);
 }

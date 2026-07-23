@@ -120,7 +120,9 @@ pub struct LodTiles {
     pending: HashSet<(usize, IVec2)>,
     sender: Mutex<Sender<LodTileResult>>,
     receiver: Mutex<Receiver<LodTileResult>>,
-    material: Handle<StandardMaterial>,
+    /// pub เพราะ update_sun_system ต้องคูณความแรงแดดลง base_color เหมือน material อื่น
+    /// (ไม่งั้นกลางคืนภูเขาไกลสว่างค้างเป็นแถบตัดกับพื้นใกล้ที่มืดแล้ว)
+    pub material: Handle<StandardMaterial>,
     /// bump ทุกครั้งที่ล้าง (สลับโลก/ปิดระบบ) — ผล task รุ่นเก่าถูกทิ้ง
     version: u32,
     timer: f32,

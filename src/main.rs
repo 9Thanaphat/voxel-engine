@@ -11,6 +11,8 @@ mod lod;
 mod item;
 mod world_save;
 mod command;
+pub mod light;
+pub mod tree;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -250,6 +252,7 @@ fn main() {
         .init_resource::<network::IncomingNetEdits>()
         .init_resource::<network::IncomingChunkRemesh>()
         .init_resource::<network::PositionSendTimer>()
+        .init_resource::<tree::BranchNetwork>()
         .add_plugins((
             DefaultPlugins.set(ImagePlugin {
                 default_sampler: bevy::image::ImageSamplerDescriptor {
@@ -373,7 +376,13 @@ fn main() {
                 voxel::finish_icon_bake,
                 voxel::propagate_render_layers,
                 world_save::auto_save_system,
-                voxel::block_update_system,
+                // ทูเพิลของ add_systems รับได้สูงสุด 20 ตัว — ที่เกินจัดเป็นกลุ่มซ้อน
+                (
+                    voxel::block_update_system,
+                    // แสงต้องคำนวณก่อน chunk ถูก mesh ครั้งแรก ไม่งั้นจะ mesh ตอนยังมืด
+                    voxel::relight_system.before(voxel::world_generation_system),
+                    voxel::branch_remesh_system.after(voxel::block_update_system),
+                ),
             ).run_if(in_state(GameState::InGame)),
         )
         // ---- Networking ----

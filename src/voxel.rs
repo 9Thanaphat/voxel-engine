@@ -56,6 +56,7 @@ pub enum BlockType {
     Furnace = 32,
     Chest = 33,
     Campfire = 34,
+    Branch = 35,
 }
 
 impl BlockType {
@@ -95,6 +96,7 @@ impl BlockType {
             32 => BlockType::Furnace,
             33 => BlockType::Chest,
             34 => BlockType::Campfire,
+            35 => BlockType::Branch,
             _ => BlockType::Air,
         }
     }
@@ -146,7 +148,7 @@ pub struct BlockDef {
     pub overlay_side: &'static [&'static str],
 }
 
-pub const BLOCK_DEFS: [BlockDef; 35] = [
+pub const BLOCK_DEFS: [BlockDef; 36] = [
     BlockDef { name: "Air", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None, hardness: 0.0,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
     BlockDef { name: "Dirt", color: [0.4, 0.2, 0.0, 1.0], solid: true, transparent: false, emission: None, hardness: 1.0,
@@ -154,15 +156,10 @@ pub const BLOCK_DEFS: [BlockDef; 35] = [
         overlay_side: &[] },
     BlockDef { name: "Grass", color: [0.2, 0.6, 0.2, 1.0], solid: true, transparent: false, emission: None, hardness: 1.2,
         tex_top: &["textures/grass_top.png"],
-        // ด้านข้างมี 3 ลาย สุ่มตามพิกัดให้ไม่ซ้ำกันเป็นแพทเทิร์น
-        tex_side: &["textures/grass_side_1.png", "textures/grass_side_2.png", "textures/grass_side_3.png"],
+        tex_side: &["textures/grass_side.png"],
         tex_bottom: &["textures/dirt.png"],
-        // พู่หญ้าห้อยเอียงจากขอบบน — สุ่ม 3 ลายเช่นกัน
-        overlay_side: &[
-            "textures/grass_side_overlay_1.png",
-            "textures/grass_side_overlay_2.png",
-            "textures/grass_side_overlay_3.png",
-        ] },
+        // พู่หญ้าห้อยเอียงจากขอบบน
+        overlay_side: &["textures/grass_side_overlay.png"] },
     BlockDef { name: "Stone", color: [0.5, 0.5, 0.5, 1.0], solid: true, transparent: false, emission: None, hardness: 6.0,
         tex_top: &["textures/stone.png"], tex_side: &["textures/stone.png"], tex_bottom: &["textures/stone.png"],
         overlay_side: &[] },
@@ -171,7 +168,10 @@ pub const BLOCK_DEFS: [BlockDef; 35] = [
     BlockDef { name: "Wood", color: [0.4, 0.3, 0.2, 1.0], solid: true, transparent: false, emission: None, hardness: 3.0,
         tex_top: &["textures/wood_top.png"], tex_side: &["textures/wood_side.png"],
         tex_bottom: &["textures/wood_top.png"], overlay_side: &[] },
-    BlockDef { name: "Leaves", color: [0.1, 0.5, 0.1, 1.0], solid: true, transparent: false, emission: None, hardness: 0.3,
+    // ใบไม้วาดเป็นแผ่น sprite ตัดกันแบบดาว 3 แกน (ดู generate_leaf_mesh_into) ไม่ใช่คิวบ์
+    // — transparent:true เพื่อไม่ให้หน้าของบล็อกข้างเคียงถูก cull หายไปหลังพุ่มใบ
+    // solid:true คงไว้ให้ยังเดินบนพุ่มได้เหมือนเดิม
+    BlockDef { name: "Leaves", color: [0.1, 0.5, 0.1, 1.0], solid: true, transparent: true, emission: None, hardness: 0.3,
         tex_top: &["textures/leaves.png"], tex_side: &["textures/leaves.png"],
         tex_bottom: &["textures/leaves.png"], overlay_side: &[] },
     BlockDef { name: "Sand", color: [0.9, 0.8, 0.6, 1.0], solid: true, transparent: false, emission: None, hardness: 0.8,
@@ -251,6 +251,8 @@ pub const BLOCK_DEFS: [BlockDef; 35] = [
     // emission ทำให้ได้ PointLight + particle ไฟฟรีผ่านระบบ lamp/sparkle เดิม (ดู refresh_chunk_lamp_lights)
     BlockDef { name: "Campfire", color: [0.35, 0.22, 0.12, 1.0], solid: true, transparent: true, emission: Some([1.4, 0.6, 0.15]), hardness: 0.4,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Branch", color: [0.4, 0.2, 0.0, 1.0], solid: true, transparent: true, emission: None, hardness: 2.0,
+        tex_top: &["textures/wood_side.png"], tex_side: &["textures/wood_side.png"], tex_bottom: &["textures/wood_side.png"], overlay_side: &[] },
 ];
 
 pub fn block_def(block: BlockType) -> &'static BlockDef {
@@ -301,8 +303,42 @@ pub fn lamp_emission(block: BlockType) -> Option<Color> {
 pub fn block_collision_box(block: BlockType) -> (Vec3, Vec3) {
     match block {
         BlockType::Campfire => (Vec3::new(0.15, 0.0, 0.15), Vec3::new(0.85, 0.4, 0.85)),
+        BlockType::Branch => (Vec3::new(0.25, 0.0, 0.25), Vec3::new(0.75, 1.0, 0.75)),
         _ => (Vec3::ZERO, Vec3::ONE),
     }
+}
+
+/// เหมือน block_collision_box แต่รู้ตำแหน่งด้วย — ใช้กับบล็อกที่รูปทรงขึ้นกับเพื่อนบ้าน
+/// ตอนนี้คือ Branch: กล่องต้องวางตามทิศที่กิ่งเชื่อมจริง ไม่ใช่เสาตั้งตายตัว
+/// (กิ่งแนวนอนจะได้ชนตรงกับที่ตาเห็น)
+pub fn block_collision_box_at(world: &VoxelWorld, pos: IVec3, block: BlockType) -> (Vec3, Vec3) {
+    if block != BlockType::Branch {
+        return block_collision_box(block);
+    }
+    let Some(node) = world.branch_network.nodes.get(&pos) else {
+        return block_collision_box(block);
+    };
+
+    // แกนกลางกว้างตาม thickness (ขั้นต่ำ 0.15 กันบางจนเดินทะลุ)
+    let r = (node.thickness as f32 / 32.0).max(0.15);
+    let mut min = Vec3::splat(0.5 - r);
+    let mut max = Vec3::splat(0.5 + r);
+
+    // ทุกด้านที่มีกิ่งต่อ ยืดกล่องออกไปจนสุดขอบช่อง
+    let mut stretch = |d: IVec3| {
+        if d.x > 0 { max.x = 1.0; } else if d.x < 0 { min.x = 0.0; }
+        if d.y > 0 { max.y = 1.0; } else if d.y < 0 { min.y = 0.0; }
+        if d.z > 0 { max.z = 1.0; } else if d.z < 0 { min.z = 0.0; }
+    };
+    if let Some(pp) = node.parent_pos {
+        stretch(pp - pos);
+    } else {
+        stretch(IVec3::NEG_Y); // root: โคนหยั่งลงพื้นเหมือนที่ mesh วาด
+    }
+    for &cp in &node.children {
+        stretch(cp - pos);
+    }
+    (min, max)
 }
 
 // --------------------------------------------------------
@@ -320,7 +356,7 @@ pub fn block_dig_class(block: BlockType) -> crate::item::DigClass {
         | BlockType::SmartLamp | BlockType::SmartLampOn
         | BlockType::SwitchOff | BlockType::SwitchOn => DigClass::Pick,
         BlockType::Wood | BlockType::Chest | BlockType::Tnt | BlockType::Nuke
-        | BlockType::Campfire => DigClass::Axe,
+        | BlockType::Campfire | BlockType::Branch => DigClass::Axe,
         BlockType::Dirt | BlockType::Grass | BlockType::Sand => DigClass::Shovel,
         _ => DigClass::None,
     }
@@ -338,7 +374,7 @@ pub fn block_dig_time(block: BlockType) -> f32 {
         BlockType::Glowstone | BlockType::LampRed | BlockType::LampGreen | BlockType::LampBlue
         | BlockType::SmartLamp | BlockType::SmartLampOn
         | BlockType::SwitchOff | BlockType::SwitchOn => 1.5,
-        BlockType::Wood | BlockType::Chest => 3.0,
+        BlockType::Wood | BlockType::Chest | BlockType::Branch => 3.0,
         BlockType::Furnace => 3.5,
         BlockType::Stone => 5.0,
         BlockType::IronBlock => 7.5,
@@ -659,6 +695,16 @@ pub struct ChunkData {
     /// มีบล็อกถูกเขียนหลังโหลด — การขุด/วางเซฟทันทีอยู่แล้ว แต่ผลจาก fluid sim
     /// กับ TNT ที่ยังไหลอยู่ไม่เซฟรายเฟรม flag นี้ให้ตอนออกจากโลกเซฟเก็บให้ครบ
     pub dirty: bool,
+    /// sky light ต่อบล็อก — คำนวณจากบล็อกล้วน ไม่เซฟลงดิสก์/ไม่ส่งข้าม network
+    /// Arc เพราะ mesh task ต้องใช้ของ chunk นี้ + เพื่อนบ้านอีก 8 ตัว การ clone ต้องฟรี
+    pub light: Arc<crate::light::ChunkLight>,
+    /// ต้องคำนวณ light ใหม่ก่อน mesh รอบหน้า (บล็อกเปลี่ยน/เพิ่งโหลด)
+    pub light_dirty: bool,
+    /// bitmask ของเพื่อนบ้าน (ลำดับตาม chunk_neighbors) ที่ "ยังไม่โหลด" ตอนคำนวณแสงครั้งล่าสุด
+    /// — ตอนนั้นถือว่าเป็นฟ้าโล่ง ค่าตรงขอบจึงเพี้ยน พอตัวจริงมาถึงค่อยปลุกคิดใหม่
+    /// เฉพาะ chunk ที่รอตัวนั้นอยู่จริง (เดิมปลุกเพื่อนบ้านทั้ง 8 ทุกครั้งที่มี chunk ใหม่
+    /// ซึ่งลาม remesh เป็น 9 chunk ต่อครั้ง = เฟรมตกและภาพกระพริบ)
+    pub light_missing_neighbors: u8,
 }
 
 impl ChunkData {
@@ -718,6 +764,15 @@ pub struct VoxelWorld {
     pub textured_chunks: HashMap<IVec2, Vec<Entity>>, // mesh entity (บล็อกมี texture ต่อไฟล์)
     pub lamp_lights: HashMap<IVec2, Vec<Entity>>,     // PointLight ของบล็อกไฟใน chunk
     pub campfire_models: HashMap<IVec2, Vec<Entity>>, // glTF scene entity ของ Campfire ใน chunk
+    pub branch_network: crate::tree::BranchNetwork,
+    pub pending_branch_remesh: std::collections::HashSet<IVec2>,
+    /// กิ่งที่ parent หายไปแล้ว รอ host ทุบตามเป็นทอดๆ (ดู block_update_system)
+    pub pending_branch_orphans: std::collections::HashSet<IVec3>,
+    /// ใบที่อยู่ข้างกิ่งซึ่งเพิ่งหายไป รอเช็คว่ายังมีกิ่งค้ำอยู่ไหม (ดู leaf decay)
+    /// เติมเฉพาะตอนกิ่งถูกทำลายจริง — ใบที่ผู้เล่นเอาไปสร้างบ้านไกลๆ จึงไม่ร่วงเอง
+    pub pending_leaf_decay: std::collections::HashSet<IVec3>,
+    /// chunk ที่ cascade กิ่งไปแก้บล็อกไว้ ต้องเขียนลงดิสก์ (ดู branch_remesh_system)
+    pub pending_branch_save: std::collections::HashSet<IVec2>,
     pub total_vertices: usize,
     pub total_indices: usize,
 }
@@ -930,6 +985,13 @@ pub const FACE_SHADE: [f32; 6] = [1.0, 0.5, 0.8, 0.8, 0.6, 0.6];
 // ความสว่างตามระดับ AO (0 = มุมอับสุด, 3 = โล่ง)
 pub const AO_CURVE: [f32; 4] = [0.45, 0.65, 0.85, 1.0];
 
+/// ความสว่างตามระดับ sky light 0-15 — ไม่เชิงเส้นแบบ Minecraft (ระดับต่ำมืดเร็ว)
+/// มีพื้น 0.05 ไม่ให้ดำสนิทจนมองไม่เห็นรูปทรงในถ้ำเลย
+pub fn sky_curve(level: u8) -> f32 {
+    let t = level.min(crate::light::MAX_LIGHT) as f32 / crate::light::MAX_LIGHT as f32;
+    0.05 + 0.95 * t.powf(1.6)
+}
+
 #[derive(Default)]
 pub struct MeshBuf {
     pub positions: Vec<[f32; 3]>,
@@ -1112,6 +1174,8 @@ pub fn create_mesh_from_blocks(
     neighbors: &[Arc<ChunkBlocks>; 8],
     chiseled_blocks: Option<&HashMap<usize, Box<[u8; 4096]>>>,
     facings: Option<&HashMap<usize, u8>>,
+    branch_network: Option<&crate::tree::BranchNetwork>,
+    light: Option<&LightNeighborhood>,
 ) -> ChunkMeshSet {
     // ต่อมุมผิวน้ำ: (ระยะกดผิวลง, ความลึกน้ำ normalize 0..1) — แชร์ข้ามหน้า/บล็อก
     let mut drop_cache: HashMap<(i32, i32, i32), (f32, f32)> = HashMap::with_capacity(1024);
@@ -1185,6 +1249,63 @@ pub fn create_mesh_from_blocks(
         ao
     };
 
+    // แสงที่มุมของหน้า = เฉลี่ยแสงของ 4 เซลล์ฝั่งนอกหน้าที่ล้อมมุมนั้น (ชุดเดียวกับที่ AO
+    // นับ) — เฉลี่ยเฉพาะเซลล์ที่แสงเข้าถึงได้ ไม่งั้นเนื้อบล็อกทึบ (แสง 0) จะดึงค่าลง
+    // ทำให้ทุกมุมที่ติดผนังมืดผิดปกติ นี่คือ "smooth lighting" แบบ Minecraft
+    let face_light = |c: [i32; 3], face_id: usize| -> [u8; 4] {
+        let Some(lm) = light else { return [crate::light::MAX_LIGHT; 4] };
+        let norm = FACE_OFFSETS[face_id];
+        let (a1, a2) = if norm[0] != 0 {
+            (1, 2)
+        } else if norm[1] != 0 {
+            (0, 2)
+        } else {
+            (0, 1)
+        };
+        let base = [c[0] + norm[0], c[1] + norm[1], c[2] + norm[2]];
+        let face_positions = CUBE_POSITIONS[face_id];
+
+        let mut out = [0u8; 4];
+        for i in 0..4 {
+            let vp = face_positions[i];
+            let s1: i32 = if vp[a1] < 0.5 { -1 } else { 1 };
+            let s2: i32 = if vp[a2] < 0.5 { -1 } else { 1 };
+
+            let mut p1 = base;
+            p1[a1] += s1;
+            let mut p2 = base;
+            p2[a2] += s2;
+            let mut pc = base;
+            pc[a1] += s1;
+            pc[a2] += s2;
+
+            let mut sum = 0u32;
+            let mut n = 0u32;
+            for p in [base, p1, p2, pc] {
+                if sample(p[0], p[1], p[2]).occludes() {
+                    continue;
+                }
+                sum += lm.get(p[0], p[1], p[2]) as u32;
+                n += 1;
+            }
+            // ทุกเซลล์รอบมุมทึบหมด (ซอกปิด) — ใช้ค่าของเซลล์ตรงหน้าไปตรงๆ
+            out[i] = if n == 0 {
+                lm.get(base[0], base[1], base[2])
+            } else {
+                (sum / n) as u8
+            };
+        }
+        out
+    };
+
+    // สีของแผ่น sprite/กิ่ง ที่ไม่ได้ผ่านทาง AO ของหน้าคิวบ์ — ใช้แสงของช่องตัวเอง
+    // (ถ้าไม่คูณ ใบไม้กับกิ่งจะสว่างเต็มแม้อยู่ในถ้ำ ลอยเด่นผิดที่ผิดทาง)
+    let block_tint = |xi: i32, yi: i32, zi: i32| -> [f32; 4] {
+        let level = light.map_or(crate::light::MAX_LIGHT, |lm| lm.get(xi, yi, zi));
+        let b = sky_curve(level);
+        [b, b, b, 1.0]
+    };
+
     let axis_len = [CHUNK_WIDTH as i32, CHUNK_HEIGHT as i32, CHUNK_WIDTH as i32];
 
     // แถบ y ที่มีของจริง — ข้ามฟ้า Uniform(Air) ทั้งแถบ (หัวใจของคอลัมน์สูง:
@@ -1224,9 +1345,9 @@ pub fn create_mesh_from_blocks(
             }
         };
 
-        // mask ของ slice: Some((ชนิดบล็อก, ระดับ AO สม่ำเสมอ, ลาย texture)) = รอ merge
-        // ลายอยู่ใน key ด้วย — หน้าที่ลายต่างกัน merge รวมกันไม่ได้
-        let mut mask: Vec<Option<(BlockType, u8, u8)>> = vec![None; (lu * lv) as usize];
+        // mask ของ slice: Some((ชนิดบล็อก, ระดับ AO, ลาย texture, ระดับ sky light)) = รอ merge
+        // ลายกับแสงอยู่ใน key ด้วย — หน้าที่ลาย/ความสว่างต่างกัน merge รวมกันไม่ได้
+        let mut mask: Vec<Option<(BlockType, u8, u8, u8)>> = vec![None; (lu * lv) as usize];
 
         for s in s0..s1 {
             // ล้างเฉพาะแถบที่ใช้ — นอกแถบไม่เคยถูกเขียน เป็น None ตลอด
@@ -1246,7 +1367,9 @@ pub fn create_mesh_from_blocks(
                     let block = blocks.get(c[0] as usize, c[1] as usize, c[2] as usize);
                     // TallGrass ไม่ใช่ลูกบาศก์ — วาดแยกเป็นกากบาทท้ายฟังก์ชัน
                     // Chiseled ข้ามไปก่อน วาดแยกทีหลัง
-                    if block == BlockType::Air || block == BlockType::TallGrass || block == BlockType::Chiseled || block == BlockType::Campfire || block == BlockType::SmartLamp || block == BlockType::SmartLampOn {
+                    // Branch เป็น Tapered Cylinder
+                    // Leaves เป็นแผ่น sprite ตัดกันแบบดาว 3 แกน
+                    if block == BlockType::Air || block == BlockType::TallGrass || block == BlockType::Chiseled || block == BlockType::Campfire || block == BlockType::SmartLamp || block == BlockType::SmartLampOn || block == BlockType::Branch || block == BlockType::Leaves {
                         continue;
                     }
 
@@ -1316,8 +1439,18 @@ pub fn create_mesh_from_blocks(
                         )
                     };
 
-                    if !block.is_water() && ao[0] == ao[1] && ao[1] == ao[2] && ao[2] == ao[3] {
-                        mask[midx(ui, vi)] = Some((block, ao[0], variant));
+                    // บล็อกเรืองแสงสว่างเต็มเสมอ ไม่ขึ้นกับ sky light (ไม่งั้นโคมในถ้ำจะดำ)
+                    let lit = if lamp_emission(block).is_some() {
+                        [crate::light::MAX_LIGHT; 4]
+                    } else {
+                        face_light(c, face_id)
+                    };
+
+                    if !block.is_water()
+                        && ao[0] == ao[1] && ao[1] == ao[2] && ao[2] == ao[3]
+                        && lit[0] == lit[1] && lit[1] == lit[2] && lit[2] == lit[3]
+                    {
+                        mask[midx(ui, vi)] = Some((block, ao[0], variant, lit[0]));
                     } else {
                         // AO ไล่เฉดภายในหน้า — merge ไม่ได้ วาดเดี่ยวพร้อม flip diagonal
                         let tex = face_texture(block, face_id, variant);
@@ -1351,7 +1484,7 @@ pub fn create_mesh_from_blocks(
                             let p = CUBE_POSITIONS[face_id][i];
                             verts[i] = [p[0] + vx as f32, p[1] + vy as f32, p[2] + vz as f32];
                             if is_w && p[1] > 0.5 { verts[i][1] -= corner_drop[i]; }
-                            let br = shade * AO_CURVE[ao[i] as usize];
+                            let br = shade * AO_CURVE[ao[i] as usize] * sky_curve(lit[i]);
                             // น้ำลึกสีเข้มกว่า (corner_depth = 0 สำหรับบล็อกอื่น)
                             let tint = 1.0 - WATER_DEPTH_DARKEN * corner_depth[i];
                             cols[i] = [base[0] * br * tint, base[1] * br * tint, base[2] * br * tint, base[3]];
@@ -1395,7 +1528,7 @@ pub fn create_mesh_from_blocks(
                         }
                     }
 
-                    let (block, ao_level, variant) = key;
+                    let (block, ao_level, variant, light_level) = key;
                     let is_water = block.is_water();
                     let is_glass = block == BlockType::Glass;
                     let is_lamp = lamp_emission(block).is_some();
@@ -1405,7 +1538,7 @@ pub fn create_mesh_from_blocks(
                         face_texture(block, face_id, variant)
                     };
                     let base = if tex.is_some() { [1.0, 1.0, 1.0, 1.0] } else { block_color(block) };
-                    let br = FACE_SHADE[face_id] * AO_CURVE[ao_level as usize];
+                    let br = FACE_SHADE[face_id] * AO_CURVE[ao_level as usize] * sky_curve(light_level);
                     let col = [base[0] * br, base[1] * br, base[2] * br, base[3]];
 
                     let mut verts = [[0f32; 3]; 4];
@@ -1448,6 +1581,7 @@ pub fn create_mesh_from_blocks(
 
         blocks.for_each_matching(|b| b == BlockType::TallGrass, |xi, yi, zi, _| {
             let (x, y, z) = (xi as f32, yi as f32, zi as f32);
+            let tint = block_tint(xi as i32, yi as i32, zi as i32);
 
             for quad in CROSS_QUADS {
                 let mut verts = [[0f32; 3]; 4];
@@ -1455,8 +1589,50 @@ pub fn create_mesh_from_blocks(
                     verts[v] = [quad[v][0] + x, quad[v][1] + y, quad[v][2] + z];
                 }
                 texture_buf(&mut set.deco, sprite)
-                    .push_quad(verts, [0., 1., 0.], [[1.0; 4]; 4], CROSS_UVS, false);
+                    .push_quad(verts, [0., 1., 0.], [tint; 4], CROSS_UVS, false);
             }
+        });
+    }
+
+    // ใบไม้ทรงดาว 3 แกน (แนว Better Leaves): แผ่น sprite ทแยงคู่ในทั้งสามระนาบ
+    // พุ่มจึงฟูรอบทิศแทนที่จะเป็นก้อนเหลี่ยม
+    if let Some(sprite) = face_texture(BlockType::Leaves, 2, 0) {
+        blocks.for_each_matching(|b| b == BlockType::Leaves, |xi, yi, zi, _| {
+            // ใบที่ถูกใบ/บล็อกทึบล้อมครบหกด้านมองไม่เห็นอยู่แล้ว — ข้ามไปเลย
+            // (พุ่มหนาๆ ประหยัด quad ได้เยอะโดยหน้าตาไม่เปลี่ยน)
+            let (cx, cy, cz) = (xi as i32, yi as i32, zi as i32);
+            let hidden = FACE_OFFSETS.iter().all(|o| {
+                let n = sample(cx + o[0], cy + o[1], cz + o[2]);
+                n == BlockType::Leaves || !block_def(n).transparent && n != BlockType::Air
+            });
+            if hidden {
+                return;
+            }
+            let tint = block_tint(cx, cy, cz);
+            generate_leaf_mesh_into(&mut set, sprite, xi as f32, yi as f32, zi as f32, tint);
+        });
+    }
+
+    if let Some(bn) = branch_network {
+        blocks.for_each_matching(|b| b == BlockType::Branch, |xi, yi, zi, _| {
+            let p = IVec3::new(chunk_pos.x * CHUNK_WIDTH as i32 + xi as i32, yi as i32, chunk_pos.y * CHUNK_WIDTH as i32 + zi as i32);
+            let node = bn.nodes.get(&p);
+            let thickness = node.map_or(crate::tree::LOOSE_THICKNESS, |n| n.thickness);
+
+            // แต่ละทิศพก thickness ของ node ปลายทางมาด้วย — รอยต่อสองฝั่งจะได้คิด
+            // รัศมีจากตัวเลขคู่เดียวกัน (ดู joint_radius) ผิวจึงต่อสนิทไม่เป็นขั้น
+            let parent = node
+                .and_then(|n| n.parent_pos)
+                .map(|pp| (pp - p, bn.thickness_at(pp)));
+            let mut children = Vec::new();
+            if let Some(n) = node {
+                for &cp in &n.children {
+                    children.push((cp - p, bn.thickness_at(cp)));
+                }
+            }
+
+            let tint = block_tint(xi as i32, yi as i32, zi as i32);
+            generate_branch_mesh_into(&mut set, xi as f32, yi as f32, zi as f32, thickness, parent, &children, tint);
         });
     }
 
@@ -1470,6 +1646,195 @@ pub fn create_mesh_from_blocks(
     }
 
     set
+}
+
+/// รัศมีที่ระนาบรอยต่อของ node สองตัวที่ติดกัน — เฉลี่ย thickness ทั้งคู่ ทำให้ทั้ง
+/// สองฝั่งคำนวณได้ค่าเดียวกันเสมอ ผิวจึงต่อสนิทไม่เป็นขั้นบันได
+fn branch_joint_radius(t_self: u8, t_neighbor: u8) -> f32 {
+    (t_self as f32 + t_neighbor as f32) * 0.5 / 32.0
+}
+
+/// ใบไม้ยื่นเลยขอบบล็อกออกไปเท่าไหร่ — ตัวที่ทำให้ขอบพุ่มดู "ฟู" แทนที่จะตัดตรง
+/// เป็นเหลี่ยม ค่ามากไปพุ่มจะบวมทะลุกันเอง
+const LEAF_OVERHANG: f32 = 0.15;
+
+/// ใบไม้หนึ่งบล็อก = แผ่น sprite ทแยงคู่ในทั้งสามระนาบ (ดาว 3 แกน)
+/// ไม่มีหน้าคิวบ์เลย พุ่มจึงโปร่งและฟูรอบทิศ มองจากใต้ต้นขึ้นไปเห็นเป็นหย่อมใบ
+fn generate_leaf_mesh_into(
+    set: &mut ChunkMeshSet,
+    sprite: &'static str,
+    bx: f32,
+    by: f32,
+    bz: f32,
+    tint: [f32; 4],
+) {
+    const UVS: [[f32; 2]; 4] = [[0., 1.], [1., 1.], [1., 0.], [0., 0.]];
+    let lo = -LEAF_OVERHANG;
+    let hi = 1.0 + LEAF_OVERHANG;
+    let mid = 0.5;
+
+    // แต่ละระนาบมีแผ่นทแยงสองแผ่นตัดกัน — ระนาบตั้ง 2 ชุด (คร่อมแกน y)
+    // และระนาบนอน 1 ชุด (คร่อมแกน x/z) รวม 6 แผ่น
+    let quads: [[[f32; 3]; 4]; 6] = [
+        // ทแยงในระนาบ XZ ตั้งขึ้น (เหมือนกากบาทของหญ้าสูง)
+        [[lo, lo, lo], [hi, lo, hi], [hi, hi, hi], [lo, hi, lo]],
+        [[hi, lo, lo], [lo, lo, hi], [lo, hi, hi], [hi, hi, lo]],
+        // ทแยงในระนาบ XY (คร่อมแกน z ที่กึ่งกลาง)
+        [[lo, lo, mid], [hi, lo, mid], [hi, hi, mid], [lo, hi, mid]],
+        [[lo, hi, mid], [hi, hi, mid], [hi, lo, mid], [lo, lo, mid]],
+        // ทแยงในระนาบ YZ (คร่อมแกน x ที่กึ่งกลาง)
+        [[mid, lo, lo], [mid, lo, hi], [mid, hi, hi], [mid, hi, lo]],
+        [[mid, lo, hi], [mid, lo, lo], [mid, hi, lo], [mid, hi, hi]],
+    ];
+
+    for quad in quads {
+        let mut verts = [[0f32; 3]; 4];
+        for v in 0..4 {
+            verts[v] = [quad[v][0] + bx, quad[v][1] + by, quad[v][2] + bz];
+        }
+        // normal ชี้ขึ้นเหมือนหญ้าสูง — material เป็น double_sided อยู่แล้ว
+        // ใบทุกแผ่นจึงรับแสงเท่ากันไม่ว่ามองจากทิศไหน ไม่มีแผ่นดำ
+        texture_buf(&mut set.deco, sprite).push_quad(verts, [0., 1., 0.], [tint; 4], UVS, false);
+    }
+}
+
+/// ช่วงของตัวต่อกิ่งวัดตามแกนของมันเอง: จากใจกลาง node ถึงระนาบรอยต่อ (ครึ่งทาง
+/// ไปหาเพื่อนบ้าน) — node สองตัวที่ติดกันจึงปูเต็มระยะห่างพอดีโดยไม่เหลือคอคอด
+fn extension_span(dir: IVec3) -> (f32, f32) {
+    (0.0, dir.as_vec3().length() * 0.5)
+}
+
+/// แกนพิกัดของตัวต่อกิ่งไปทาง `dir` — คืน (u, n, w) โดย n คือทิศจริง ส่วน u/w คือ
+/// แกนของหน้าตัด
+///
+/// u ถูกสร้างจาก **เส้นแกน** (canonical axis) ไม่ใช่จากทิศ เพื่อการันตีว่า node สองตัว
+/// คนละฝั่งรอยต่อ (เห็นทิศเป็น d กับ -d) ได้หน้าตัดบิดรอบแกนเท่ากันเป๊ะ สี่เหลี่ยมจึงทับ
+/// กันสนิท — Quat::from_rotation_arc บังเอิญให้ผลตรงกันในทั้ง 26 ทิศเหมือนกัน (มีเทส
+/// ยืนยัน) แต่เป็นเรื่องบังเอิญจากความสมมาตร 90° ของหน้าตัดสี่เหลี่ยม ไม่ใช่การการันตี
+/// (w พลิกเครื่องหมายตามทิศได้ เพราะหน้าตัดสมมาตร ±r — ตำแหน่งมุมยังตรงกัน
+/// แต่ winding ยังชี้ออกนอกทั้งสองฝั่ง)
+fn extension_basis(dir: IVec3) -> (Vec3, Vec3, Vec3) {
+    let n = dir.as_vec3().normalize();
+    // เส้นแกนเดียวกันต้องได้ canon ตัวเดียวกันไม่ว่ามองจากฝั่งไหน
+    let canon_i = if (dir.x, dir.y, dir.z) < (0, 0, 0) { -dir } else { dir };
+    let canon = canon_i.as_vec3().normalize();
+    let helper = if canon.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
+    let u = canon.cross(helper).normalize();
+    // u × n = w — เรียงมือขวาแบบเดียวกับ (X, Y, Z) เดิม winding จึงไม่กลับด้าน
+    let w = u.cross(n);
+    (u, n, w)
+}
+
+/// ปลายกิ่งของ node แต่ละด้าน: ทิศ, รัศมีที่ขอบช่อง, ต่อกับ node จริงไหม
+/// (ต่อกับ node จริง = ไม่ต้อง push ฝาปิด เพราะอีกฝั่งวาดต่อให้พอดี)
+struct BranchEnd {
+    dir: IVec3,
+    radius: f32,
+    joined: bool,
+}
+
+fn generate_branch_mesh_into(
+    set: &mut ChunkMeshSet,
+    bx: f32,
+    by: f32,
+    bz: f32,
+    thickness: u8,
+    parent: Option<(IVec3, Option<u8>)>,
+    children: &[(IVec3, Option<u8>)],
+    // ความสว่างของช่องที่กิ่งอยู่ (sky light) — ไม่งั้นกิ่งสว่างเต็มแม้ในถ้ำ/กลางคืน
+    tint: [f32; 4],
+) {
+    let thickness_f = thickness as f32;
+    let r_center = thickness_f / 32.0;
+    // ไม่มี node จริงอีกฝั่ง: โคนบานออกนิด ปลายเรียวเข้า (ค่าเดิมก่อนแก้)
+    let r_flare = (thickness_f + 2.0).min(16.0) / 32.0;
+    let r_taper = (thickness_f - 2.0).max(2.0) / 32.0;
+
+    let mut ends: Vec<BranchEnd> = Vec::with_capacity(children.len() + 1);
+    // ไม่มี parent (root/กิ่งกำพร้า) = ถือว่าโคนชี้ลงตามแรงโน้มถ่วง
+    let parent_dir = parent.map_or(IVec3::NEG_Y, |(d, _)| d);
+    ends.push(match parent {
+        Some((dir, Some(t))) => BranchEnd { dir, radius: branch_joint_radius(thickness, t), joined: true },
+        _ => BranchEnd { dir: parent_dir, radius: r_flare, joined: false },
+    });
+    if children.is_empty() {
+        // ปลายกิ่ง — เรียวต่อไปทางตรงข้ามโคน
+        ends.push(BranchEnd { dir: -parent_dir, radius: r_taper, joined: false });
+    } else {
+        for &(dir, t) in children {
+            ends.push(match t {
+                Some(t) => BranchEnd { dir, radius: branch_joint_radius(thickness, t), joined: true },
+                None => BranchEnd { dir, radius: r_taper, joined: false },
+            });
+        }
+    }
+
+    ends.retain(|e| e.dir != IVec3::ZERO);
+
+    let tex = face_texture(BlockType::Branch, 2, 0).unwrap_or("textures/wood_side.png");
+
+    // ไม่มีคิวบ์แกนกลางแล้ว — กิ่งประกอบจากแท่งเรียวที่ยิงออกจากใจกลาง node ล้วนๆ
+    // แต่ละแท่งเป็นก้อนตันปิดครบทุกด้าน กิ่งทั้งเส้นจึงเป็นยูเนียนของก้อนตัน = ไม่มีรู
+    //
+    // คิวบ์เดิมสร้างปัญหาสองทาง: ถ้า cull หน้าที่มีกิ่งต่อ จะเหลือท่อเปิดเพราะแท่ง
+    // เริ่มที่ใจกลางไม่ใช่ที่ผิวคิวบ์; ถ้าไม่ cull คิวบ์ก็โผล่เป็นก้อนเหลี่ยมคร่อมกิ่ง
+    // ทุก node (เห็นชัดมากตอนกิ่งเฉียง เพราะคิวบ์วางตามแกนแต่กิ่งเอียง)
+
+    let push_extension = |set: &mut ChunkMeshSet, dir: IVec3, r_end: f32, cap: bool| {
+        // ยืดไปถึงจุดกึ่งกลางระหว่างศูนย์กลางบล็อกสองก้อน — แกนตรง 0.5, เฉียงขอบ ~0.71,
+        // เฉียงมุม ~0.87 ทั้งสองฝั่งจึงบรรจบกันพอดีเพราะ branch_joint_radius สมมาตร
+        // เริ่มจาก "ใจกลาง node" ไม่ใช่จากผิวคิวบ์ — ตัวต่อทุกเส้นของ node เดียวกันจึง
+        // ซ้อนกันตรงกลางกลายเป็นดุมตัน และกิ่งเป็นแท่งต่อเนื่องเส้นเดียวจริงๆ
+        //
+        // เดิมเริ่มที่ผิวคิวบ์ ซึ่งพังหนักตอนกิ่งเฉียง: บล็อกที่ติดกันแบบเฉียงแตะกันแค่
+        // "ขอบ" คิวบ์สองก้อนจึงไม่ชนกันเลย เหลือแค่คอเชื่อมบางๆ คั่นกลาง ภาพที่ได้
+        // เป็นลูกปัดร้อยเชือกไม่ใช่กิ่งไม้
+        let (min_y, max_y) = extension_span(dir);
+        // หน้าตัดที่ใจกลางเท่าคิวบ์พอดี แล้วค่อยเรียวไปหา r_end ที่ระนาบรอยต่อ
+        let r_start = r_center;
+        let t = (r_center * 2.0).clamp(0.0, 1.0);
+
+        // แกนอ้างอิงของหน้าตัดต้องขึ้นกับ "เส้นแกน" ไม่ใช่ทิศ — node สองตัวที่รอยต่อ
+        // เดียวกันมองเห็นทิศตรงข้ามกัน (d กับ -d) ถ้าเอา d ไปสร้างแกนตรงๆ (เช่น
+        // Quat::from_rotation_arc) หน้าตัดสองฝั่งจะบิดรอบแกนไม่เท่ากัน สี่เหลี่ยม
+        // ไม่ทับกัน แล้วรอยต่อแตกเป็นรูโหว่ — ชัดมากตอนกิ่งเฉียง
+        let (u, n, w) = extension_basis(dir);
+        let at = |a: f32, y: f32, b: f32| -> [f32; 3] {
+            let v = u * a + n * y + w * b;
+            [v.x + bx + 0.5, v.y + by + 0.5, v.z + bz + 0.5]
+        };
+        let bot = [
+            at(-r_start, min_y, -r_start), at( r_start, min_y, -r_start),
+            at( r_start, min_y,  r_start), at(-r_start, min_y,  r_start),
+        ];
+        let top = [
+            at(-r_end, max_y, -r_end), at( r_end, max_y, -r_end),
+            at( r_end, max_y,  r_end), at(-r_end, max_y,  r_end),
+        ];
+
+        let mut push_face = |verts: [[f32; 3]; 4], normal: Vec3| {
+            let uvs = [[0., 1.0 - t], [1., 1.0 - t], [1., 0.], [0., 0.]];
+            texture_buf(&mut set.textured, tex)
+                .push_quad(verts, [normal.x, normal.y, normal.z], [tint; 4], uvs, false);
+        };
+
+        push_face([bot[1], bot[0], top[0], top[1]], -w);
+        push_face([bot[2], bot[1], top[1], top[2]], u);
+        push_face([bot[3], bot[2], top[2], top[3]], w);
+        push_face([bot[0], bot[3], top[3], top[0]], -u);
+        // ฝาก้น — ปกติจมอยู่ในคิวบ์แกนกลางจึงมองไม่เห็น แต่ตอนกิ่งเฉียงหน้าตัดโผล่พ้น
+        // คิวบ์ออกมา ถ้าไม่ปิดจะเห็นทะลุเข้าไปในกิ่ง (ด้านที่ "ล่องหน")
+        push_face([bot[3], bot[2], bot[1], bot[0]], -n);
+        // ฝาปิดปลาย — เว้นไว้เมื่อมี node จริงต่ออยู่ (อีกฝั่งวาดมาบรรจบพอดี ปิดซ้ำ
+        // จะได้ quad ซ้อนกันสองแผ่นคาระนาบรอยต่อ)
+        if cap {
+            push_face([top[0], top[1], top[2], top[3]], n);
+        }
+    };
+
+    for e in &ends {
+        push_extension(set, e.dir, e.radius, !e.joined);
+    }
 }
 
 fn generate_chiseled_mesh_into(
@@ -1608,11 +1973,12 @@ impl TerrainSampler {
     }
 }
 
+/// คืนบล็อกของ chunk + โครงกิ่งของต้นไม้ที่ปลูกไว้ (deterministic จากพิกัด chunk)
 fn generate_chunk_blocks(
     chunk_pos: IVec2,
     noise: crate::NoiseParams,
     source: crate::TerrainSource,
-) -> ChunkBlocks {
+) -> (ChunkBlocks, Vec<crate::tree::BranchRecord>) {
     let sampler = TerrainSampler::new(noise);
     // เริ่มเป็นอากาศ uniform ทั้งคอลัมน์ — เขียนเฉพาะที่มีของ ฟ้าไม่เคยถูก
     // materialize; compact() ท้ายฟังก์ชันยุบใต้ดิน/น้ำที่บังเอิญล้วนกลับเป็น 1 byte
@@ -1703,36 +2069,22 @@ fn generate_chunk_blocks(
         state
     };
 
+    // ต้นไม้เป็นกิ่ง Branch ทั้งต้น — ลำต้นคือกิ่งหนาสุดเรียวขึ้นไปหายอด
+    // จุดปลูกอยู่ในเขต 4..=11 เพื่อให้กิ่งที่แตกออกด้านข้างยังไม่ล้ำออกนอก chunk
+    // (topology ของ chunk ต้องจบในตัวเอง — ดู chunk_records/merge_records)
+    let mut branches: Vec<crate::tree::BranchRecord> = Vec::new();
     let tree_count = (next() % 3) as usize;
     for _ in 0..tree_count {
-        let tx = 2 + (next() % 12) as usize;
-        let tz = 2 + (next() % 12) as usize;
-        let h = heights[tz][tx];
-        if desert[tz][tx] || h <= sea_level + 1 || h + 7 >= CHUNK_HEIGHT as i32 {
+        let tx = 4 + (next() % 8) as i32;
+        let tz = 4 + (next() % 8) as i32;
+        let h = heights[tz as usize][tx as usize];
+        let params = &TREE_PRESETS[ACTIVE_TREE_PRESET].1;
+        // เผื่อความสูงลำต้นเต็มที่ + พุ่มยอด ให้ต้นสูงๆ (เช่น pine) ไม่ถูกตัดยอด
+        let headroom = params.trunk_len.1 + params.limb_len.1 + 4;
+        if desert[tz as usize][tx as usize] || h <= sea_level + 1 || h + headroom >= CHUNK_HEIGHT as i32 {
             continue;
         }
-
-        for ty in (h + 1)..=(h + 5) {
-            blocks.set(tx, ty as usize, tz, BlockType::Wood);
-        }
-        for ly in (h + 3)..=(h + 6) {
-            let r: i32 = if ly <= h + 4 { 2 } else { 1 };
-            for dz in -r..=r {
-                for dx in -r..=r {
-                    if r == 2 && dx.abs() == 2 && dz.abs() == 2 {
-                        continue; // ตัดมุมพุ่ม
-                    }
-                    if ly == h + 6 && dx.abs() + dz.abs() > 1 {
-                        continue; // ยอดเป็นกากบาท
-                    }
-                    let lx = (tx as i32 + dx) as usize;
-                    let lz = (tz as i32 + dz) as usize;
-                    if blocks.get(lx, ly as usize, lz) == BlockType::Air {
-                        blocks.set(lx, ly as usize, lz, BlockType::Leaves);
-                    }
-                }
-            }
-        }
+        grow_tree(&mut blocks, &mut branches, IVec3::new(tx, h + 1, tz), params, &mut next);
     }
 
     // หญ้าสูง: โปรยบนผิวหญ้า (ไม่ขึ้นในทะเลทราย/ใต้น้ำ)
@@ -1752,7 +2104,281 @@ fn generate_chunk_blocks(
     }
 
     blocks.compact();
-    blocks
+
+    // ตัวปั้นต้นไม้ทำงานบนพิกัด local ของ chunk (เพราะต้อง index blocks ตรงๆ) แต่
+    // BranchNetwork ใช้พิกัด world ทั้งระบบ (mesh lookup, chunk_of, attach_branch_node)
+    // — ถ้าลืมแปลง chunk อื่นนอกจาก (0,0) จะหา node ไม่เจอแล้ว fallback เป็นกิ่งผอม
+    let origin = IVec3::new(
+        chunk_pos.x * CHUNK_WIDTH as i32,
+        0,
+        chunk_pos.y * CHUNK_WIDTH as i32,
+    );
+    for r in &mut branches {
+        r.pos = (IVec3::from_array(r.pos) + origin).to_array();
+        r.parent = r.parent.map(|p| (IVec3::from_array(p) + origin).to_array());
+    }
+
+    (blocks, branches)
+}
+
+/// แปลงทิศทางต่อเนื่องเป็นก้าวเดียวในเพื่อนบ้าน 26 ทิศ — ตัวนี้แหละที่ทำให้เกิด
+/// กิ่งเฉียง แทนที่จะเป็นบันไดตามแกน (mesh รองรับทิศเฉียงแล้ว ดู push_extension)
+/// ไม่มีทางคืน (0,0,0): ถ้าทุกแกนต่ำกว่าเกณฑ์ จะบังคับใช้แกนที่แรงที่สุด
+fn quantize_dir(dir: Vec3) -> IVec3 {
+    let d = dir.normalize_or_zero();
+    if d == Vec3::ZERO {
+        return IVec3::Y;
+    }
+    let step = |c: f32| if c > 0.5 { 1 } else if c < -0.5 { -1 } else { 0 };
+    let q = IVec3::new(step(d.x), step(d.y), step(d.z));
+    if q != IVec3::ZERO {
+        return q;
+    }
+    // ทุกแกนอยู่กลางๆ — เลือกแกนที่ค่าสัมบูรณ์มากสุด (tie-break x → y → z)
+    let (ax, ay, az) = (d.x.abs(), d.y.abs(), d.z.abs());
+    if ax >= ay && ax >= az {
+        IVec3::new(d.x.signum() as i32, 0, 0)
+    } else if ay >= az {
+        IVec3::new(0, d.y.signum() as i32, 0)
+    } else {
+        IVec3::new(0, 0, d.z.signum() as i32)
+    }
+}
+
+/// จุดนี้ยังอยู่ในกรอบ chunk (และช่วง y ที่เขียนได้) ไหม — กิ่งห้ามล้ำออกนอก chunk
+/// เพราะโครงกิ่งถูกเซฟ/โหลด/ส่งข้าม network เป็นก้อนต่อ chunk
+fn inside_chunk(p: IVec3) -> bool {
+    p.x >= 0 && p.x < CHUNK_WIDTH as i32
+        && p.z >= 0 && p.z < CHUNK_WIDTH as i32
+        && p.y >= 0 && p.y < CHUNK_HEIGHT as i32
+}
+
+/// ทรงต้นไม้ทั้งหมดคุมจากที่นี่ที่เดียว — จูนตัวเลขแล้วเห็นผลทันทีโดยไม่ต้องแตะลอจิก
+/// (ดู TREE_PRESETS สำหรับชุดค่าที่ใช้จริง และเทส dump_tree_previews สำหรับดูภาพเทียบ)
+#[derive(Clone, Copy)]
+pub struct TreeParams {
+    /// ความยาวลำต้น (สุ่มในช่วง inclusive)
+    pub trunk_len: (i32, i32),
+    /// จำนวนชั้นการแตกกิ่ง (0 = ลำต้นล้วนไม่มีกิ่ง)
+    pub max_depth: u32,
+    /// จำนวนกิ่งที่แตกออกตรงยอดของแต่ละเส้น
+    pub crown_forks: (i32, i32),
+    /// โอกาสแตกกิ่งข้างต่อหนึ่งก้าวระหว่างเดิน (0 = แตกเฉพาะที่ยอดแบบไม้กวาด)
+    /// ต้นไม้จริงแตกกิ่งตลอดความยาวลำต้น ไม่ใช่กระจุกที่ยอดจุดเดียว
+    pub side_branch_chance: f32,
+    /// ห้ามแตกกิ่งข้างในช่วงกี่ก้าวแรกของลำต้น (เว้นโคนให้โล่ง)
+    pub bare_trunk: i32,
+    /// ความยาวกิ่งชั้นแรก — ชั้นลึกกว่าสั้นลงทีละ 1
+    pub limb_len: (i32, i32),
+    /// ความเอียงออกจากแกนตั้งตอนแตกกิ่ง (0 = พุ่งขึ้นตรง, 1 = กางออกข้าง)
+    pub tilt: f32,
+    /// แรงส่ายรายก้าว — สูง = กิ่งคดเคี้ยว
+    pub wobble: f32,
+    /// แรงดึงขึ้นบนรายก้าว — สูง = กิ่งเชิดขึ้น, ต่ำ/ติดลบ = กิ่งทิ้งตัวลง
+    pub climb: f32,
+    /// สัดส่วน thickness ที่เหลือเมื่อเดินจนสุดกิ่งหนึ่งเส้น
+    pub taper: f32,
+    /// สัดส่วน thickness ที่เหลือทันทีหลังแตกกิ่ง — ตัวที่ทำให้ "ลำต้น vs กิ่ง" แยกกัน
+    pub fork_drop: f32,
+    /// รัศมีพุ่มใบที่ปลายกิ่งสุดท้าย และที่จุดแตกกิ่งระหว่างทาง
+    pub leaf_tip: i32,
+    pub leaf_fork: i32,
+}
+
+fn scale_thickness(t: u8, factor: f32) -> u8 {
+    ((t as f32 * factor).round() as u8).max(crate::tree::MIN_THICKNESS)
+}
+
+/// ชุดทรงต้นไม้ที่เลือกใช้ได้ — ตัวแรกคือตัวที่ worldgen ใช้จริงตอนนี้
+/// ดูภาพเทียบได้จากเทส `dump_tree_previews` (เขียนไฟล์ target/tree_previews.html)
+pub const TREE_PRESETS: &[(&str, TreeParams)] = &[
+    // ทรงร่ม: ลำต้นสั้น กิ่งกางออกกว้าง พุ่มใหญ่ — เงาเยอะ เดินลอดได้
+    ("oak", TreeParams {
+        trunk_len: (4, 6), max_depth: 2, crown_forks: (2, 3),
+        side_branch_chance: 0.35, bare_trunk: 2, limb_len: (3, 5),
+        tilt: 0.75, wobble: 0.6, climb: 0.25, taper: 0.8, fork_drop: 0.55,
+        leaf_tip: 2, leaf_fork: 1,
+    }),
+    // ทรงกรวย: ลำต้นสูงชัดเจน กิ่งสั้นแตกถี่ตลอดลำต้น เอียงลงเล็กน้อย
+    ("pine", TreeParams {
+        trunk_len: (9, 12), max_depth: 1, crown_forks: (2, 3),
+        side_branch_chance: 0.85, bare_trunk: 2, limb_len: (2, 3),
+        tilt: 0.9, wobble: 0.25, climb: 0.05, taper: 0.65, fork_drop: 0.4,
+        leaf_tip: 1, leaf_fork: 1,
+    }),
+    // เรียวสูง: ลำต้นสูงบาง กิ่งน้อยเชิดขึ้น พุ่มแคบ
+    ("birch", TreeParams {
+        trunk_len: (7, 10), max_depth: 2, crown_forks: (2, 2),
+        side_branch_chance: 0.25, bare_trunk: 4, limb_len: (2, 4),
+        tilt: 0.45, wobble: 0.35, climb: 0.45, taper: 0.75, fork_drop: 0.5,
+        leaf_tip: 2, leaf_fork: 1,
+    }),
+    // บิดเบี้ยว: ลำต้นสั้นคด กิ่งเยอะแตกมั่ว ใบเป็นหย่อม — ต้นไม้แก่/ป่าดิบ
+    ("gnarled", TreeParams {
+        trunk_len: (3, 5), max_depth: 3, crown_forks: (2, 4),
+        side_branch_chance: 0.5, bare_trunk: 1, limb_len: (2, 4),
+        tilt: 0.85, wobble: 1.1, climb: 0.15, taper: 0.7, fork_drop: 0.6,
+        leaf_tip: 2, leaf_fork: 1,
+    }),
+];
+
+/// ทรงที่ worldgen ใช้อยู่ — เปลี่ยน index นี้เพื่อสลับทรงทั้งโลก
+const ACTIVE_TREE_PRESET: usize = 0;
+
+/// ปลูกต้นไม้ทั้งต้นที่ `base` — เขียนบล็อก Branch/Leaves ลง `blocks`
+/// และสะสมโครง node ลง `records` (parent มาก่อนลูกเสมอ)
+fn grow_tree(
+    blocks: &mut ChunkBlocks,
+    records: &mut Vec<crate::tree::BranchRecord>,
+    base: IVec3,
+    params: &TreeParams,
+    next: &mut impl FnMut() -> u64,
+) {
+    if !inside_chunk(base) {
+        return;
+    }
+    blocks.set(base.x as usize, base.y as usize, base.z as usize, BlockType::Branch);
+    records.push(crate::tree::BranchRecord {
+        pos: base.to_array(),
+        parent: None,
+        thickness: crate::tree::TRUNK_THICKNESS,
+    });
+
+    let trunk_len = pick_range(params.trunk_len, next);
+    grow_limb(
+        blocks, records, base, crate::tree::TRUNK_THICKNESS,
+        Vec3::Y, trunk_len, 0, params, next,
+    );
+}
+
+/// สุ่มจำนวนเต็มในช่วง inclusive แบบ deterministic
+fn pick_range(range: (i32, i32), next: &mut impl FnMut() -> u64) -> i32 {
+    let (lo, hi) = range;
+    if hi <= lo {
+        return lo;
+    }
+    lo + (next() % (hi - lo + 1) as u64) as i32
+}
+
+/// เดินกิ่งหนึ่งเส้นจาก `from` ไปทาง `dir` ยาว `len` ก้าว แล้วแตกกิ่งลูกต่อ
+/// (`from` ต้องมี record อยู่แล้ว — ผู้เรียกเป็นคนวางบล็อกแรก)
+#[allow(clippy::too_many_arguments)]
+fn grow_limb(
+    blocks: &mut ChunkBlocks,
+    records: &mut Vec<crate::tree::BranchRecord>,
+    from: IVec3,
+    from_thickness: u8,
+    dir: Vec3,
+    len: i32,
+    depth: u32,
+    params: &TreeParams,
+    next: &mut impl FnMut() -> u64,
+) {
+    // สุ่ม -0.5..0.5 จาก xorshift ตัวเดียวกับที่ใช้เลือกตำแหน่งต้นไม้ (deterministic)
+    let jitter = |n: &mut dyn FnMut() -> u64| ((n() % 1000) as f32 / 1000.0) - 0.5;
+    let chance = |n: &mut dyn FnMut() -> u64| (n() % 1000) as f32 / 1000.0;
+
+    let mut cur = from;
+    let mut thickness = from_thickness;
+    let mut heading = dir.normalize_or_zero();
+    // เรียวจาก from_thickness ลงไปหา tip_thickness เกลี่ยตลอดความยาวกิ่ง
+    let tip_thickness = scale_thickness(from_thickness, params.taper);
+    // จุดที่จะแตกกิ่งข้างระหว่างทาง เก็บไว้ทำทีหลังเพื่อไม่ให้ยืม blocks ซ้อนกัน
+    let mut side_forks: Vec<(IVec3, u8)> = Vec::new();
+
+    for i in 0..len {
+        let step = quantize_dir(heading);
+        let np = cur + step;
+        if !inside_chunk(np) {
+            break;
+        }
+        // ชนกิ่งที่มีอยู่แล้ว (กิ่งพี่น้อง/ต้นข้างๆ) — หยุดเส้นนี้ ไม่งั้นจะได้ record
+        // สองใบที่ตำแหน่งเดียวกันแล้ว topology พัง
+        if blocks.get(np.x as usize, np.y as usize, np.z as usize) == BlockType::Branch {
+            break;
+        }
+        blocks.set(np.x as usize, np.y as usize, np.z as usize, BlockType::Branch);
+        let f = (i + 1) as f32 / len as f32;
+        thickness = (from_thickness as f32 + (tip_thickness as f32 - from_thickness as f32) * f)
+            .round()
+            .max(crate::tree::MIN_THICKNESS as f32) as u8;
+        records.push(crate::tree::BranchRecord {
+            pos: np.to_array(),
+            parent: Some(cur.to_array()),
+            thickness,
+        });
+        cur = np;
+
+        // แตกกิ่งข้างระหว่างทาง — นี่คือตัวที่ทำให้ต้นไม้ไม่เป็นทรงไม้กวาด
+        // (ถ้าแตกเฉพาะที่ยอด กิ่งทุกเส้นจะพุ่งออกจากจุดเดียวกันหมด)
+        let past_bare = depth > 0 || i >= params.bare_trunk;
+        if depth < params.max_depth && past_bare && chance(next) < params.side_branch_chance {
+            side_forks.push((cur, thickness));
+        }
+
+        // ส่ายทุกก้าว + ดึงขึ้นบน กิ่งจึงโค้งแทนที่จะพุ่งตรงเป็นไม้บรรทัด
+        heading = (heading
+            + Vec3::new(jitter(next) * params.wobble, params.climb, jitter(next) * params.wobble))
+            .normalize_or_zero();
+        if heading == Vec3::ZERO {
+            heading = Vec3::Y;
+        }
+    }
+
+    let spread = |yaw: f32, tilt: f32| Vec3::new(yaw.cos() * tilt, 1.0 - tilt * 0.5, yaw.sin() * tilt);
+    let child_len = (params.limb_len.0 - depth as i32).max(2);
+    let child_range = (child_len, (params.limb_len.1 - depth as i32).max(child_len));
+
+    // กิ่งข้างตลอดความยาว — เส้นละหนึ่งกิ่ง ทิศสุ่มรอบแกน
+    for (at, t_here) in side_forks {
+        let yaw = ((next() % 360) as f32).to_radians();
+        let tilt = (params.tilt + jitter(next) * 0.3).clamp(0.1, 1.0);
+        grow_limb(
+            blocks, records, at, scale_thickness(t_here, params.fork_drop),
+            spread(yaw, tilt), pick_range(child_range, next), depth + 1, params, next,
+        );
+        scatter_leaves(blocks, at, params.leaf_fork);
+    }
+
+    if depth >= params.max_depth {
+        scatter_leaves(blocks, cur, params.leaf_tip);
+        return;
+    }
+
+    // กิ่งกระจุกที่ยอด กระจายรอบแกนตั้งด้วยมุมเริ่มต้นสุ่ม
+    let count = pick_range(params.crown_forks, next);
+    let base_angle = ((next() % 360) as f32).to_radians();
+    for i in 0..count {
+        let yaw = base_angle + std::f32::consts::TAU * i as f32 / count.max(1) as f32;
+        let tilt = (params.tilt + jitter(next) * 0.3).clamp(0.1, 1.0);
+        // ตกฮวบตรงจุดแตกกิ่ง — กิ่งต้องดูเล็กกว่าลำต้นชัดเจนตั้งแต่บล็อกแรก
+        grow_limb(
+            blocks, records, cur, scale_thickness(thickness, params.fork_drop),
+            spread(yaw, tilt), pick_range(child_range, next), depth + 1, params, next,
+        );
+    }
+    scatter_leaves(blocks, cur, params.leaf_fork);
+}
+
+/// โปรยใบรอบจุดหนึ่ง (ไม่ทับบล็อกที่มีของอยู่แล้ว และไม่ล้ำออกนอก chunk)
+fn scatter_leaves(blocks: &mut ChunkBlocks, center: IVec3, r: i32) {
+    for dy in -r..=r {
+        for dz in -r..=r {
+            for dx in -r..=r {
+                // ตัดมุมให้พุ่มกลมขึ้น ไม่เป็นกล่อง
+                if dx.abs() + dy.abs() + dz.abs() > r + 1 {
+                    continue;
+                }
+                let p = center + IVec3::new(dx, dy, dz);
+                if !inside_chunk(p) {
+                    continue;
+                }
+                if blocks.get(p.x as usize, p.y as usize, p.z as usize) == BlockType::Air {
+                    blocks.set(p.x as usize, p.y as usize, p.z as usize, BlockType::Leaves);
+                }
+            }
+        }
+    }
 }
 
 /// สร้างเฉพาะ mesh น้ำของ chunk — คู่แฝดของเส้นทางน้ำใน create_mesh_from_blocks
@@ -1966,6 +2592,35 @@ fn chunk_aux_path(chunk_pos: IVec2) -> std::path::PathBuf {
     active_save_dir().join(format!("chunk_{}_{}.aux.bin", chunk_pos.x, chunk_pos.y))
 }
 
+/// ไฟล์ที่สามของ chunk: โครงกิ่งไม้ (BranchNetwork เฉพาะส่วนของ chunk นี้)
+/// แยกไฟล์ด้วยเหตุผลเดียวกับ .aux.bin — ChunkAux เป็น bincode แบบ positional
+/// เพิ่ม field เข้าไปตรงๆ จะทำให้เซฟเก่าอ่านไม่ออกแล้ว facing/ของในหีบหายหมด
+fn chunk_tree_path(chunk_pos: IVec2) -> std::path::PathBuf {
+    active_save_dir().join(format!("chunk_{}_{}.tree.bin", chunk_pos.x, chunk_pos.y))
+}
+
+pub fn save_chunk_tree(chunk_pos: IVec2, records: &[crate::tree::BranchRecord]) {
+    let path = chunk_tree_path(chunk_pos);
+    if records.is_empty() {
+        // ไม่มีกิ่งเหลือแล้ว (ทุบหมด) — ต้องลบไฟล์ ไม่งั้นโหลดครั้งหน้าจะฟื้นของเก่ากลับมา
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let Ok(body) = bincode::serialize(records) else { return };
+    let mut bytes = Vec::with_capacity(body.len() + 5);
+    bytes.extend_from_slice(b"TREE1");
+    bytes.extend_from_slice(&body);
+    if let Err(e) = std::fs::write(&path, bytes) {
+        warn!("save chunk tree {:?} failed: {}", chunk_pos, e);
+    }
+}
+
+pub fn load_chunk_tree(chunk_pos: IVec2) -> Vec<crate::tree::BranchRecord> {
+    let Ok(bytes) = std::fs::read(chunk_tree_path(chunk_pos)) else { return Vec::new() };
+    let Some(rest) = bytes.strip_prefix(b"TREE1") else { return Vec::new() };
+    bincode::deserialize(rest).unwrap_or_default()
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct ChunkAux {
     facings: Vec<(u32, u8)>,
@@ -1984,9 +2639,19 @@ pub fn save_chunk(chunk_pos: IVec2, blocks: &ChunkBlocks) {
     }
 }
 
-/// เหมือน save_chunk แต่เซฟไฟล์ .aux.bin (facing + container) ควบไปด้วย
-pub fn save_chunk_full(chunk_pos: IVec2, chunk: &ChunkData) {
+/// เซฟ chunk ครบชุด: บล็อก + .aux.bin (facing/container) + .tree.bin (โครงกิ่ง)
+/// สะดวกกว่าเรียก save_chunk_full ตรงๆ เพราะดึง record กิ่งจาก network ให้เลย
+pub fn save_loaded_chunk(world: &VoxelWorld, chunk_pos: IVec2) {
+    if let Some(chunk) = world.chunks.get(&chunk_pos) {
+        let records = world.branch_network.chunk_records(chunk_pos, CHUNK_WIDTH as i32);
+        save_chunk_full(chunk_pos, chunk, &records);
+    }
+}
+
+/// เหมือน save_chunk แต่เซฟไฟล์ .aux.bin (facing + container) และ .tree.bin ควบไปด้วย
+pub fn save_chunk_full(chunk_pos: IVec2, chunk: &ChunkData, branches: &[crate::tree::BranchRecord]) {
     save_chunk(chunk_pos, &chunk.blocks);
+    save_chunk_tree(chunk_pos, branches);
     let aux = ChunkAux {
         facings: chunk.facings.iter().map(|(&i, &f)| (i as u32, f)).collect(),
         chest: chunk.chest_slots.iter().map(|(&i, s)| {
@@ -2137,6 +2802,9 @@ pub struct ChunkBlockData {
     pub facings: HashMap<usize, u8>,
     pub chest_slots: HashMap<usize, Box<[Option<ItemStack>; 27]>>,
     pub furnace_slots: HashMap<usize, Box<[Option<ItemStack>; 3]>>,
+    /// โครงกิ่งของ chunk นี้ — มาจาก .tree.bin ถ้าโหลดจาก disk หรือจากตัวปั้นต้นไม้
+    /// ถ้าเป็น chunk ที่เพิ่ง generate (ดู spawn_block_generation_task)
+    pub branches: Vec<crate::tree::BranchRecord>,
     pub version: u32,
 }
 
@@ -2187,12 +2855,21 @@ pub fn spawn_block_generation_task(
         // — ยกเว้นตอนเป็น network client: save บนเครื่องเป็นโลก single player
         //   ของผู้เล่นเอง ห้ามเอามาปนกับโลกของ host
         let from_disk = use_disk_save.then(|| load_chunk(chunk_pos)).flatten();
-        let (facings, chest_slots, furnace_slots) = if use_disk_save && from_disk.is_some() {
+        let loaded_from_disk = from_disk.is_some();
+        let (facings, chest_slots, furnace_slots) = if use_disk_save && loaded_from_disk {
             load_chunk_aux(chunk_pos)
         } else {
             (HashMap::new(), HashMap::new(), HashMap::new())
         };
-        let blocks = from_disk.unwrap_or_else(|| generate_chunk_blocks(chunk_pos, noise, source));
+        // chunk ที่เคยเซฟ = โครงกิ่งอยู่ในไฟล์ (ผู้เล่นอาจทุบไปแล้ว ห้ามปั้นใหม่ทับ)
+        // chunk ใหม่ = เอาโครงที่ตัวปั้นต้นไม้เพิ่งสร้าง ซึ่ง deterministic จาก seed
+        let (blocks, branches) = match from_disk {
+            Some(blocks) => {
+                let trees = use_disk_save.then(|| load_chunk_tree(chunk_pos)).unwrap_or_default();
+                (blocks, trees)
+            }
+            None => generate_chunk_blocks(chunk_pos, noise, source),
+        };
         let _ = sender.send(ChunkBlockData {
             chunk_pos,
             blocks: Arc::new(blocks),
@@ -2200,6 +2877,7 @@ pub fn spawn_block_generation_task(
             facings,
             chest_slots,
             furnace_slots,
+            branches,
             version,
         });
     }).detach();
@@ -2210,11 +2888,16 @@ pub fn spawn_mesh_generation_task(
     blocks: Arc<ChunkBlocks>,
     neighbors: [Arc<ChunkBlocks>; 8],
     facings: HashMap<usize, u8>,
+    // snapshot ของ branch node ในกรอบ chunk (async task แตะ resource ตรงๆ ไม่ได้) —
+    // ถ้าไม่ส่งมา กิ่งจะถูกวาดด้วยค่า fallback แล้วเด้งรูปทรงตอน remesh ครั้งแรก
+    branches: crate::tree::BranchNetwork,
+    // lightmap ของ chunk + เพื่อนบ้าน (Arc ทั้งชุด clone ฟรี)
+    light: LightNeighborhood,
     version: u32,
     sender: Sender<ChunkMeshData>,
 ) {
     AsyncComputeTaskPool::get().spawn(async move {
-        let set = create_mesh_from_blocks(chunk_pos, &blocks, &neighbors, None, Some(&facings));
+        let set = create_mesh_from_blocks(chunk_pos, &blocks, &neighbors, None, Some(&facings), Some(&branches), Some(&light));
         let _ = sender.send(ChunkMeshData { chunk_pos, set, version });
     }).detach();
 }
@@ -2407,8 +3090,11 @@ pub fn setup_voxel(
     // รวบรวมจาก overlay_side ของทุกบล็อก + sprite กากบาทของ Tall Grass
     let mut side_overlays: Vec<Vec<&'static str>> = Vec::with_capacity(BLOCK_DEFS.len());
     let mut deco_materials: HashMap<&'static str, Handle<StandardMaterial>> = HashMap::new();
+    // sprite ที่วาดเป็นแผ่น alpha cutout ไม่ใช่หน้าคิวบ์ — Tall Grass และใบไม้
+    // (ใบไม้วาดเป็นดาว 3 แกน ดู generate_leaf_mesh_into)
     let mut cutout_sprites: Vec<&'static str> =
         BLOCK_DEFS[BlockType::TallGrass as usize].tex_side.to_vec();
+    cutout_sprites.extend_from_slice(BLOCK_DEFS[BlockType::Leaves as usize].tex_side);
 
     for def in BLOCK_DEFS.iter() {
         let mut overlays = Vec::new();
@@ -2479,53 +3165,80 @@ pub fn setup_voxel(
     commands.insert_resource(VoxelWorld::default());
     commands.insert_resource(ChunkGenerator::default());
 
-    // Sun
-    commands.spawn((
-        Sun,
-        DirectionalLight {
-            illuminance: 10_000.0,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        // ระยะเงาต้องครอบคลุมพื้นที่ที่มองเห็น แต่ยิ่งไกลยิ่งกิน GPU
-        bevy::light::CascadeShadowConfigBuilder {
-            maximum_distance: 300.0,
-            ..default()
-        }
-        .build(),
-        Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.6).normalize(), Vec3::Y),
-    ));
+    // ดวงอาทิตย์ไม่ใช่ DirectionalLight อีกต่อไป — ความสว่างมาจาก sky light ที่อบไว้ใน
+    // vertex color คูณกับ base_color ของ material ที่ update_sun_system เขียนตามเวลา
+    // (แบบ Minecraft) จึงไม่มี shadow map, ไม่มี N·L มาตีกับ lightmap และไม่ต้อง remesh
+    // เวลาพระอาทิตย์เคลื่อน — entity นี้เหลือไว้เป็นที่เก็บสถานะเวลาอย่างเดียว
+    commands.spawn((Sun, Transform::default()));
 }
 
 #[derive(Component)]
 pub struct Sun;
 
-/// หมุนดวงอาทิตย์ตาม time_of_day + ปรับความสว่าง/สีแดด, ambient, สีท้องฟ้า
-pub fn update_sun_system(
-    settings: Res<crate::GameSettings>,
-    mut sun_query: Query<(&mut Transform, &mut DirectionalLight), With<Sun>>,
-    mut ambient_query: Query<&mut AmbientLight>,
-    mut clear_color: ResMut<ClearColor>,
-) {
-    let Ok((mut transform, mut light)) = sun_query.single_mut() else { return };
-
-    // 6:00 ขึ้นขอบฟ้าทิศ +X, 12:00 กลางหัว, 18:00 ตกทิศ -X
-    let hour_angle = (settings.time_of_day - 6.0) / 12.0 * std::f32::consts::PI;
-    // เอียงแนวเหนือ-ใต้เล็กน้อย ให้เงาตอนเที่ยงไม่ตั้งฉากเป๊ะ
-    let sun_dir = Vec3::new(hour_angle.cos(), hour_angle.sin(), 0.3).normalize();
-    *transform = Transform::default().looking_to(-sun_dir, Vec3::Y);
-
-    // ความสูงดวงอาทิตย์เหนือขอบฟ้า 0..1 (ต่ำกว่าขอบฟ้า = กลางคืน)
-    let elevation = sun_dir.y.clamp(0.0, 1.0);
-    light.illuminance = 10_000.0 * elevation.powf(0.7);
-
+/// ความแรงแดดตามเวลา — คูณกับ sky light ที่อบไว้ใน vertex color
+/// แยกออกมาให้ระบบ tint material เรียกใช้ค่าเดียวกันทุกที่
+pub fn sun_tint(time_of_day: f32) -> (f32, Color) {
+    let hour_angle = (time_of_day - 6.0) / 12.0 * std::f32::consts::PI;
+    let elevation = Vec3::new(hour_angle.cos(), hour_angle.sin(), 0.3)
+        .normalize()
+        .y
+        .clamp(0.0, 1.0);
+    // กลางคืนไม่ดำสนิท เหลือแสงจันทร์จางๆ ให้ยังเดินได้
+    let strength = 0.12 + 0.88 * elevation.powf(0.7);
     // แดดอมส้มตอนใกล้ขอบฟ้า ขาวตอนกลางวัน
     let warm = 1.0 - (elevation * 2.0).min(1.0);
-    light.color = Color::srgb(1.0, 1.0 - 0.3 * warm, 1.0 - 0.5 * warm);
+    let color = Color::srgb(
+        strength,
+        strength * (1.0 - 0.25 * warm),
+        strength * (1.0 - 0.45 * warm),
+    );
+    (elevation, color)
+}
 
-    // กลางคืนเหลือ ambient สลัวๆ กลางวันสว่างเต็ม
+/// อัปเดตเวลาของวัน: สีท้องฟ้า, ambient และ "ความแรงแดด" ที่คูณลง material ทุกตัว
+/// ที่กินแสงจากฟ้า — ไม่มี DirectionalLight แล้ว ความสว่างมาจาก vertex light ล้วน
+pub fn update_sun_system(
+    settings: Res<crate::GameSettings>,
+    mut ambient_query: Query<&mut AmbientLight>,
+    mut clear_color: ResMut<ClearColor>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    chunk_mat: Option<Res<ChunkMaterial>>,
+    block_mats: Option<Res<BlockMaterials>>,
+    deco_mats: Option<Res<DecoMaterials>>,
+    glass_mat: Option<Res<GlassMaterial>>,
+    water_mat: Option<Res<WaterMaterial>>,
+    lod: Option<Res<crate::lod::LodTiles>>,
+    mut last_tint: Local<Option<Color>>,
+) {
+    let (elevation, tint) = sun_tint(settings.time_of_day);
+
+    // ambient เหลือแค่พื้นบางๆ — ถ้าสูงเท่าเดิม (80-400) ถ้ำจะไม่มืดเพราะ vertex light
+    // ถูกกลบหมด
     for mut ambient in ambient_query.iter_mut() {
-        ambient.brightness = 80.0 + 320.0 * elevation;
+        ambient.brightness = 8.0 + 40.0 * elevation;
+    }
+
+    // เขียน material เฉพาะตอนสีเปลี่ยนจริง — การแตะ asset ทุกเฟรมทำให้ bevy re-extract
+    // material ทุกตัวใหม่ทุกเฟรมโดยเปล่าประโยชน์ (เวลาในเกมเดินช้ากว่าเฟรมเรตมาก)
+    if last_tint.map(|c| c.to_linear()) == Some(tint.to_linear()) {
+        return;
+    }
+    *last_tint = Some(tint);
+
+    // material ที่รับแสงจากฟ้า — คูณ tint เข้า base_color
+    // (LampMaterials ไม่อยู่ในลิสต์: emissive ต้องสว่างเท่าเดิมตอนกลางคืน)
+    let mut handles: Vec<&Handle<StandardMaterial>> = Vec::new();
+    if let Some(m) = chunk_mat.as_ref() { handles.push(&m.0); }
+    if let Some(m) = glass_mat.as_ref() { handles.push(&m.0); }
+    if let Some(m) = water_mat.as_ref() { handles.push(&m.0); }
+    if let Some(m) = block_mats.as_ref() { handles.extend(m.0.values()); }
+    if let Some(m) = deco_mats.as_ref() { handles.extend(m.0.values()); }
+    // ภูเขาระยะไกล (LOD) ต้องมืดตามด้วย ไม่งั้นกลางคืนขอบฟ้าสว่างค้างเป็นแถบ
+    if let Some(l) = lod.as_ref() { handles.push(&l.material); }
+    for handle in handles {
+        if let Some(mut mat) = materials.get_mut(handle) {
+            mat.base_color = tint;
+        }
     }
 
     // สีท้องฟ้า: กลางคืนน้ำเงินเข้ม -> กลางวันฟ้าสด
@@ -2621,12 +3334,17 @@ pub fn unload_world_on_exit(
     dropped: Query<Entity, With<crate::item::DroppedItem>>,
 ) {
     // การขุด/วางเซฟทันทีอยู่แล้ว — ที่เหลือคือผลจาก fluid sim/ระเบิดที่ยังไหลอยู่
-    let mut saved = 0;
-    for (pos, chunk) in world.chunks.iter_mut() {
-        if chunk.dirty {
-            save_chunk_full(*pos, chunk);
+    // (เก็บ record กิ่งไว้ก่อน เพราะลูปข้างล่างยืม world.chunks แบบ mut อยู่)
+    let dirty: Vec<IVec2> = world.chunks.iter().filter(|(_, c)| c.dirty).map(|(p, _)| *p).collect();
+    let dirty_trees: Vec<Vec<crate::tree::BranchRecord>> = dirty
+        .iter()
+        .map(|p| world.branch_network.chunk_records(*p, CHUNK_WIDTH as i32))
+        .collect();
+    let saved = dirty.len();
+    for (pos, records) in dirty.iter().zip(dirty_trees.iter()) {
+        if let Some(chunk) = world.chunks.get_mut(pos) {
+            save_chunk_full(*pos, chunk, records);
             chunk.dirty = false;
-            saved += 1;
         }
     }
     if saved > 0 {
@@ -2646,7 +3364,167 @@ pub fn unload_world_on_exit(
     regenerate.0 = false;
 }
 
+/// อ่านบล็อกด้วยพิกัด local ของ chunk ที่ทะลุขอบไปหาเพื่อนบ้านได้
+/// — ลำดับ `neighbors` ต้องตรงกับ `chunk_neighbors()` และ `create_mesh_from_blocks`
+fn neighbour_sample(
+    blocks: &ChunkBlocks,
+    neighbors: &[Arc<ChunkBlocks>; 8],
+    x: i32,
+    y: i32,
+    z: i32,
+) -> BlockType {
+    if y < 0 || y >= CHUNK_HEIGHT as i32 {
+        return BlockType::Air;
+    }
+    let w = CHUNK_WIDTH as i32;
+    let lx = x.rem_euclid(w) as usize;
+    let lz = z.rem_euclid(w) as usize;
+    let src: &ChunkBlocks = match (x.div_euclid(w), z.div_euclid(w)) {
+        (0, 0) => blocks,
+        (1, 0) => &neighbors[0],
+        (-1, 0) => &neighbors[1],
+        (0, 1) => &neighbors[2],
+        (0, -1) => &neighbors[3],
+        (1, 1) => &neighbors[4],
+        (1, -1) => &neighbors[5],
+        (-1, 1) => &neighbors[6],
+        _ => &neighbors[7],
+    };
+    src.get(lx, y as usize, lz)
+}
+
+/// คำนวณ sky light ของ chunk ใหม่ถ้ายัง dirty
+///
+/// คืน true **เฉพาะตอนค่าเปลี่ยนจริง** ไม่ใช่แค่ "คำนวณแล้ว" — chunk ที่ unload แล้ว
+/// load กลับมาด้วยบล็อกชุดเดิมได้แสงเท่าเดิม ถ้าสั่ง remesh ทุกครั้งที่คำนวณ ภาพจะ
+/// กระพริบรัวเพราะ mesh entity ถูก despawn/spawn ใหม่ทุกเฟรม
+pub fn ensure_chunk_light(world: &mut VoxelWorld, chunk_pos: IVec2) -> bool {
+    if !world.chunks.get(&chunk_pos).is_some_and(|c| c.light_dirty) {
+        return false;
+    }
+    let blocks = world.chunks[&chunk_pos].blocks.clone();
+    // เพื่อนบ้านที่ยังไม่โหลดถือเป็นฟ้าโล่ง — ห้ามบังคับให้ต้องครบ 8 ตัวก่อน ไม่งั้น
+    // chunk ริมขอบ render distance จะคำนวณแสงไม่ได้เลย แล้วก็ mesh ไม่ได้ตามไปด้วย
+    // (ค่าตรงขอบจะเพี้ยนนิดหน่อยจนกว่าเพื่อนบ้านจะมาถึง — ตอนนั้นถูกตีธง dirty ให้คิดใหม่)
+    let empty: Arc<ChunkBlocks> = Arc::new(ChunkBlocks::new_uniform(BlockType::Air));
+    let mut missing: u8 = 0;
+    let neighbors: [Arc<ChunkBlocks>; 8] = {
+        let positions = chunk_neighbors(chunk_pos);
+        std::array::from_fn(|i| match world.chunks.get(&positions[i]) {
+            Some(c) => c.blocks.clone(),
+            None => {
+                missing |= 1 << i;
+                empty.clone()
+            }
+        })
+    };
+
+    // ไล่สแกนแค่ถึงยอดที่มีของจริงของทั้ง 9 chunk — ไม่งั้นต้องไล่ 3072 ชั้นต่อคอลัมน์
+    let mut scan_top = blocks.y_bounds_non_air().map_or(0, |(_, hi)| hi);
+    for n in &neighbors {
+        scan_top = scan_top.max(n.y_bounds_non_air().map_or(0, |(_, hi)| hi));
+    }
+
+    let sampler = |x: i32, y: i32, z: i32| neighbour_sample(&blocks, &neighbors, x, y, z);
+    let light = crate::light::compute_sky_light(&sampler, scan_top);
+
+    let mut changed = false;
+    if let Some(chunk) = world.chunks.get_mut(&chunk_pos) {
+        changed = *chunk.light != light;
+        if changed {
+            chunk.light = Arc::new(light);
+        }
+        chunk.light_dirty = false;
+        chunk.light_missing_neighbors = missing;
+    }
+    changed
+}
+
+/// lightmap ของ chunk + เพื่อนบ้าน 8 ทิศ สำหรับ mesher (ต้องอ่านข้ามขอบเพื่อให้แสง
+/// ต่อเนื่องไม่เห็นตะเข็บระหว่าง chunk) — Arc ทั้งชุด clone แล้วส่งเข้า async task ได้ฟรี
+#[derive(Clone)]
+pub struct LightNeighborhood {
+    pub own: Arc<crate::light::ChunkLight>,
+    pub neighbors: [Arc<crate::light::ChunkLight>; 8],
+}
+
+impl LightNeighborhood {
+    /// ระดับแสงที่พิกัด local (ทะลุขอบไปหาเพื่อนบ้านได้) — ลำดับเดียวกับ neighbour_sample
+    pub fn get(&self, x: i32, y: i32, z: i32) -> u8 {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 {
+            return crate::light::MAX_LIGHT;
+        }
+        let w = CHUNK_WIDTH as i32;
+        let lx = x.rem_euclid(w) as usize;
+        let lz = z.rem_euclid(w) as usize;
+        let src = match (x.div_euclid(w), z.div_euclid(w)) {
+            (0, 0) => &self.own,
+            (1, 0) => &self.neighbors[0],
+            (-1, 0) => &self.neighbors[1],
+            (0, 1) => &self.neighbors[2],
+            (0, -1) => &self.neighbors[3],
+            (1, 1) => &self.neighbors[4],
+            (1, -1) => &self.neighbors[5],
+            (-1, 1) => &self.neighbors[6],
+            _ => &self.neighbors[7],
+        };
+        src.get(lx, y as usize, lz)
+    }
+}
+
+/// ประกอบ LightNeighborhood ของ chunk
+///
+/// คืน None ถ้าเพื่อนบ้านตัวใดยังโหลดไม่ครบ **หรือแสงยังไม่ได้คำนวณ** — ข้อหลังสำคัญ:
+/// mesher อ่านแสงข้ามขอบเพื่อทำ smooth lighting ถ้าเพื่อนบ้านยังเป็นค่าเริ่มต้น (0 ทั้งก้อน)
+/// ขอบ chunk จะกลายเป็นแถบมืดคาไว้ถาวรเพราะไม่มีอะไรมาสั่ง remesh ให้อีก
+pub fn light_neighborhood(world: &VoxelWorld, chunk_pos: IVec2) -> Option<LightNeighborhood> {
+    let own_chunk = world.chunks.get(&chunk_pos)?;
+    if own_chunk.light_dirty {
+        return None;
+    }
+    let own = own_chunk.light.clone();
+    let positions = chunk_neighbors(chunk_pos);
+    if !positions.iter().all(|p| world.chunks.get(p).is_some_and(|c| !c.light_dirty)) {
+        return None;
+    }
+    Some(LightNeighborhood {
+        own,
+        neighbors: positions.map(|p| world.chunks[&p].light.clone()),
+    })
+}
+
+/// จำนวน chunk ที่ยอมคำนวณแสงใหม่ต่อเฟรม — ต้องสูงพอจะไล่ทันตอนโหลดโลกครั้งแรก
+/// (chunk ใหม่แต่ละก้อนตีธง dirty ใส่เพื่อนบ้านอีก 8 ตัว ถ้าไล่ไม่ทันจะไม่มี chunk ไหน
+/// ผ่านเงื่อนไข mesh ได้เลย — เคยตั้งไว้ 2 แล้วเจอจอฟ้าเห็น mesh แค่ chunk เดียว)
+const RELIGHT_BUDGET: usize = 32;
+
+/// คำนวณ sky light ใหม่ให้ chunk ที่ dirty แล้วสั่ง remesh ตัวที่มี mesh อยู่แล้ว
+/// (chunk ที่ยังไม่เคยมี mesh ไม่ต้องสั่ง — ระบบ generate จะ mesh ให้เองเมื่อแสงพร้อม)
+pub fn relight_system(mut world: ResMut<VoxelWorld>) {
+    let dirty: Vec<IVec2> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.light_dirty)
+        .map(|(p, _)| *p)
+        .take(RELIGHT_BUDGET)
+        .collect();
+
+    for pos in dirty {
+        if !ensure_chunk_light(&mut world, pos) {
+            continue;
+        }
+        if world.generated_chunks.contains_key(&pos) {
+            world.pending_branch_remesh.insert(pos);
+        }
+    }
+}
+
 /// เพื่อนบ้าน 8 ทิศ ตามลำดับที่ create_mesh_from_blocks ต้องการ
+/// ดัชนีของทิศตรงข้ามใน `chunk_neighbors` — ถ้า N เป็นเพื่อนบ้านตัวที่ i ของเรา
+/// เราก็เป็นเพื่อนบ้านตัวที่ `OPPOSITE_NEIGHBOR[i]` ของ N
+/// (แกนตรงจับคู่ 0↔1, 2↔3 แต่ทแยงคือ 4↔7 และ 5↔6 — ไม่ใช่ i^1 อย่างที่ดูเผินๆ)
+const OPPOSITE_NEIGHBOR: [usize; 8] = [1, 0, 3, 2, 7, 6, 5, 4];
+
 fn chunk_neighbors(chunk_pos: IVec2) -> [IVec2; 8] {
     let (cx, cz) = (chunk_pos.x, chunk_pos.y);
     [
@@ -2748,6 +3626,7 @@ pub fn world_generation_system(
                     facings: received.facings.clone(),
                     chest_slots: received.chest_slots.clone(),
                     furnace_slots: received.furnace_slots.clone(),
+                    branches: received.branches.clone(),
                     version: generator.version,
                 });
             } else {
@@ -2769,15 +3648,28 @@ pub fn world_generation_system(
             let neighbors_pos = chunk_neighbors(chunk_pos);
             let all_neighbors_ready = neighbors_pos.iter().all(|p| world.chunks.contains_key(p));
 
-            if all_neighbors_ready {
+            // แสงต้อง **final** ก่อน mesh ครั้งแรก — ไม่ใช่แค่คำนวณเสร็จ แต่ต้องคำนวณ
+            // ตอนเพื่อนบ้านโหลดครบแล้ว (light_missing_neighbors == 0) ด้วย ไม่งั้น chunk
+            // จะถูก mesh ด้วยแสงขอบเพี้ยน แล้วพอเพื่อนบ้านทยอยมา relight จะสั่ง remesh
+            // ซ้ำทุกรอบ = solid mesh ถูก re-upload รัวๆ = ภาพกระพริบตอน stream
+            // (chunk ริมขอบ render distance ไม่ผ่าน all_neighbors_ready อยู่แล้ว จึงไม่
+            //  ค้างเป็นจอฟ้าเพราะเงื่อนไขนี้)
+            let light_ready = world
+                .chunks
+                .get(&chunk_pos)
+                .is_some_and(|c| !c.light_dirty && c.light_missing_neighbors == 0);
+
+            if all_neighbors_ready && light_ready {
+                let Some(light) = light_neighborhood(&world, chunk_pos) else { continue };
                 generator.generating_meshes.insert(chunk_pos, true);
 
                 let blocks = world.chunks.get(&chunk_pos).unwrap().blocks.clone();
                 let neighbors = neighbors_pos.map(|p| world.chunks.get(&p).unwrap().blocks.clone());
                 let facings = world.chunks.get(&chunk_pos).unwrap().facings.clone();
+                let branches = world.branch_network.snapshot_for_chunk(chunk_pos, CHUNK_WIDTH as i32);
 
                 let sender = generator.sender_meshes.lock().unwrap().clone();
-                spawn_mesh_generation_task(chunk_pos, blocks, neighbors, facings, generator.version, sender);
+                spawn_mesh_generation_task(chunk_pos, blocks, neighbors, facings, branches, light, generator.version, sender);
                 mesh_budget -= 1;
             }
         }
@@ -2785,38 +3677,84 @@ pub fn world_generation_system(
 }
 
 /// สลับชุด mesh เรืองแสงของ chunk (entity เก่าทิ้ง สร้างใหม่ตาม buffer ที่ได้มา)
+/// สลับชุด mesh หลาย entity ต่อ chunk (deco/textured/glow) โดย **reuse entity เดิม
+/// แล้วเขียนทับ mesh asset ในที่เดิม** แทนการ despawn+respawn
+///
+/// นี่คือหัวใจของการแก้ภาพกระพริบ: despawn+spawn ในเฟรมเดียวทำให้ entity ใหม่มี mesh
+/// handle ที่ GPU ยังไม่ prepare ระหว่างที่ entity เก่าหายไปแล้ว = 1 เฟรมว่าง พอ relight
+/// สั่ง remesh ซ้ำตอน chunk ข้างๆ โหลด ต้นไม้/ใบเลยวาบหาย (พื้นดินไม่เป็นเพราะสลับ
+/// asset ในที่เดิมอยู่แล้ว) — reuse handle เดิม GPU มีข้อมูลเก่าให้วาดต่อระหว่างรอ upload
+fn update_multi_mesh_entities(
+    commands: &mut Commands,
+    slots: &mut HashMap<IVec2, Vec<Entity>>,
+    meshes: &mut Assets<Mesh>,
+    mesh_query: &Query<&Mesh3d>,
+    chunk_pos: IVec2,
+    items: Vec<(Handle<StandardMaterial>, MeshBuf)>,
+    transform: Transform,
+    no_shadow: bool,
+) {
+    let old = slots.remove(&chunk_pos).unwrap_or_default();
+    let mut old_iter = old.into_iter();
+    let mut entities = Vec::new();
+
+    for (material, buf) in items {
+        if buf.is_empty() {
+            continue;
+        }
+        let mesh = buf.into_mesh();
+        if let Some(entity) = old_iter.next() {
+            // reuse: เขียนทับ asset ผ่าน handle เดิมถ้ายังมี ไม่งั้นใส่ handle ใหม่
+            if let Ok(mesh3d) = mesh_query.get(entity) {
+                let _ = meshes.insert(mesh3d.0.id(), mesh);
+                commands.entity(entity)
+                    .insert(MeshMaterial3d(material))
+                    .remove::<Aabb>();
+            } else {
+                commands.entity(entity)
+                    .insert((Mesh3d(meshes.add(mesh)), MeshMaterial3d(material)))
+                    .remove::<Aabb>();
+            }
+            entities.push(entity);
+        } else {
+            let mut ec = commands.spawn((
+                Mesh3d(meshes.add(mesh)),
+                MeshMaterial3d(material),
+                transform,
+                Block,
+            ));
+            if no_shadow {
+                ec.insert(NotShadowCaster);
+            }
+            entities.push(ec.id());
+        }
+    }
+    // entity เก่าที่เหลือเกิน (หน้าลดลง) — despawn ทิ้ง ไม่ทำให้กระพริบเพราะเป็นการหายจริง
+    for entity in old_iter {
+        commands.entity(entity).despawn();
+    }
+    if !entities.is_empty() {
+        slots.insert(chunk_pos, entities);
+    }
+}
+
 fn update_glow_entities(
     commands: &mut Commands,
     world: &mut VoxelWorld,
     meshes: &mut Assets<Mesh>,
+    mesh_query: &Query<&Mesh3d>,
     lamp_materials: &LampMaterials,
     chunk_pos: IVec2,
     glow: Vec<(BlockType, MeshBuf)>,
     transform: Transform,
 ) {
-    if let Some(old) = world.glow_chunks.remove(&chunk_pos) {
-        for entity in old {
-            commands.entity(entity).despawn();
-        }
-    }
-
-    let mut entities = Vec::new();
-    for (block, buf) in glow {
-        if buf.is_empty() {
-            continue;
-        }
-        let Some(material) = lamp_materials.0.get(&block) else { continue };
-        let entity = commands.spawn((
-            Mesh3d(meshes.add(buf.into_mesh())),
-            MeshMaterial3d(material.clone()),
-            transform,
-            Block,
-        )).id();
-        entities.push(entity);
-    }
-    if !entities.is_empty() {
-        world.glow_chunks.insert(chunk_pos, entities);
-    }
+    let items: Vec<(Handle<StandardMaterial>, MeshBuf)> = glow
+        .into_iter()
+        .filter_map(|(block, buf)| lamp_materials.0.get(&block).map(|m| (m.clone(), buf)))
+        .collect();
+    update_multi_mesh_entities(
+        commands, &mut world.glow_chunks, meshes, mesh_query, chunk_pos, items, transform, false,
+    );
 }
 
 /// สลับชุด mesh แบบ deco ของ chunk (entity เก่าทิ้ง สร้างใหม่)
@@ -2825,69 +3763,40 @@ fn update_deco_entities(
     world: &mut VoxelWorld,
     meshes: &mut Assets<Mesh>,
     deco_materials: &DecoMaterials,
+    mesh_query: &Query<&Mesh3d>,
     chunk_pos: IVec2,
     deco: Vec<(&'static str, MeshBuf)>,
     transform: Transform,
 ) {
-    if let Some(old) = world.deco_chunks.remove(&chunk_pos) {
-        for entity in old {
-            commands.entity(entity).despawn();
-        }
-    }
-
-    let mut entities = Vec::new();
-    for (tex, buf) in deco {
-        if buf.is_empty() {
-            continue;
-        }
-        let Some(material) = deco_materials.0.get(tex) else { continue };
-        let entity = commands.spawn((
-            Mesh3d(meshes.add(buf.into_mesh())),
-            MeshMaterial3d(material.clone()),
-            transform,
-            NotShadowCaster,
-            Block,
-        )).id();
-        entities.push(entity);
-    }
-    if !entities.is_empty() {
-        world.deco_chunks.insert(chunk_pos, entities);
-    }
+    // ของประดับ (ใบไม้/หญ้าสูง) ไม่ทอดเงา — เคยลองให้ใบทอดเงาแล้วพัง (shadow map resolve
+    // รูโปร่งความถี่สูงไม่ไหว เป็นก้อนด่าง + เฟรมตก) จึงเลิก ใช้ sky lightmap แทน
+    let items: Vec<(Handle<StandardMaterial>, MeshBuf)> = deco
+        .into_iter()
+        .filter_map(|(tex, buf)| deco_materials.0.get(tex).map(|m| (m.clone(), buf)))
+        .collect();
+    update_multi_mesh_entities(
+        commands, &mut world.deco_chunks, meshes, mesh_query, chunk_pos, items, transform, true,
+    );
 }
 
-/// สลับชุด mesh แบบมี texture ของ chunk (entity เก่าทิ้ง สร้างใหม่)
+/// สลับชุด mesh แบบมี texture ของ chunk (reuse entity เดิม ดู update_multi_mesh_entities)
 fn update_textured_entities(
     commands: &mut Commands,
     world: &mut VoxelWorld,
     meshes: &mut Assets<Mesh>,
     block_materials: &BlockMaterials,
+    mesh_query: &Query<&Mesh3d>,
     chunk_pos: IVec2,
     textured: Vec<(&'static str, MeshBuf)>,
     transform: Transform,
 ) {
-    if let Some(old) = world.textured_chunks.remove(&chunk_pos) {
-        for entity in old {
-            commands.entity(entity).despawn();
-        }
-    }
-
-    let mut entities = Vec::new();
-    for (tex, buf) in textured {
-        if buf.is_empty() {
-            continue;
-        }
-        let Some(material) = block_materials.0.get(tex) else { continue };
-        let entity = commands.spawn((
-            Mesh3d(meshes.add(buf.into_mesh())),
-            MeshMaterial3d(material.clone()),
-            transform,
-            Block,
-        )).id();
-        entities.push(entity);
-    }
-    if !entities.is_empty() {
-        world.textured_chunks.insert(chunk_pos, entities);
-    }
+    let items: Vec<(Handle<StandardMaterial>, MeshBuf)> = textured
+        .into_iter()
+        .filter_map(|(tex, buf)| block_materials.0.get(tex).map(|m| (m.clone(), buf)))
+        .collect();
+    update_multi_mesh_entities(
+        commands, &mut world.textured_chunks, meshes, mesh_query, chunk_pos, items, transform, false,
+    );
 }
 
 /// อัปเดต mesh entity เดี่ยวของ chunk (น้ำ/กระจก/ของประดับ):
@@ -3066,6 +3975,7 @@ pub fn process_generated_chunks_system(
     deco_material: Res<DecoMaterials>,
     lamp_materials: Res<LampMaterials>,
     block_materials: Res<BlockMaterials>,
+    mesh_query: Query<&Mesh3d>,
     mut client_sync: Option<ResMut<crate::network::ClientSync>>,
     mut active_fluids: ResMut<ActiveFluids>,
     mut active_tnt: ResMut<ActiveTnt>,
@@ -3105,6 +4015,10 @@ pub fn process_generated_chunks_system(
             );
         }
 
+        // โครงกิ่งเข้า network ก่อน mesh task จะถูก spawn (คนละระบบ รันทีหลัง)
+        // ไม่งั้นกิ่งจะถูกวาดด้วยค่า fallback แล้วเด้งรูปทรงตอน remesh ครั้งแรก
+        world.branch_network.merge_records(&block_data.branches);
+
         let (water_y_min, water_y_max) = scan_water_bounds(&block_data.blocks);
         world.chunks.insert(chunk_pos, ChunkData {
             blocks: block_data.blocks,
@@ -3119,8 +4033,23 @@ pub fn process_generated_chunks_system(
             num_water_vertices: 0,
             num_water_indices: 0,
             dirty: false,
+            light: Default::default(),
+            light_dirty: true,
+            light_missing_neighbors: 0,
         });
         generator.generating_blocks.remove(&chunk_pos);
+
+        // chunk ใหม่โผล่มา = แสงที่ขอบของเพื่อนบ้านอาจเปลี่ยน — แต่ปลุก**เฉพาะตัวที่
+        // คำนวณแสงไปตอนที่ยังไม่เห็น chunk นี้**เท่านั้น ตัวที่คำนวณหลังจากนี้เห็นของจริง
+        // อยู่แล้วไม่ต้องคิดใหม่ (เดิมปลุกทั้ง 8 ทุกครั้ง → remesh ลาม 9 chunk ต่อครั้ง)
+        for (i, n) in chunk_neighbors(chunk_pos).into_iter().enumerate() {
+            let opposite_bit = 1u8 << OPPOSITE_NEIGHBOR[i];
+            if let Some(c) = world.chunks.get_mut(&n) {
+                if c.light_missing_neighbors & opposite_bit != 0 {
+                    c.light_dirty = true;
+                }
+            }
+        }
 
         // network client: edit ที่มาถึงก่อน chunk โหลด — apply ก่อน mesh ถูกสร้าง
         if let Some(cs) = client_sync.as_mut() {
@@ -3210,10 +4139,10 @@ pub fn process_generated_chunks_system(
             world.glass_chunks.insert(chunk_pos, glass_entity);
         }
 
-        update_deco_entities(&mut commands, &mut world, &mut meshes, &deco_material, chunk_pos, deco, transform);
+        update_deco_entities(&mut commands, &mut world, &mut meshes, &deco_material, &mesh_query, chunk_pos, deco, transform);
 
-        update_glow_entities(&mut commands, &mut world, &mut meshes, &lamp_materials, chunk_pos, glow, transform);
-        update_textured_entities(&mut commands, &mut world, &mut meshes, &block_materials, chunk_pos, textured, transform);
+        update_glow_entities(&mut commands, &mut world, &mut meshes, &mesh_query, &lamp_materials, chunk_pos, glow, transform);
+        update_textured_entities(&mut commands, &mut world, &mut meshes, &block_materials, &mesh_query, chunk_pos, textured, transform);
         refresh_chunk_lamp_lights(&mut commands, &mut world, chunk_pos);
         refresh_chunk_campfire_models(&mut commands, &mut world, chunk_pos, &campfire_assets);
 
@@ -3293,6 +4222,11 @@ pub fn chunk_unloading_system(
                 commands.entity(entity).despawn();
             }
         }
+        // โครงกิ่งของ chunk นี้อยู่ในไฟล์แล้ว — ทิ้งออกจาก memory ไม่งั้น network
+        // จะโตตามระยะที่ผู้เล่นเดินสำรวจไปเรื่อยๆ (เก็บสำเนาไว้ก่อนเผื่อ client cache)
+        let branch_records = world.branch_network.chunk_records(pos, CHUNK_WIDTH as i32);
+        world.branch_network.evict_chunk(pos, CHUNK_WIDTH as i32);
+
         if let Some(chunk_data) = world.chunks.remove(&pos) {
             world.total_vertices -= chunk_data.num_vertices;
             world.total_indices -= chunk_data.num_indices;
@@ -3307,6 +4241,7 @@ pub fn chunk_unloading_system(
                         facings: chunk_data.facings.clone(),
                         chest_slots: chunk_data.chest_slots.clone(),
                         furnace_slots: chunk_data.furnace_slots.clone(),
+                        branches: branch_records,
                     });
                 }
             }
@@ -3530,7 +4465,7 @@ pub struct OpenContainerState {
 pub struct OpenContainer(pub Option<OpenContainerState>);
 
 /// ไอเทมทั้งหมดที่เลือกวางได้ (รายการในหน้าต่างกด E)
-pub const PLACEABLE_ITEMS: [crate::item::Item; 26] = [
+pub const PLACEABLE_ITEMS: [crate::item::Item; 27] = [
     crate::item::Item::Tool(crate::item::ToolType::Chisel),
     crate::item::Item::Tool(crate::item::ToolType::CopperWire),
     crate::item::Item::Tool(crate::item::ToolType::Pickaxe),
@@ -3546,7 +4481,7 @@ pub const PLACEABLE_ITEMS: [crate::item::Item; 26] = [
     crate::item::Item::Block(BlockType::IronBlock), crate::item::Item::Block(BlockType::Nuke),
     crate::item::Item::Block(BlockType::SwitchOff), crate::item::Item::Block(BlockType::SmartLamp),
     crate::item::Item::Block(BlockType::Furnace), crate::item::Item::Block(BlockType::Chest),
-    crate::item::Item::Block(BlockType::Campfire),
+    crate::item::Item::Block(BlockType::Campfire), crate::item::Item::Block(BlockType::Branch),
 ];
 
 /// texture ที่ใช้เป็น icon บนช่อง hotbar — เอาหน้าข้างก่อน (grass เห็นเป็น
@@ -4105,6 +5040,70 @@ pub struct MeshingParams<'w, 's> {
     pub block_materials: Res<'w, BlockMaterials>,
 }
 
+/// ระยะที่ใบยังเกาะกิ่งอยู่ได้ (Chebyshev) — กว้างกว่ารัศมีพุ่มที่ scatter_leaves โปรย
+/// ไว้เล็กน้อย ใบที่อยู่ในระยะนี้จากกิ่งใดก็ตามถือว่ายังมีที่ยึด
+const LEAF_SUPPORT_RANGE: i32 = 3;
+
+/// กิ่งที่ `p` หายไป — จ่อใบรอบๆ ไว้ให้ไปเช็คว่ายังมีกิ่งอื่นค้ำอยู่ไหม
+pub fn queue_leaf_decay_around(world: &mut VoxelWorld, p: IVec3) {
+    for d in crate::tree::NEIGHBOUR_DIRS {
+        let n = p + d;
+        if world.get_block(n.x, n.y, n.z) == BlockType::Leaves {
+            world.pending_leaf_decay.insert(n);
+        }
+    }
+}
+
+/// ยังมีบล็อกกิ่งอยู่ในระยะเกาะของใบที่ `p` ไหม
+fn leaf_has_support(world: &VoxelWorld, p: IVec3) -> bool {
+    let r = LEAF_SUPPORT_RANGE;
+    for dy in -r..=r {
+        for dz in -r..=r {
+            for dx in -r..=r {
+                let q = p + IVec3::new(dx, dy, dz);
+                if world.get_block(q.x, q.y, q.z) == BlockType::Branch {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// ผูก node ให้กิ่งที่เพิ่งเกิดที่ `p` — เลือก parent เป็นเพื่อนบ้านที่ thickness มากสุด
+/// (ไล่ตามลำดับทิศคงที่เพื่อ tie-break ให้ host กับ client ได้ผลเดียวกันเสมอ)
+pub fn attach_branch_node(world: &mut VoxelWorld, p: IVec3) {
+    // node ค้างจาก desync/เซฟเก่า — ถอดทิ้งก่อน ไม่งั้นกิ่งใหม่จะสืบ parent/children ของเดิม
+    if world.branch_network.nodes.contains_key(&p) {
+        let orphans = world.branch_network.detach(p);
+        world.pending_branch_orphans.extend(orphans);
+    }
+
+    let below = world.get_block(p.x, p.y - 1, p.z);
+    if below == BlockType::Dirt || below == BlockType::Grass {
+        world.branch_network.add_root(p, crate::tree::TRUNK_THICKNESS);
+        return;
+    }
+
+    let mut parent: Option<(IVec3, u8)> = None;
+    for dir in crate::tree::NEIGHBOUR_DIRS {
+        let adj = p + dir;
+        if world.get_block(adj.x, adj.y, adj.z) != BlockType::Branch {
+            continue;
+        }
+        let Some(t) = world.branch_network.thickness_at(adj) else { continue };
+        if parent.is_none_or(|(_, best)| t > best) {
+            parent = Some((adj, t));
+        }
+    }
+
+    match parent {
+        Some((parent_pos, _)) => world.branch_network.add_branch(p, parent_pos),
+        // ลอยเดี่ยวไม่ติดอะไรเลย — เป็น root ผอม ไม่ใช่ลำต้นอ้วนเหมือนเดิม
+        None => world.branch_network.add_root(p, crate::tree::LOOSE_THICKNESS),
+    }
+}
+
 /// จุด apply การแก้บล็อกจุดเดียว ใช้ทั้ง input ในเครื่องและ edit ที่มาจาก network
 /// คืนตำแหน่งที่แก้สำเร็จ (None = chunk ยังไม่โหลด / นอกขอบเขต / ไม่มีอะไรให้แก้)
 pub fn apply_block_edit(world: &mut VoxelWorld, edit: &crate::network::BlockEdit) -> Option<IVec3> {
@@ -4113,11 +5112,37 @@ pub fn apply_block_edit(world: &mut VoxelWorld, edit: &crate::network::BlockEdit
         BlockEdit::SetBlock { pos, block } => {
             let [x, y, z] = *pos;
             let new_block = BlockType::from_u8(*block);
+            let old_block = world.get_block(x, y, z);
             // เขียนทับ Furnace/Chest ด้วยบล็อกอื่น (รวมทุบเป็น Air) — กัน facing/container ค้างใน map
-            if new_block != world.get_block(x, y, z) {
+            if new_block != old_block {
                 world.clear_container_and_facing(x, y, z);
             }
-            world.set_block(x, y, z, new_block).then(|| IVec3::new(x, y, z))
+            if world.set_block(x, y, z, new_block) {
+                let p = IVec3::new(x, y, z);
+                // บล็อกเปลี่ยน = แสงรอบๆ เปลี่ยน (เปิดช่องให้แดดลง/ปิดกั้นแสง)
+                // — chunk ตัวเองบวกเพื่อนบ้านฝั่งที่ติดขอบ
+                for cp in edit_affected_chunks(p) {
+                    if let Some(c) = world.chunks.get_mut(&cp) {
+                        c.light_dirty = true;
+                    }
+                }
+                // node ของกิ่งเกิด/ตายที่นี่ที่เดียว — path นี้รันทั้ง host และ client
+                // จาก edit ก้อนเดียวกัน สถานะ network สองฝั่งจึงตรงกันเสมอ
+                // (set_block คืน true แค่บอกว่า chunk โหลดอยู่ ไม่ได้แปลว่าบล็อกเปลี่ยน —
+                //  ต้องเทียบ old/new เอง ไม่งั้น edit ซ้ำจะ re-parent กิ่งเดิมแล้วกิ่งลูกร่วงฟรี)
+                if new_block != old_block {
+                    if new_block == BlockType::Branch {
+                        attach_branch_node(world, p);
+                    } else if old_block == BlockType::Branch {
+                        let orphans = world.branch_network.detach(p);
+                        world.pending_branch_orphans.extend(orphans);
+                        queue_leaf_decay_around(world, p);
+                    }
+                }
+                Some(p)
+            } else {
+                None
+            }
         }
         BlockEdit::PlaceFacingBlock { pos, block, facing } => {
             let [x, y, z] = *pos;
@@ -4209,6 +5234,14 @@ pub fn remesh_chunks(
             continue;
         }
         let neighbors = neighbors_pos.map(|p| world.chunks.get(&p).unwrap().blocks.clone());
+        // แสงต้องสดก่อน mesh — ทางนี้เป็น path แบบ sync (ตอนแก้บล็อก) จึงคำนวณตรงนี้เลย
+        // ไม่ต้องรอ relight_system รอบหน้า ไม่งั้นบล็อกที่เพิ่งทุบจะสว่างช้าไปหนึ่งเฟรม
+        // — ต้องคลุมเพื่อนบ้านด้วย เพราะ smooth lighting อ่านแสงข้ามขอบ
+        ensure_chunk_light(world, chunk_pos);
+        for n in neighbors_pos {
+            ensure_chunk_light(world, n);
+        }
+        let light = light_neighborhood(world, chunk_pos);
 
         let transform = Transform::from_xyz(
             (chunk_pos.x * CHUNK_WIDTH as i32) as f32,
@@ -4224,7 +5257,7 @@ pub fn remesh_chunks(
             old_vertices = chunk_data.num_vertices;
             old_indices = chunk_data.num_indices;
 
-            let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors, Some(&chunk_data.chiseled_blocks), Some(&chunk_data.facings));
+            let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors, Some(&chunk_data.chiseled_blocks), Some(&chunk_data.facings), Some(&world.branch_network), light.as_ref());
             chunk_data.num_vertices = s.total_vertices();
             chunk_data.num_indices = s.total_indices();
             chunk_data.num_water_vertices = s.water.positions.len();
@@ -4258,9 +5291,9 @@ pub fn remesh_chunks(
         // น้ำ/กระจก/ของประดับ: สร้าง/เขียนทับ/ลบ ตามว่าเหลือหน้าไหม
         update_single_mesh_entity(commands, &mut world.water_chunks, &mut mp.meshes, &mp.mesh_query, &mp.water_material.0, chunk_pos, water, transform);
         update_single_mesh_entity(commands, &mut world.glass_chunks, &mut mp.meshes, &mp.mesh_query, &mp.glass_material.0, chunk_pos, glass, transform);
-        update_deco_entities(commands, world, &mut mp.meshes, &mp.deco_material, chunk_pos, deco, transform);
-        update_glow_entities(commands, world, &mut mp.meshes, &mp.lamp_materials, chunk_pos, glow, transform);
-        update_textured_entities(commands, world, &mut mp.meshes, &mp.block_materials, chunk_pos, textured, transform);
+        update_deco_entities(commands, world, &mut mp.meshes, &mp.deco_material, &mp.mesh_query, chunk_pos, deco, transform);
+        update_glow_entities(commands, world, &mut mp.meshes, &mp.mesh_query, &mp.lamp_materials, chunk_pos, glow, transform);
+        update_textured_entities(commands, world, &mut mp.meshes, &mp.block_materials, &mp.mesh_query, chunk_pos, textured, transform);
     }
     skipped
 }
@@ -4686,9 +5719,7 @@ pub fn block_interaction_system(
         tp.z.div_euclid(CHUNK_WIDTH as i32),
     );
     if net_client.is_none() {
-        if let Some(chunk) = world.chunks.get(&edited_chunk) {
-            save_chunk_full(edited_chunk, chunk);
-        }
+        save_loaded_chunk(&world, edited_chunk);
     }
 
     remesh_chunks(&mut commands, &mut world, &mut mp, edit_affected_chunks(tp));
@@ -5093,9 +6124,7 @@ pub fn tnt_detonation_system(
     }
 
     for cp in &edited_chunks {
-        if let Some(chunk) = world.chunks.get(cp) {
-            save_chunk_full(*cp, chunk);
-        }
+        save_loaded_chunk(&world, *cp);
     }
     remesh_chunks(&mut commands, &mut world, &mut mp, remesh);
     for cp in edited_chunks {
@@ -5338,9 +6367,7 @@ pub fn nuke_apply_system(
                 pools.invalidate_touching(*p);
             }
 
-            if let Some(chunk) = world.chunks.get(&cp) {
-                save_chunk_full(cp, chunk);
-            }
+            save_loaded_chunk(&world, cp);
             remesh_chunks(&mut commands, &mut world, &mut mp, remesh);
             refresh_chunk_lamp_lights(&mut commands, &mut world, cp);
             refresh_chunk_campfire_models(&mut commands, &mut world, cp, &campfire_assets);
@@ -6354,10 +7381,22 @@ pub fn block_update_system(
     mut updates: ResMut<PendingBlockUpdates>,
     mut spawn_events: MessageWriter<crate::item::SpawnDroppedItemEvent>,
     mut net_out: ResMut<crate::network::PendingNetEdits>,
+    mut pools: ResMut<ActivePools>,
+    mut active_fluids: ResMut<ActiveFluids>,
     net_client: Option<Res<bevy_renet::RenetClient>>,
 ) {
-    if net_client.is_some() { return; } // เฉพาะ host/single player
-    for p in updates.0.drain() {
+    if net_client.is_some() {
+        // client ไม่ตัดสินใจ cascade เอง — host จะส่ง SetBlock Air ตามมาให้ครบ
+        // ซึ่งวิ่งผ่าน apply_block_edit → detach node ให้ถูกต้องอยู่แล้ว
+        // (เคลียร์คิวทิ้งด้วย ไม่งั้น set โตไม่หยุดเพราะไม่มีใคร drain)
+        world.pending_branch_orphans.clear();
+        world.pending_leaf_decay.clear();
+        updates.0.clear();
+        return;
+    }
+    // เก็บออกมาก่อน เพราะระหว่างวนอาจต้องใส่ตำแหน่งใหม่กลับเข้าคิวรอบหน้า
+    let pending: Vec<IVec3> = updates.0.drain().collect();
+    for p in pending {
         let block = world.get_block(p.x, p.y, p.z);
         if block == BlockType::TallGrass {
             let below = world.get_block(p.x, p.y - 1, p.z);
@@ -6379,7 +7418,129 @@ pub fn block_update_system(
                 }));
             }
         }
+        
+        // บล็อกกิ่งที่ไม่มี node เลย (เซฟเก่าก่อนมีระบบนี้ / desync) — รับเลี้ยงเข้า
+        // network แทนที่จะทำลายทิ้ง เพื่อไม่ให้สิ่งที่ผู้เล่นสร้างไว้หายไปดื้อๆ
+        if block == BlockType::Branch && !world.branch_network.nodes.contains_key(&p) {
+            attach_branch_node(&mut world, p);
+            world.pending_branch_remesh.extend(edit_affected_chunks(p));
+        }
     }
+
+    // --- Cascade กิ่งที่ขาดที่ยึด ---
+    // ขับด้วยคิว pending_branch_orphans ล้วนๆ (เติมตอน detach จริงเท่านั้น) —
+    // ห้ามใช้ "parent ไม่อยู่ใน network" เป็นเงื่อนไข เพราะกิ่งที่พาดข้าม chunk จะมี
+    // parent อยู่คนละ chunk ที่ยัง unload อยู่เป็นเรื่องปกติ
+    let orphans: Vec<IVec3> = world.pending_branch_orphans.drain().collect();
+    for o in orphans {
+        // chunk ไม่ได้โหลด = node ถูก evict ไปแล้ว แก้บล็อกไม่ได้ ปล่อยผ่าน
+        // (กิ่งจะค้างลอยจนกว่าผู้เล่นจะไปทุบเอง — ยอมได้ ดีกว่าคิวโตไม่หยุด)
+        let ocp = crate::tree::chunk_of(o, CHUNK_WIDTH as i32);
+        if !world.chunks.contains_key(&ocp) {
+            continue;
+        }
+        if world.get_block(o.x, o.y, o.z) != BlockType::Branch {
+            // บล็อกหายไปทางอื่นแล้ว (ระเบิด/ทับ) — เก็บ node ทิ้งแต่ยังต้องส่งลูกไปต่อคิว
+            let next = world.branch_network.detach(o);
+            world.pending_branch_orphans.extend(next);
+            continue;
+        }
+
+        world.set_block(o.x, o.y, o.z, BlockType::Air);
+        // ลูกของมันกลายเป็นกำพร้าต่อ → เข้าคิวรอบหน้า cascade จึงไหลลงทีละชั้นต่อเฟรม
+        let next = world.branch_network.detach(o);
+        world.pending_branch_orphans.extend(next);
+        queue_leaf_decay_around(&mut world, o);
+
+        spawn_events.write(crate::item::SpawnDroppedItemEvent {
+            item: crate::item::Item::Block(BlockType::Branch),
+            pos: o.as_vec3() + Vec3::splat(0.5),
+            velocity: Vec3::new(
+                (fastrand::f32() - 0.5) * 4.0,
+                2.0 + fastrand::f32() * 3.0,
+                (fastrand::f32() - 0.5) * 4.0,
+            ),
+        });
+        net_out.0.push_back((None, crate::network::BlockEdit::SetBlock {
+            pos: o.to_array(),
+            block: BlockType::Air as u8,
+        }));
+
+        // ปลุกเพื่อนบ้านเหมือน edit ปกติ — หญ้าที่เกาะอยู่บนกิ่งจะได้ร่วง น้ำจะได้ไหลลงช่องว่าง
+        pools.invalidate_touching(o);
+        active_fluids.0.insert(o);
+        updates.0.insert(o);
+        for d in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+            active_fluids.0.insert(o + d);
+            updates.0.insert(o + d);
+        }
+
+        world.pending_branch_save.insert(ocp);
+        world.pending_branch_remesh.extend(edit_affected_chunks(o));
+    }
+
+    // --- ใบร่วงเมื่อกิ่งที่เกาะอยู่หายไป ---
+    // จำกัดจำนวนต่อเฟรมเพราะการเช็คที่ยึดต้องสแกนกล่อง 7×7×7 ต่อใบหนึ่งใบ —
+    // ตัดต้นใหญ่ทีเดียวมีใบหลายร้อย ถ้าทำรวดเดียวจะกระตุก (และการทยอยร่วงก็ดูดีกว่า)
+    const LEAF_DECAY_PER_FRAME: usize = 48;
+    let mut leaves: Vec<IVec3> = world.pending_leaf_decay.iter().copied().collect();
+    leaves.sort_unstable_by_key(|p| p.to_array()); // deterministic ระหว่าง host/client
+    leaves.truncate(LEAF_DECAY_PER_FRAME);
+    for l in leaves {
+        world.pending_leaf_decay.remove(&l);
+        if world.get_block(l.x, l.y, l.z) != BlockType::Leaves {
+            continue;
+        }
+        if leaf_has_support(&world, l) {
+            continue;
+        }
+        world.set_block(l.x, l.y, l.z, BlockType::Air);
+        // ใบข้างเคียงอาจขาดที่ยึดตามไปด้วย → การร่วงลามไปทั้งพุ่มเอง
+        queue_leaf_decay_around(&mut world, l);
+        net_out.0.push_back((None, crate::network::BlockEdit::SetBlock {
+            pos: l.to_array(),
+            block: BlockType::Air as u8,
+        }));
+        // ใบร่วงไม่ดรอปไอเทม — ตัดต้นเดียวมีใบเป็นร้อย จะกลายเป็นขยะเกลื่อนพื้น
+        world.pending_branch_save.insert(crate::tree::chunk_of(l, CHUNK_WIDTH as i32));
+        world.pending_branch_remesh.extend(edit_affected_chunks(l));
+    }
+}
+
+/// Drain pending_branch_save/remesh → เขียน chunk ที่ branch cascade แก้ไว้ลงดิสก์
+/// แล้ว remesh (ถ้าไม่เซฟ โหลดโลกใหม่กิ่งที่หักไปจะกลับมาแต่ node หายไปแล้ว = desync)
+pub fn branch_remesh_system(
+    mut commands: Commands,
+    mut world: ResMut<VoxelWorld>,
+    mut mp: MeshingParams,
+    net_client: Option<Res<bevy_renet::RenetClient>>,
+) {
+    if !world.pending_branch_save.is_empty() {
+        let dirty: Vec<IVec2> = world.pending_branch_save.drain().collect();
+        // client ไม่เขียนทับเซฟ single player ของตัวเอง (เหมือน path edit ปกติ)
+        if net_client.is_none() {
+            for cp in dirty {
+                save_loaded_chunk(&world, cp);
+            }
+        }
+    }
+    if world.pending_branch_remesh.is_empty() {
+        return;
+    }
+    // remesh ทางนี้เป็น sync บน main thread และวัดได้ ~5.5 ms ต่อ chunk — ทำได้เฟรมละ
+    // ตัวเดียวเท่านั้น (เคยตั้ง 4 แล้ววัดได้ 22 ms/เฟรมค้างตลอดตอน stream = เพดาน 45fps
+    // และเป็นต้นเหตุภาพกระพริบ)
+    const REMESH_BUDGET: usize = 1;
+    let chunks: Vec<IVec2> =
+        world.pending_branch_remesh.iter().copied().take(REMESH_BUDGET).collect();
+    for cp in &chunks {
+        world.pending_branch_remesh.remove(cp);
+    }
+    // chunk ที่เพื่อนบ้านยังไม่ครบถูก skip — **ทิ้งไปเลย ห้ามใส่กลับคิว** เพราะ chunk
+    // ริมขอบ render distance ไม่มีวันมีเพื่อนบ้านครบ จะวนอยู่ในคิวถาวรและโตขึ้นเรื่อยๆ
+    // ตอนผู้เล่นเดิน (เคยเห็นค้างที่ 164 ตัว) — ถ้าเพื่อนบ้านมาถึงทีหลัง การ insert chunk
+    // จะตีธง light_dirty ให้ แล้ว relight_system จะเข้าคิว remesh ให้เองอยู่แล้ว
+    let _ = remesh_chunks(&mut commands, &mut world, &mut mp, chunks);
 }
 
 #[cfg(test)]
@@ -6388,6 +7549,834 @@ mod tests {
 
     fn set(blocks: &mut ChunkBlocks, x: usize, y: usize, z: usize, b: BlockType) {
         blocks.set(x, y, z, b);
+    }
+
+    /// VoxelWorld ที่มี chunk (0,0) เป็นอากาศล้วนหนึ่งก้อน — พอให้ set_block ทำงานได้
+    fn world_with_one_chunk() -> VoxelWorld {
+        let mut world = VoxelWorld::default();
+        world.chunks.insert(IVec2::ZERO, ChunkData {
+            blocks: Arc::new(ChunkBlocks::new_uniform(BlockType::Air)),
+            chiseled_blocks: HashMap::new(),
+            facings: HashMap::new(),
+            chest_slots: HashMap::new(),
+            furnace_slots: HashMap::new(),
+            num_vertices: 0,
+            num_indices: 0,
+            water_y_min: 1,
+            water_y_max: 0,
+            num_water_vertices: 0,
+            num_water_indices: 0,
+            dirty: false,
+            light: Default::default(),
+            light_dirty: true,
+            light_missing_neighbors: 0,
+        });
+        world
+    }
+
+    fn set_block_edit(world: &mut VoxelWorld, p: IVec3, block: BlockType) -> Option<IVec3> {
+        apply_block_edit(world, &crate::network::BlockEdit::SetBlock {
+            pos: p.to_array(),
+            block: block as u8,
+        })
+    }
+
+    /// ทุบกิ่งกลางต้น → ทุกกิ่งเหนือขึ้นไปต้องร่วงตามเป็นทอดๆ ส่วนตอที่ยังติดดินต้องอยู่
+    /// (ทดสอบผ่าน App จริงเพื่อกันพลาดเรื่อง SystemParam/resource ที่ cargo check ไม่จับ)
+    #[test]
+    fn branch_break_cascades_up_the_tree() {
+        let mut world = world_with_one_chunk();
+        world.set_block(2, 0, 2, BlockType::Dirt);
+
+        let stack: Vec<IVec3> = (1..=4).map(|y| IVec3::new(2, y, 2)).collect();
+        for p in &stack {
+            assert_eq!(set_block_edit(&mut world, *p, BlockType::Branch), Some(*p));
+        }
+        // ต่อกันเป็นสายเดียวและบางลงทีละ 2 ตามระยะจากดิน
+        assert_eq!(world.branch_network.thickness_at(stack[0]), Some(crate::tree::TRUNK_THICKNESS));
+        let mut expect = crate::tree::TRUNK_THICKNESS;
+        for _ in 0..3 {
+            expect = crate::tree::child_thickness(expect);
+        }
+        assert_eq!(world.branch_network.thickness_at(stack[3]), Some(expect));
+        assert!(expect < crate::tree::TRUNK_THICKNESS, "ต้องเรียวลงจริง");
+
+        // ทุบตัวที่สองจากล่าง
+        set_block_edit(&mut world, stack[1], BlockType::Air);
+
+        let mut app = app_with(world);
+        // cascade ไหลชั้นละเฟรม — วนให้เกินความสูงต้นไม้
+        for _ in 0..8 {
+            app.update();
+        }
+
+        let world = app.world().resource::<VoxelWorld>();
+        for p in &stack[1..] {
+            assert_eq!(world.get_block(p.x, p.y, p.z), BlockType::Air, "{p} ต้องร่วงตาม");
+            assert!(!world.branch_network.nodes.contains_key(p), "{p} ต้องไม่เหลือ node ค้าง");
+        }
+        assert_eq!(
+            world.get_block(stack[0].x, stack[0].y, stack[0].z),
+            BlockType::Branch,
+            "ตอที่ยังติดดินต้องไม่ถูกทำลาย"
+        );
+        assert!(
+            world.pending_branch_save.contains(&IVec2::ZERO),
+            "chunk ที่ cascade แก้ต้องถูกจ่อเซฟลงดิสก์"
+        );
+    }
+
+    /// ตัวต่อของ node สองตัวที่ติดกันต้องปูเต็มระยะห่างระหว่างศูนย์กลางพอดี ไม่เหลือ
+    /// ช่วงว่างตรงกลาง — ช่วงว่างนั้นแหละที่เคยทำให้กิ่งเฉียงดูเป็นลูกปัดร้อยเชือก
+    /// (คิวบ์สองก้อนที่ติดกันแบบเฉียงแตะกันแค่ขอบ ไม่ได้ชนกันจริง)
+    #[test]
+    fn extensions_of_adjacent_nodes_tile_the_whole_gap() {
+        for dir in crate::tree::NEIGHBOUR_DIRS {
+            let gap = dir.as_vec3().length();
+            let (min_a, max_a) = extension_span(dir);
+            let (min_b, max_b) = extension_span(-dir);
+            assert_eq!(min_a, 0.0, "{dir:?}: ตัวต่อไม่ได้เริ่มจากใจกลาง node");
+            assert_eq!(min_b, 0.0, "{dir:?}: ฝั่งตรงข้ามไม่ได้เริ่มจากใจกลาง node");
+            assert!(max_a > 0.0, "{dir:?}: ตัวต่อยาวศูนย์");
+            assert!(
+                (max_a + max_b - gap).abs() < 1e-5,
+                "{dir:?}: สองฝั่งรวมกัน {} แต่ระยะห่างจริง {gap} — เหลือคอคอด/ซ้อนเกิน",
+                max_a + max_b
+            );
+        }
+    }
+
+    /// สไตล์ของหน้า preview — แยกออกมาเป็นค่าคงที่เพราะ CSS เต็มไปด้วยปีกกา
+    /// ซึ่งต้องหนีอักขระถ้าอยู่ใน format!
+    const TREE_PREVIEW_CSS: &str = r#"<style>
+:root{
+  --paper:#EDEFE8; --panel:#F7F8F3; --ink:#1A211C; --muted:#5D6A5C;
+  --bark:#8A6A44; --leaf:#4F8046; --rule:#C6CCBD;
+}
+@media (prefers-color-scheme:dark){
+  :root{ --paper:#141811; --panel:#1B2016; --ink:#E4E8DC; --muted:#94A08F;
+         --bark:#B08856; --leaf:#6FA262; --rule:#333B2E; }
+}
+:root[data-theme="dark"]{ --paper:#141811; --panel:#1B2016; --ink:#E4E8DC; --muted:#94A08F;
+  --bark:#B08856; --leaf:#6FA262; --rule:#333B2E; }
+:root[data-theme="light"]{ --paper:#EDEFE8; --panel:#F7F8F3; --ink:#1A211C; --muted:#5D6A5C;
+  --bark:#8A6A44; --leaf:#4F8046; --rule:#C6CCBD; }
+
+body{ background:var(--paper); color:var(--ink); margin:0;
+  padding:clamp(20px,4vw,56px); font:15px/1.6 ui-sans-serif,system-ui,sans-serif; }
+h1{ font:italic 400 clamp(26px,4vw,38px)/1.15 Georgia,"Times New Roman",serif;
+  margin:0 0 10px; text-wrap:balance; letter-spacing:-.01em; }
+.lede{ max-width:64ch; color:var(--muted); margin:0 0 40px; }
+code{ font:12.5px/1 ui-monospace,"Cascadia Mono",Consolas,monospace; color:var(--bark); }
+
+.plate{ border-top:1px solid var(--rule); padding-top:20px; margin-bottom:44px; }
+.plate header{ display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
+h2{ font:italic 400 22px/1.2 Georgia,"Times New Roman",serif; margin:0; }
+.note{ margin:0; color:var(--muted); font-size:14px; }
+
+.params{ display:flex; flex-wrap:wrap; gap:0 26px; margin:12px 0 0; }
+.params div{ display:flex; align-items:baseline; gap:6px; }
+.params dt{ font-size:11px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); }
+.params dd{ margin:0; font:13px/1 ui-monospace,"Cascadia Mono",Consolas,monospace;
+  font-variant-numeric:tabular-nums; }
+
+.row{ display:flex; gap:10px; margin-top:16px; overflow-x:auto; padding-bottom:6px; }
+svg{ background:var(--panel); border:1px solid var(--rule); border-radius:3px;
+  width:158px; height:250px; flex:0 0 auto; }
+.ground{ stroke:var(--rule); stroke-width:1.5; }
+.leaf{ fill:var(--leaf); }
+.branch{ stroke:var(--bark); stroke-linecap:round; }
+
+.legend{ border-top:1px solid var(--rule); padding-top:20px; max-width:72ch; }
+.legend dl{ margin:14px 0 0; display:grid; gap:10px; }
+.legend div{ display:grid; grid-template-columns:88px 1fr; gap:14px; align-items:baseline; }
+.legend dt{ font-size:11px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); }
+.legend dd{ margin:0; }
+@media (max-width:520px){ .legend div{ grid-template-columns:1fr; gap:2px; } }
+</style>"#;
+
+    /// เครื่องมือดูทรงต้นไม้: ปั้นต้นไม้จริงจากทุก preset แล้วเขียนภาพ SVG เทียบกัน
+    /// ลง `target/tree_previews.html` (อยู่ใน target/ จึงไม่ปนกับ repo)
+    /// — ใช้จูน TREE_PRESETS โดยไม่ต้องเปิดเกมทุกครั้ง
+    #[test]
+    fn dump_tree_previews() {
+        // ฉายด้านข้าง (x, y) — กิ่งวาดเป็นเส้นจาก parent ไปลูก ความหนาตาม thickness
+        fn svg_for(params: &TreeParams, seed: u64) -> String {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut next = move || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            let mut blocks = ChunkBlocks::new_uniform(BlockType::Air);
+            let mut records = Vec::new();
+            let base = IVec3::new(8, 40, 8);
+            grow_tree(&mut blocks, &mut records, base, params, &mut next);
+
+            let by_pos: HashMap<[i32; 3], u8> =
+                records.iter().map(|r| (r.pos, r.thickness)).collect();
+            let mut out = String::new();
+            let scale = 9.0;
+            let (w, h) = (16.0 * scale, 26.0 * scale);
+            // y โลกชี้ขึ้น แต่ y ของ SVG ชี้ลง — พลิกและอิงโคนต้นเป็นเส้นพื้น
+            let px = |p: [i32; 3]| {
+                (
+                    (p[0] as f32 + (p[2] as f32 - 8.0) * 0.35) * scale,
+                    h - 2.0 * scale - (p[1] - base.y) as f32 * scale,
+                )
+            };
+            // เผื่อขอบซ้าย/ขวา — กิ่งที่กางออกกว้างเลยกรอบ 16 บล็อกไปได้เล็กน้อย
+            let pad = 3.0 * scale;
+            out.push_str(&format!(
+                r#"<svg viewBox="{vx} 0 {vw} {h}" preserveAspectRatio="xMidYMax meet">"#,
+                vx = -pad,
+                vw = w + pad * 2.0
+            ));
+            out.push_str(&format!(
+                r#"<line x1="{x1}" y1="{gy}" x2="{x2}" y2="{gy}" class="ground"/>"#,
+                x1 = -pad,
+                x2 = w + pad,
+                gy = h - 2.0 * scale
+            ));
+            // วาดจากหลังไปหน้า ของใกล้จึงทับของไกล และจางลงตามความลึกให้รู้สึกมีปริมาตร
+            enum Item {
+                Leaf(f32, f32),
+                Branch(f32, f32, f32, f32, f32),
+            }
+            let mut items: Vec<(i32, Item)> = Vec::new();
+            blocks.for_each_matching(|b| b == BlockType::Leaves, |x, y, z, _| {
+                let (cx, cy) = px([x as i32, y as i32, z as i32]);
+                items.push((z as i32, Item::Leaf(cx, cy)));
+            });
+            for r in &records {
+                let Some(parent) = r.parent else { continue };
+                let (x1, y1) = px(parent);
+                let (x2, y2) = px(r.pos);
+                let t = by_pos.get(&parent).copied().unwrap_or(r.thickness).max(r.thickness);
+                items.push((
+                    r.pos[2],
+                    Item::Branch(x1, y1, x2, y2, t as f32 / 32.0 * 2.0 * scale),
+                ));
+            }
+            items.sort_by_key(|(z, _)| *z);
+            for (z, item) in &items {
+                // z 0..15 → ไกลสุดจาง, ใกล้สุดทึบ
+                let depth = (*z as f32 / 15.0).clamp(0.0, 1.0);
+                match item {
+                    Item::Leaf(cx, cy) => out.push_str(&format!(
+                        r#"<circle cx="{cx:.1}" cy="{cy:.1}" r="{r:.1}" class="leaf" opacity="{o:.2}"/>"#,
+                        r = scale * 0.6,
+                        o = 0.22 + depth * 0.3
+                    )),
+                    Item::Branch(x1, y1, x2, y2, sw) => out.push_str(&format!(
+                        r#"<line x1="{x1:.1}" y1="{y1:.1}" x2="{x2:.1}" y2="{y2:.1}" stroke-width="{sw:.2}" class="branch" opacity="{o:.2}"/>"#,
+                        o = 0.55 + depth * 0.45
+                    )),
+                }
+            }
+            out.push_str("</svg>");
+            out
+        }
+
+        // หน้าตาแบบ "แผ่นภาพคู่มือพรรณไม้" — แต่ละ preset คือหนึ่งชนิด วางเรียงบนเส้นพื้น
+        // เดียวกันให้เทียบสัดส่วนกันได้ตรงๆ
+        let mut html = String::new();
+        html.push_str(TREE_PREVIEW_CSS);
+        html.push_str(
+            "<h1>พรรณไม้ที่เลือกได้</h1>\
+             <p class=lede>ทุกต้นในหน้านี้ปั้นจาก generator ตัวจริงใน <code>TREE_PRESETS</code> \
+             ฉายด้านข้างพร้อมเหลื่อมความลึกเล็กน้อย ความหนาของเส้น = <code>thickness</code> \
+             ของ node นั้นจริงๆ แต่ละชนิดแสดง 6 เมล็ดสุ่มเพื่อให้เห็นความหลากหลายในชนิดเดียวกัน</p>",
+        );
+        for (name, params) in TREE_PRESETS {
+            let note = match *name {
+                "oak" => "ลำต้นสั้น กิ่งกางกว้าง พุ่มหนา — เดินลอดได้ เงาเยอะ",
+                "pine" => "ลำต้นสูงเด่น กิ่งสั้นถี่ตลอดลำต้น ทรงกรวย",
+                "birch" => "สูงเรียว กิ่งน้อยเชิดขึ้น พุ่มแคบ โปร่ง",
+                _ => "ลำต้นคดสั้น กิ่งเยอะแตกมั่ว ใบเป็นหย่อม — ป่าดิบ/ไม้แก่",
+            };
+            html.push_str(&format!(
+                "<section class=plate><header><h2>{name}</h2><p class=note>{note}</p></header>\
+                 <dl class=params>\
+                 <div><dt>ลำต้น</dt><dd>{}–{}</dd></div>\
+                 <div><dt>ชั้นกิ่ง</dt><dd>{}</dd></div>\
+                 <div><dt>กิ่งข้าง</dt><dd>{:.0}%</dd></div>\
+                 <div><dt>กาง</dt><dd>{:.2}</dd></div>\
+                 <div><dt>ส่าย</dt><dd>{:.2}</dd></div>\
+                 <div><dt>เชิด</dt><dd>{:.2}</dd></div>\
+                 </dl><div class=row>",
+                params.trunk_len.0, params.trunk_len.1, params.max_depth,
+                params.side_branch_chance * 100.0, params.tilt, params.wobble, params.climb
+            ));
+            for seed in 0..6u64 {
+                html.push_str(&svg_for(params, seed * 7919 + 13));
+            }
+            html.push_str("</div></section>");
+        }
+        html.push_str(
+            "<section class=legend><h2>ปุ่มที่หมุนได้</h2><dl>\
+             <div><dt>ลำต้น</dt><dd>ความยาวก่อนถึงยอด — ยาว = ต้นสูงโปร่ง, สั้น = พุ่มเตี้ย</dd></div>\
+             <div><dt>ชั้นกิ่ง</dt><dd>กิ่งแตกซ้อนได้กี่ชั้น — มาก = รกและ vertex เยอะ</dd></div>\
+             <div><dt>กิ่งข้าง</dt><dd>โอกาสแตกกิ่งระหว่างทาง ไม่ใช่แตกที่ยอดจุดเดียว \
+             ตัวนี้คือตัวที่กันไม่ให้ต้นไม้ออกมาเป็นทรงไม้กวาด</dd></div>\
+             <div><dt>กาง</dt><dd>มุมที่กิ่งเบนออกจากแกนตั้ง — สูง = แผ่ออกข้าง, ต่ำ = พุ่งขึ้น</dd></div>\
+             <div><dt>ส่าย</dt><dd>ความคดของกิ่งรายก้าว — สูง = บิดเบี้ยวเป็นธรรมชาติ, ต่ำ = ตรงเป๊ะ</dd></div>\
+             <div><dt>เชิด</dt><dd>แรงดึงขึ้นบนรายก้าว — สูง = ปลายกิ่งชูขึ้น, ต่ำ = กิ่งทิ้งตัว</dd></div>\
+             </dl></section>",
+        );
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("tree_previews.html");
+        let _ = std::fs::create_dir_all(path.parent().unwrap());
+        std::fs::write(&path, html).expect("เขียนไฟล์ preview ไม่ได้");
+        assert!(path.exists());
+    }
+
+    /// pipeline เต็มของต้นไม้ที่ worldgen ปั้น: generate → record → merge เข้า network
+    /// ต้องรักษา thickness ของลำต้นไว้ครบ ถ้าหลุดตรงไหน mesh จะ fallback เป็นกิ่งผอม
+    #[test]
+    fn generated_trunk_keeps_its_thickness_through_the_pipeline() {
+        let noise = crate::NoiseParams { frequency: 0.01, amplitude: 24.0, octaves: 4, seed: 1337 };
+        let mut checked = 0;
+        for cx in 0..12 {
+            for cz in 0..12 {
+                let (blocks, records) =
+                    generate_chunk_blocks(IVec2::new(cx, cz), noise, crate::TerrainSource::Noise);
+                if records.is_empty() {
+                    continue;
+                }
+                let mut net = crate::tree::BranchNetwork::default();
+                net.merge_records(&records);
+
+                let cp = IVec2::new(cx, cz);
+                for r in &records {
+                    let p = IVec3::from_array(r.pos);
+                    // record ต้องเป็นพิกัด world — ถ้าเป็น local ทุกอันจะตกไปอยู่ chunk (0,0)
+                    // แล้ว mesh (ซึ่ง lookup ด้วยพิกัด world) หา node ไม่เจอ
+                    assert_eq!(
+                        crate::tree::chunk_of(p, CHUNK_WIDTH as i32),
+                        cp,
+                        "record หลุดออกนอก chunk ตัวเอง — น่าจะลืมแปลง local → world"
+                    );
+                    let lx = p.x.rem_euclid(CHUNK_WIDTH as i32) as usize;
+                    let lz = p.z.rem_euclid(CHUNK_WIDTH as i32) as usize;
+                    assert_eq!(
+                        blocks.get(lx, p.y as usize, lz),
+                        BlockType::Branch,
+                        "มี node แต่ไม่มีบล็อกกิ่งตรงนั้น"
+                    );
+                }
+                for root in records.iter().filter(|r| r.parent.is_none()) {
+                    let p = IVec3::from_array(root.pos);
+                    assert_eq!(
+                        net.thickness_at(p),
+                        Some(crate::tree::TRUNK_THICKNESS),
+                        "โคนลำต้นต้องหนาเต็มหลัง merge"
+                    );
+                }
+                // บล็อกถัดขึ้นไปจากโคนต้องยังหนาเกือบเต็ม ไม่ใช่ตกไปเป็นกิ่งผอม
+                let second = records.iter().find(|r| r.parent.is_some()).unwrap();
+                assert!(
+                    second.thickness >= crate::tree::TRUNK_THICKNESS - 2,
+                    "ลำต้นเรียวเร็วเกินไป: {}",
+                    second.thickness
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "ไม่เจอต้นไม้เลยใน 144 chunk — ตัวปั้นอาจไม่ทำงาน");
+    }
+
+    /// ขอบทุกเส้นของ mesh ต้องถูกใช้เป็นจำนวนคู่ — ขอบที่ถูกใช้หนเดียวคือขอบเปิด
+    /// แปลว่ามีรู (ผิวซ้อนทับกันได้ นับเป็นเลขคู่ จึงยอมให้ solid หลายก้อนซ้อนกัน)
+    fn open_edge_count(set: &ChunkMeshSet) -> usize {
+        let key = |p: [f32; 3]| {
+            [
+                (p[0] * 4096.0).round() as i64,
+                (p[1] * 4096.0).round() as i64,
+                (p[2] * 4096.0).round() as i64,
+            ]
+        };
+        let mut edges: HashMap<([i64; 3], [i64; 3]), usize> = HashMap::new();
+        for (_, buf) in &set.textured {
+            for tri in buf.indices.chunks(3) {
+                for i in 0..3 {
+                    let a = key(buf.positions[tri[i] as usize]);
+                    let b = key(buf.positions[tri[(i + 1) % 3] as usize]);
+                    let e = if a <= b { (a, b) } else { (b, a) };
+                    *edges.entry(e).or_default() += 1;
+                }
+            }
+        }
+        edges.values().filter(|c| *c % 2 != 0).count()
+    }
+
+    /// node เดี่ยวที่ทุกปลายไม่มีเพื่อนบ้าน (ปลายทุกด้านมีฝาปิด) ต้องเป็นก้อนตัน
+    /// ครอบทุกทรงที่เกิดจริง: ปลายกิ่ง, กิ่งตรง, กิ่งหักมุม, จุดแตกกิ่ง แกนตรงและเฉียง
+    #[test]
+    fn branch_mesh_has_no_holes() {
+        let axis = IVec3::Y;
+        let diag_edge = IVec3::new(1, 1, 0);
+        let diag_corner = IVec3::new(1, 1, 1);
+        let cases: Vec<(&str, Option<(IVec3, Option<u8>)>, Vec<(IVec3, Option<u8>)>)> = vec![
+            ("ปลายกิ่งแนวแกน", Some((IVec3::NEG_Y, None)), vec![]),
+            ("ปลายกิ่งแนวเฉียง", Some((-diag_edge, None)), vec![]),
+            ("กิ่งตรงแนวแกน", Some((IVec3::NEG_Y, None)), vec![(axis, None)]),
+            ("กิ่งตรงแนวเฉียง", Some((-diag_edge, None)), vec![(diag_edge, None)]),
+            ("กิ่งหักมุมเฉียง", Some((IVec3::NEG_Y, None)), vec![(diag_edge, None)]),
+            ("เฉียงมุมสามแกน", Some((-diag_corner, None)), vec![(diag_corner, None)]),
+            (
+                "จุดแตกกิ่งสามเส้น",
+                Some((IVec3::NEG_Y, None)),
+                vec![(axis, None), (diag_edge, None), (IVec3::new(-1, 1, 1), None)],
+            ),
+            ("รากไม่มี parent", None, vec![(axis, None)]),
+        ];
+
+        for thickness in [crate::tree::MIN_THICKNESS, 8, 13, crate::tree::TRUNK_THICKNESS] {
+            for (name, parent, children) in &cases {
+                let mut set = ChunkMeshSet::default();
+                generate_branch_mesh_into(&mut set, 0.0, 0.0, 0.0, thickness, *parent, children, [1.0; 4]);
+                assert_eq!(
+                    open_edge_count(&set),
+                    0,
+                    "thickness {thickness} ทรง '{name}': mesh มีรู"
+                );
+            }
+        }
+    }
+
+    /// **รอยต่อของ node สองตัวที่ติดกันต้องปิดสนิท** — ปลายฝั่ง joined จงใจไม่ปิดฝา
+    /// เพราะอีกฝั่งต้องมาบรรจบพอดี ถ้าขอบสองฝั่งไม่ตรงกันเป๊ะจะเหลือขอบเปิด = รอยแยก
+    /// ที่มองเห็นตรงข้อต่อ (อาการ "กิ่งเฉียงดูไม่ต่อกัน")
+    #[test]
+    fn adjacent_branch_nodes_seal_their_shared_joint() {
+        for dir in crate::tree::NEIGHBOUR_DIRS {
+            for (t_a, t_b) in [(16u8, 14u8), (13, 7), (9, 9), (4, 2), (2, 16)] {
+                let mut set = ChunkMeshSet::default();
+                // A: root (โคนปิดฝาเอง) มีลูกคือ B
+                generate_branch_mesh_into(
+                    &mut set, 0.0, 0.0, 0.0, t_a,
+                    None, &[(dir, Some(t_b))], [1.0; 4],
+                );
+                // B: parent คือ A ไม่มีลูก (ปลายกิ่งปิดฝาเอง) — วางที่ออฟเซ็ต dir
+                generate_branch_mesh_into(
+                    &mut set, dir.x as f32, dir.y as f32, dir.z as f32, t_b,
+                    Some((-dir, Some(t_a))), &[], [1.0; 4],
+                );
+                assert_eq!(
+                    open_edge_count(&set),
+                    0,
+                    "ทิศ {dir:?} thickness {t_a}→{t_b}: รอยต่อไม่ปิดสนิท"
+                );
+            }
+        }
+    }
+
+    /// หน้าตัดของตัวต่อสองฝั่งรอยต่อเดียวกันต้องทับกันสนิททุกทิศ (รวมเฉียง)
+    /// ถ้าแกนหน้าตัดขึ้นกับทิศแทนที่จะขึ้นกับเส้นแกน สองฝั่งจะบิดคนละมุมแล้วรอยต่อแตก
+    #[test]
+    fn extension_cross_sections_match_across_a_joint() {
+        let r = 0.3_f32;
+        for dir in crate::tree::NEIGHBOUR_DIRS {
+            let (u, n, w) = extension_basis(dir);
+            // ตั้งฉากและเป็นหน่วยจริง
+            assert!((u.length() - 1.0).abs() < 1e-4, "{dir:?}: u ไม่เป็นเวกเตอร์หน่วย");
+            assert!((w.length() - 1.0).abs() < 1e-4, "{dir:?}: w ไม่เป็นเวกเตอร์หน่วย");
+            assert!(u.dot(n).abs() < 1e-4, "{dir:?}: u ไม่ตั้งฉากกับทิศ");
+            assert!(w.dot(n).abs() < 1e-4, "{dir:?}: w ไม่ตั้งฉากกับทิศ");
+            assert!((u.cross(n) - w).length() < 1e-4, "{dir:?}: มือขวากลับด้าน (winding พัง)");
+
+            let max_y = dir.as_vec3().length() * 0.5;
+            let (u2, n2, w2) = extension_basis(-dir);
+
+            // มุมหน้าตัดของฝั่งเรา (พิกัดโลกเทียบศูนย์กลางบล็อกตัวเอง)
+            let ours: Vec<Vec3> = [(-r, -r), (r, -r), (r, r), (-r, r)]
+                .iter()
+                .map(|(a, b)| n * max_y + u * *a + w * *b)
+                .collect();
+            // มุมหน้าตัดของเพื่อนบ้าน แปลงมาอยู่บนระบบพิกัดเดียวกัน
+            let base = dir.as_vec3();
+            let theirs: Vec<Vec3> = [(-r, -r), (r, -r), (r, r), (-r, r)]
+                .iter()
+                .map(|(a, b)| base + n2 * max_y + u2 * *a + w2 * *b)
+                .collect();
+
+            for c in &ours {
+                assert!(
+                    theirs.iter().any(|t| (*t - *c).length() < 1e-4),
+                    "{dir:?}: มุมหน้าตัด {c:?} ไม่มีคู่จากอีกฝั่ง — รอยต่อจะแตก"
+                );
+            }
+        }
+    }
+
+    /// ลำต้นต้องหนากว่ากิ่งอย่างเห็นได้ชัด และเรียวลงตลอดความสูงแบบค่อยเป็นค่อยไป
+    #[test]
+    fn trunk_is_clearly_thicker_than_its_branches() {
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut blocks = ChunkBlocks::new_uniform(BlockType::Air);
+        let mut records = Vec::new();
+        grow_tree(&mut blocks, &mut records, IVec3::new(8, 60, 8), &TREE_PRESETS[ACTIVE_TREE_PRESET].1, &mut next);
+
+        // ลำต้น = สายที่สาวจาก root ขึ้นไปตรงๆ (record ชุดแรกก่อนแตกกิ่ง)
+        let root_t = records[0].thickness;
+        assert_eq!(root_t, crate::tree::TRUNK_THICKNESS);
+        let trunk_bottom = records[1].thickness;
+        assert!(
+            trunk_bottom as f32 >= crate::tree::TRUNK_THICKNESS as f32 * 0.85,
+            "โคนลำต้นเรียวเร็วเกินไป: {trunk_bottom}"
+        );
+
+        let thinnest = records.iter().map(|r| r.thickness).min().unwrap();
+        assert!(
+            (thinnest as f32) < root_t as f32 * 0.5,
+            "ปลายกิ่งต้องเล็กกว่าลำต้นครึ่งหนึ่ง: {thinnest} vs {root_t}"
+        );
+    }
+
+    /// quantize_dir ต้องคืนก้าวที่อยู่ในเพื่อนบ้าน 26 ทิศเสมอ และห้ามคืน (0,0,0)
+    /// (ถ้าคืนศูนย์ กิ่งจะวนอยู่กับที่ และ mesh จะหารด้วยศูนย์ตอน normalize)
+    #[test]
+    fn quantize_dir_always_yields_a_real_step() {
+        let mut cases = vec![
+            Vec3::ZERO, Vec3::Y, Vec3::NEG_Y, Vec3::X, Vec3::Z,
+            Vec3::new(1.0, 1.0, 1.0), Vec3::new(0.3, 0.31, 0.29), Vec3::new(-0.4, 0.45, 0.4),
+        ];
+        // ทิศกระจายรอบทรงกลมแบบ deterministic
+        for i in 0..200 {
+            let a = i as f32 * 0.31;
+            cases.push(Vec3::new(a.cos(), (a * 0.7).sin(), a.sin()));
+        }
+        for d in cases {
+            let q = quantize_dir(d);
+            assert_ne!(q, IVec3::ZERO, "dir {d:?} ให้ก้าวศูนย์");
+            assert!(
+                crate::tree::NEIGHBOUR_DIRS.contains(&q),
+                "dir {d:?} → {q:?} ไม่ใช่เพื่อนบ้าน 26 ทิศ"
+            );
+        }
+    }
+
+    /// ต้นไม้ที่ปั้นต้องอยู่ในกรอบ chunk ทั้งต้น และ topology ต้องเป็นต้นไม้จริง:
+    /// root เดียว, ไม่มีตำแหน่งซ้ำ, parent มาก่อนลูกเสมอ, ทุกลิงก์เป็นเพื่อนบ้าน 26 ทิศ
+    #[test]
+    fn generated_tree_is_in_bounds_and_well_formed() {
+        for seed in 0..64u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut next = move || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            let mut blocks = ChunkBlocks::new_uniform(BlockType::Air);
+            let mut records = Vec::new();
+            grow_tree(&mut blocks, &mut records, IVec3::new(8, 60, 8), &TREE_PRESETS[ACTIVE_TREE_PRESET].1, &mut next);
+
+            assert!(records.len() > 3, "seed {seed}: ต้นไม้เล็กเกินไป");
+            let mut seen: std::collections::HashSet<IVec3> = Default::default();
+            let mut roots = 0;
+            for r in &records {
+                let p = IVec3::from_array(r.pos);
+                assert!(inside_chunk(p), "seed {seed}: {p} หลุดกรอบ chunk");
+                assert_eq!(
+                    blocks.get(p.x as usize, p.y as usize, p.z as usize),
+                    BlockType::Branch,
+                    "seed {seed}: {p} มี node แต่ไม่มีบล็อกกิ่ง"
+                );
+                assert!(seen.insert(p), "seed {seed}: {p} มี record ซ้ำ");
+                match r.parent {
+                    None => roots += 1,
+                    Some(pp) => {
+                        let pp = IVec3::from_array(pp);
+                        assert!(seen.contains(&pp), "seed {seed}: parent มาหลังลูก");
+                        assert_eq!((p - pp).abs().max_element(), 1, "seed {seed}: ลิงก์ข้ามช่อง");
+                    }
+                }
+            }
+            assert_eq!(roots, 1, "seed {seed}: ต้องมี root เดียว");
+        }
+    }
+
+    /// record ต่อ chunk ต้อง round-trip ได้ครบ ทั้ง thickness และลิงก์ parent/children
+    #[test]
+    fn chunk_records_round_trip() {
+        let mut world = world_with_one_chunk();
+        world.set_block(2, 0, 2, BlockType::Dirt);
+        for y in 1..=4 {
+            let p = IVec3::new(2, y, 2);
+            set_block_edit(&mut world, p, BlockType::Branch);
+        }
+        let records = world.branch_network.chunk_records(IVec2::ZERO, CHUNK_WIDTH as i32);
+        assert_eq!(records.len(), 4);
+
+        let mut restored = crate::tree::BranchNetwork::default();
+        restored.merge_records(&records);
+        assert_eq!(restored.nodes.len(), world.branch_network.nodes.len());
+        for (pos, node) in &world.branch_network.nodes {
+            let back = restored.nodes.get(pos).expect("node หาย");
+            assert_eq!(back.parent_pos, node.parent_pos);
+            assert_eq!(back.thickness, node.thickness);
+            assert_eq!(back.children, node.children, "ลิงก์ลูกต้องประกอบกลับได้");
+        }
+        // เรียงแล้ว = ไฟล์เซฟ deterministic
+        let again = world.branch_network.chunk_records(IVec2::ZERO, CHUNK_WIDTH as i32);
+        assert_eq!(records, again);
+    }
+
+    /// evict ต้องเอา node ออกให้หมดและไม่ทิ้งลิงก์ค้างใน parent ที่ยังโหลดอยู่
+    #[test]
+    fn evict_chunk_clears_nodes_and_parent_links() {
+        let mut bn = crate::tree::BranchNetwork::default();
+        let here = IVec3::new(1, 5, 1);          // chunk (0,0)
+        let neighbour = IVec3::new(-1, 5, 1);    // chunk (-1,0)
+        bn.add_root(neighbour, crate::tree::TRUNK_THICKNESS);
+        bn.merge_records(&[crate::tree::BranchRecord {
+            pos: here.to_array(),
+            parent: Some(neighbour.to_array()),
+            thickness: 10,
+        }]);
+        assert!(bn.nodes[&neighbour].children.contains(&here));
+
+        bn.evict_chunk(IVec2::ZERO, CHUNK_WIDTH as i32);
+        assert!(!bn.nodes.contains_key(&here));
+        assert!(bn.nodes.contains_key(&neighbour), "chunk อื่นต้องไม่โดนด้วย");
+        assert!(
+            !bn.nodes[&neighbour].children.contains(&here),
+            "ลิงก์ค้างจะทำให้ mesh วาดกิ่งยื่นไปหาที่ที่ไม่มีอะไร"
+        );
+    }
+
+    /// สร้าง App เปล่าที่มี resource ครบสำหรับรัน block_update_system
+    fn app_with(world: VoxelWorld) -> App {
+        let mut app = App::new();
+        app.add_plugins(bevy::MinimalPlugins)
+            .add_message::<crate::item::SpawnDroppedItemEvent>()
+            .insert_resource(world)
+            .init_resource::<PendingBlockUpdates>()
+            .init_resource::<crate::network::PendingNetEdits>()
+            .init_resource::<ActivePools>()
+            .init_resource::<ActiveFluids>()
+            .add_systems(Update, block_update_system);
+        app
+    }
+
+    /// โลก 3×3 chunk พื้นตันเรียบที่ y=0..=ground — เท่ากับที่ mesher ต้องการพอดี
+    fn world_grid_with_ground(ground: usize) -> VoxelWorld {
+        let mut world = VoxelWorld::default();
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                let mut blocks = ChunkBlocks::new_uniform(BlockType::Air);
+                for z in 0..CHUNK_WIDTH {
+                    for x in 0..CHUNK_WIDTH {
+                        for y in 0..=ground {
+                            blocks.set(x, y, z, BlockType::Stone);
+                        }
+                    }
+                }
+                blocks.compact();
+                world.chunks.insert(IVec2::new(cx, cz), ChunkData {
+                    blocks: Arc::new(blocks),
+                    chiseled_blocks: HashMap::new(),
+                    facings: HashMap::new(),
+                    chest_slots: HashMap::new(),
+                    furnace_slots: HashMap::new(),
+                    num_vertices: 0,
+                    num_indices: 0,
+                    water_y_min: 1,
+                    water_y_max: 0,
+                    num_water_vertices: 0,
+                    num_water_indices: 0,
+                    dirty: false,
+                    light: Default::default(),
+                    light_dirty: true,
+                    light_missing_neighbors: 0,
+                });
+            }
+        }
+        world
+    }
+
+    /// เส้นทางจริงของแสง: ensure_chunk_light → light_neighborhood → อ่านค่าข้ามขอบ
+    /// (การ map index เพื่อนบ้าน 8 ทิศเป็นจุดพลาดง่าย ถ้าสลับกันแสงตรงขอบจะเพี้ยน)
+    #[test]
+    fn chunk_light_pipeline_lights_the_surface_and_leaves_underground_dark() {
+        let ground = 80usize;
+        let mut world = world_grid_with_ground(ground);
+
+        // relight_system ไล่ทำทุก chunk ที่ dirty — จำลองด้วยการทำครบทั้ง 3×3
+        // **ทุกตัวต้องคำนวณได้ แม้ตัวริมที่เพื่อนบ้านไม่ครบ 8** ไม่งั้นจะไม่มี chunk ไหน
+        // ผ่านเงื่อนไข mesh เลย (บั๊กจอฟ้า: เห็น mesh แค่ chunk เดียว)
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                let p = IVec2::new(cx, cz);
+                assert!(ensure_chunk_light(&mut world, p), "{p} ต้องคำนวณแสงได้");
+                assert!(!world.chunks[&p].light_dirty, "{p} ต้องเคลียร์ flag หลังคำนวณ");
+            }
+        }
+
+        // นี่คือเงื่อนไขที่ mesher ใช้ตัดสินว่าจะวาด chunk ได้ไหม — ถ้าเป็น None แปลว่า
+        // chunk จะไม่ถูก mesh เลย (อาการจอฟ้า)
+        let lm = light_neighborhood(&world, IVec2::ZERO)
+            .expect("เพื่อนบ้านโหลดครบและคำนวณแสงแล้ว ต้อง mesh ได้");
+        assert_eq!(lm.get(8, ground as i32 + 1, 8), crate::light::MAX_LIGHT, "เหนือพื้นต้องสว่างเต็ม");
+        assert_eq!(lm.get(8, ground as i32 - 3, 8), 0, "ใต้ดินต้องมืด");
+
+        // อ่านทะลุขอบไปหาเพื่อนบ้านทั้ง 8 ทิศต้องได้ค่าเดียวกัน (พื้นเรียบเหมือนกันหมด)
+        // ถ้า index เพื่อนบ้านสลับกันจะอ่านไปโดน chunk ที่ยังไม่ได้คำนวณแล้วได้ 0
+        for (dx, dz) in [(-1, 0), (16, 0), (0, -1), (0, 16), (-1, -1), (16, 16), (-1, 16), (16, -1)] {
+            assert_eq!(
+                lm.get(dx, ground as i32 + 1, dz),
+                crate::light::MAX_LIGHT,
+                "อ่านข้ามขอบไปทาง ({dx},{dz}) แล้วได้ค่าผิด"
+            );
+        }
+    }
+
+    /// เส้นโค้งความสว่างต้องไล่ขึ้นตามระดับแสง และไม่ดำสนิทที่ระดับ 0
+    #[test]
+    fn sky_curve_is_monotonic_with_a_floor() {
+        for l in 1..=crate::light::MAX_LIGHT {
+            assert!(sky_curve(l) > sky_curve(l - 1), "ระดับ {l} ต้องสว่างกว่าระดับก่อนหน้า");
+        }
+        assert!(sky_curve(0) > 0.0, "ระดับ 0 ต้องไม่ดำสนิท ไม่งั้นในถ้ำมองไม่เห็นรูปทรงเลย");
+        assert_eq!(sky_curve(crate::light::MAX_LIGHT), 1.0);
+    }
+
+    /// ตัดต้นไม้แล้วใบต้องร่วงตาม ไม่ลอยค้างกลางอากาศ
+    #[test]
+    fn leaves_fall_after_the_branch_holding_them_is_gone() {
+        let mut world = world_with_one_chunk();
+        world.set_block(8, 0, 8, BlockType::Dirt);
+
+        // ต้นเล็กๆ: กิ่งตั้ง 3 บล็อก + ใบครอบยอด
+        let stack: Vec<IVec3> = (1..=3).map(|y| IVec3::new(8, y, 8)).collect();
+        for p in &stack {
+            set_block_edit(&mut world, *p, BlockType::Branch);
+        }
+        let mut leaves = Vec::new();
+        for dy in 0..=1 {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let l = IVec3::new(8 + dx, 3 + dy, 8 + dz);
+                    if world.get_block(l.x, l.y, l.z) == BlockType::Air {
+                        world.set_block(l.x, l.y, l.z, BlockType::Leaves);
+                        leaves.push(l);
+                    }
+                }
+            }
+        }
+        assert!(!leaves.is_empty());
+
+        // ทุบโคน → กิ่งบนร่วงตาม แล้วใบต้องร่วงตามอีกทอด
+        set_block_edit(&mut world, stack[0], BlockType::Air);
+
+        let mut app = app_with(world);
+        for _ in 0..24 {
+            app.update();
+        }
+
+        let world = app.world().resource::<VoxelWorld>();
+        for l in &leaves {
+            assert_eq!(
+                world.get_block(l.x, l.y, l.z),
+                BlockType::Air,
+                "{l} ยังลอยค้างอยู่"
+            );
+        }
+    }
+
+    /// ใบที่ผู้เล่นเอาไปสร้างบ้านไกลจากต้นไม้ ห้ามร่วงเองเพราะมีการแก้บล็อกข้างๆ
+    /// (คิว decay เติมเฉพาะตอนกิ่งถูกทำลายจริง ไม่ใช่ทุกครั้งที่บล็อกรอบๆ ขยับ)
+    #[test]
+    fn player_placed_leaves_far_from_trees_never_decay() {
+        let mut world = world_with_one_chunk();
+        let wall: Vec<IVec3> = (0..4).map(|i| IVec3::new(2 + i, 5, 2)).collect();
+        for p in &wall {
+            world.set_block(p.x, p.y, p.z, BlockType::Leaves);
+        }
+        // ขยับบล็อกติดกำแพงใบ — ไม่เกี่ยวกับกิ่งเลย
+        set_block_edit(&mut world, IVec3::new(2, 4, 2), BlockType::Stone);
+        set_block_edit(&mut world, IVec3::new(2, 4, 2), BlockType::Air);
+
+        let mut app = app_with(world);
+        for _ in 0..12 {
+            app.update();
+        }
+
+        let world = app.world().resource::<VoxelWorld>();
+        for p in &wall {
+            assert_eq!(
+                world.get_block(p.x, p.y, p.z),
+                BlockType::Leaves,
+                "{p} หายไปทั้งที่ไม่ได้เกี่ยวกับต้นไม้"
+            );
+        }
+    }
+
+    /// ใบที่ยังมีกิ่งอื่นค้ำอยู่ในระยะต้องอยู่ต่อ — ตัดกิ่งเดียวไม่ควรทำใบหายทั้งพุ่ม
+    #[test]
+    fn leaves_still_near_a_branch_survive() {
+        let mut world = world_with_one_chunk();
+        world.set_block(8, 0, 8, BlockType::Dirt);
+        for y in 1..=4 {
+            set_block_edit(&mut world, IVec3::new(8, y, 8), BlockType::Branch);
+        }
+        // กิ่งข้างยื่นออกไป แล้วมีใบเกาะที่ปลาย
+        set_block_edit(&mut world, IVec3::new(9, 4, 8), BlockType::Branch);
+        let leaf = IVec3::new(10, 4, 8);
+        world.set_block(leaf.x, leaf.y, leaf.z, BlockType::Leaves);
+
+        // ทุบเฉพาะกิ่งข้าง — ลำต้นยังอยู่และอยู่ในระยะเกาะของใบ
+        set_block_edit(&mut world, IVec3::new(9, 4, 8), BlockType::Air);
+
+        let mut app = app_with(world);
+        for _ in 0..12 {
+            app.update();
+        }
+
+        let world = app.world().resource::<VoxelWorld>();
+        assert_eq!(
+            world.get_block(leaf.x, leaf.y, leaf.z),
+            BlockType::Leaves,
+            "ใบยังอยู่ในระยะลำต้น ไม่ควรร่วง"
+        );
+    }
+
+    /// วางกิ่งติดเพื่อนบ้านหลายตัว ต้องเลือกตัวที่หนาที่สุดเป็น parent
+    /// ไม่ใช่ตัวแรกที่เจอตามลำดับทิศ (NEG_Y, Y, X, ...) และกิ่งลอยเดี่ยวต้องผอม
+    #[test]
+    fn branch_parent_pick_prefers_thickest_neighbour() {
+        let mut world = world_with_one_chunk();
+
+        // เพื่อนบ้านฝั่ง Y: ลอยกลางอากาศ = root ผอม (มาก่อนในลำดับทิศ)
+        let thin = IVec3::new(5, 6, 5);
+        set_block_edit(&mut world, thin, BlockType::Branch);
+        assert_eq!(world.branch_network.thickness_at(thin), Some(crate::tree::LOOSE_THICKNESS));
+
+        // เพื่อนบ้านฝั่ง X: งอกจากดิน = ลำต้นหนา (มาทีหลังในลำดับทิศ)
+        world.set_block(6, 4, 5, BlockType::Dirt);
+        let trunk = IVec3::new(6, 5, 5);
+        set_block_edit(&mut world, trunk, BlockType::Branch);
+        assert_eq!(world.branch_network.thickness_at(trunk), Some(crate::tree::TRUNK_THICKNESS));
+
+        let joint = IVec3::new(5, 5, 5);
+        set_block_edit(&mut world, joint, BlockType::Branch);
+        assert_eq!(world.branch_network.nodes[&joint].parent_pos, Some(trunk));
+
+        // ลอยเดี่ยวไม่ติดอะไรเลย — ต้องผอม ไม่ใช่อ้วนเท่าลำต้นเหมือนเดิม
+        let loose = IVec3::new(12, 8, 12);
+        set_block_edit(&mut world, loose, BlockType::Branch);
+        assert_eq!(world.branch_network.thickness_at(loose), Some(crate::tree::LOOSE_THICKNESS));
     }
 
     /// คณิตบัญชีสระ: ความจุสะสม + solve ระดับผิวจากปริมาตร ต้อง invertible
@@ -6481,7 +8470,7 @@ mod tests {
         ];
 
         let chunk_pos = IVec2::new(3, -2);
-        let full = create_mesh_from_blocks(chunk_pos, &main, &neighbors, None, None);
+        let full = create_mesh_from_blocks(chunk_pos, &main, &neighbors, None, None, None, None);
         let (water, observed) = create_water_mesh(chunk_pos, &main, &neighbors, 0, CHUNK_HEIGHT - 1);
 
         assert!(!full.water.positions.is_empty(), "ฉากทดสอบต้องมีหน้าน้ำจริง");

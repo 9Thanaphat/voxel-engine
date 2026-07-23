@@ -50,6 +50,9 @@ pub enum ServerMessage {
         chiseled: Vec<(u32, Vec<u8>)>,
         facings: Vec<(u32, u8)>,
         containers: Vec<(u32, u8, Vec<Option<crate::item::WireItemStack>>)>,
+        /// โครงกิ่งของ chunk — client generate chunk ที่ไม่มี edit เองจาก seed เดียวกัน
+        /// จึงได้โครงตรงกันอยู่แล้ว แต่ chunk ที่ host แก้ไปแล้วต้องส่งของจริงมาให้
+        branches: Vec<crate::tree::BranchRecord>,
     },
     BlockEditBatch { edits: Vec<BlockEdit> },
     PlayerJoined { client_id: u64, player_number: u32 },
@@ -213,6 +216,7 @@ pub struct ReceivedChunk {
     pub facings: HashMap<usize, u8>,
     pub chest_slots: HashMap<usize, Box<[Option<crate::voxel::ItemStack>; 27]>>,
     pub furnace_slots: HashMap<usize, Box<[Option<crate::voxel::ItemStack>; 3]>>,
+    pub branches: Vec<crate::tree::BranchRecord>,
 }
 
 /// สถานะฝั่ง client
@@ -888,6 +892,9 @@ pub fn host_send_queued_chunks(
                         .collect(),
                     facings: Vec::new(),
                     containers: Vec::new(),
+                    branches: world
+                        .branch_network
+                        .chunk_records(chunk_pos, crate::voxel::CHUNK_WIDTH as i32),
                 }
             } else if let Some(bytes) = crate::voxel::load_chunk_bytes(chunk_pos) {
                 // chunk ไม่ได้โหลดบน host แต่มีไฟล์เซฟ — ส่งจาก disk
@@ -898,6 +905,7 @@ pub fn host_send_queued_chunks(
                     chiseled: Vec::new(),
                     facings: Vec::new(),
                     containers: Vec::new(),
+                    branches: crate::voxel::load_chunk_tree(chunk_pos),
                 }
             } else {
                 continue; // dirty entry ที่ไม่มีข้อมูลแล้ว (เช่นไฟล์ถูกลบ)
@@ -999,7 +1007,7 @@ pub fn client_receive_messages(
                 next_state.set(crate::GameState::InGame);
                 // avatar ของ host และผู้เล่นคนอื่นจะมาถึงเป็น PlayerJoined ต่อจากนี้
             }
-            Some(ServerMessage::ChunkData { chunk_pos, blocks_rle, chiseled, facings, containers }) => {
+            Some(ServerMessage::ChunkData { chunk_pos, blocks_rle, chiseled, facings, containers, branches }) => {
                 let pos = IVec2::from_array(chunk_pos);
                 let Some(blocks) = rle_decode(&blocks_rle) else {
                     warn!("ChunkData {pos:?} decode ไม่ผ่าน — ทิ้ง");
@@ -1020,8 +1028,13 @@ pub fn client_receive_messages(
                     chunk.chiseled_blocks = chiseled_map.clone();
                     chunk_remesh.0.push(pos);
                 }
+                // โครงกิ่งของ chunk นี้เป็นของ host — ทิ้งของเดิมก่อนแล้วรับของใหม่
+                world.branch_network.evict_chunk(pos, crate::voxel::CHUNK_WIDTH as i32);
+                world.branch_network.merge_records(&branches);
+
                 client_sync.full_chunks.insert(pos, ReceivedChunk {
                     blocks,
+                    branches,
                     chiseled: chiseled_map,
                     facings: facings.into_iter().map(|(i, f)| (i as usize, f)).collect(),
                     chest_slots: containers.iter().filter(|(_, k, _)| *k == 0).map(|(i, _, slots)| {

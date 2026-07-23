@@ -93,8 +93,13 @@ fn aabb_collides(world: &VoxelWorld, feet: Vec3) -> bool {
                     continue;
                 }
                 // บล็อกส่วนใหญ่เป็นคิวบ์เต็ม [0,0,0]..[1,1,1] — บล็อกรูปทรงพิเศษ (เช่น
-                // Campfire) มีกล่อง collision เล็กกว่าจริง (ดู block_collision_box)
-                let (bmin_local, bmax_local) = crate::voxel::block_collision_box(block);
+                // Campfire) มีกล่อง collision เล็กกว่าจริง และ Branch ขึ้นกับทิศที่ต่อกัน
+                // (ดู block_collision_box_at)
+                let (bmin_local, bmax_local) = crate::voxel::block_collision_box_at(
+                    world,
+                    IVec3::new(bx, by, bz),
+                    block,
+                );
                 let base = Vec3::new(bx as f32, by as f32, bz as f32);
                 let bmin = base + bmin_local;
                 let bmax = base + bmax_local;

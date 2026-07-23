@@ -1349,9 +1349,7 @@ pub fn container_click_system(
                 oc.pos.x.div_euclid(crate::voxel::CHUNK_WIDTH as i32),
                 oc.pos.z.div_euclid(crate::voxel::CHUNK_WIDTH as i32),
             );
-            if let Some(chunk) = world.chunks.get(&cp) {
-                crate::voxel::save_chunk_full(cp, chunk);
-            }
+            crate::voxel::save_loaded_chunk(&world, cp);
         }
         return;
     }
