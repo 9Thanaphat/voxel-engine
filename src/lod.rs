@@ -157,6 +157,7 @@ pub fn setup_lod(mut commands: Commands, mut materials: ResMut<Assets<StandardMa
         receiver: Mutex::new(r),
         material: materials.add(StandardMaterial {
             base_color: Color::WHITE, // สีจาก vertex color
+            unlit: true, // เข้าชุดกับบล็อกใกล้ (unlit + vertex sky light)
             perceptual_roughness: 1.0,
             ..default()
         }),

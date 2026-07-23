@@ -382,6 +382,7 @@ fn main() {
                     // แสงต้องคำนวณก่อน chunk ถูก mesh ครั้งแรก ไม่งั้นจะ mesh ตอนยังมืด
                     voxel::relight_system.before(voxel::world_generation_system),
                     voxel::branch_remesh_system.after(voxel::block_update_system),
+                    voxel::advance_time_system.before(voxel::update_sun_system),
                 ),
             ).run_if(in_state(GameState::InGame)),
         )

@@ -163,7 +163,7 @@ pub const BLOCK_DEFS: [BlockDef; 36] = [
     BlockDef { name: "Stone", color: [0.5, 0.5, 0.5, 1.0], solid: true, transparent: false, emission: None, hardness: 6.0,
         tex_top: &["textures/stone.png"], tex_side: &["textures/stone.png"], tex_bottom: &["textures/stone.png"],
         overlay_side: &[] },
-    BlockDef { name: "Water", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 3.2,
+    BlockDef { name: "Water", color: [0.25, 0.5, 0.85, 1.0], solid: false, transparent: true, emission: None, hardness: 3.2,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
     BlockDef { name: "Wood", color: [0.4, 0.3, 0.2, 1.0], solid: true, transparent: false, emission: None, hardness: 3.0,
         tex_top: &["textures/wood_top.png"], tex_side: &["textures/wood_side.png"],
@@ -191,21 +191,21 @@ pub const BLOCK_DEFS: [BlockDef; 36] = [
         tex_top: &[], tex_side: &["textures/grass.png"], tex_bottom: &[], overlay_side: &[] },
     BlockDef { name: "Chiseled", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None, hardness: 1.0,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water1", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 0.4,
+    BlockDef { name: "Water1", color: [0.25, 0.5, 0.85, 1.0], solid: false, transparent: true, emission: None, hardness: 0.4,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water2", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 0.8,
+    BlockDef { name: "Water2", color: [0.25, 0.5, 0.85, 1.0], solid: false, transparent: true, emission: None, hardness: 0.8,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water3", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 1.2,
+    BlockDef { name: "Water3", color: [0.25, 0.5, 0.85, 1.0], solid: false, transparent: true, emission: None, hardness: 1.2,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water4", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 1.6,
+    BlockDef { name: "Water4", color: [0.25, 0.5, 0.85, 1.0], solid: false, transparent: true, emission: None, hardness: 1.6,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water5", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 2.0,
+    BlockDef { name: "Water5", color: [0.25, 0.5, 0.85, 1.0], solid: false, transparent: true, emission: None, hardness: 2.0,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water6", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 2.4,
+    BlockDef { name: "Water6", color: [0.25, 0.5, 0.85, 1.0], solid: false, transparent: true, emission: None, hardness: 2.4,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water7", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 2.8,
+    BlockDef { name: "Water7", color: [0.25, 0.5, 0.85, 1.0], solid: false, transparent: true, emission: None, hardness: 2.8,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Water8", color: [0.1, 0.3, 0.8, 1.0], solid: false, transparent: true, emission: None, hardness: 3.2,
+    BlockDef { name: "Water8", color: [0.25, 0.5, 0.85, 1.0], solid: false, transparent: true, emission: None, hardness: 3.2,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
     BlockDef { name: "TNT", color: [0.8, 0.2, 0.15, 1.0], solid: true, transparent: false, emission: None, hardness: 0.5,
         tex_top: &["textures/tnt.png"], tex_side: &["textures/tnt.png"], tex_bottom: &["textures/tnt.png"],
@@ -1104,8 +1104,16 @@ fn texture_buf<'a>(bufs: &'a mut Vec<(&'static str, MeshBuf)>, tex: &'static str
 ///
 /// ลำดับ neighbors: [+X, -X, +Z, -Z, +X+Z, +X-Z, -X+Z, -X-Z]
 /// (แนวทแยงจำเป็นสำหรับ vertex AO ที่มุม chunk)
-/// ความมืดสูงสุดของสีน้ำลึก (0 = ไม่ไล่สี, 0.45 = ลึกสุดเหลือ 55% ความสว่าง)
-const WATER_DEPTH_DARKEN: f32 = 0.45;
+/// ความมืดสูงสุดของสีน้ำลึก (0 = ไม่ไล่สี, 0.18 = ลึกสุดเหลือ 82% ความสว่าง)
+/// ต่ำ = น้ำลึกไม่ทึบดำ มองทะลุเห็นพื้นได้
+const WATER_DEPTH_DARKEN: f32 = 0.18;
+/// ผิวน้ำเต็ม (source) ต่ำกว่าขอบบล็อกเล็กน้อยแบบ Minecraft — เฉพาะผิวบนสุดที่มีอากาศ
+/// อยู่เหนือ (น้ำที่มีน้ำทับด้านบนยังเต็มความสูง เพราะ return ก่อนถึงตรงนี้)
+const WATER_SURFACE_DROP: f32 = 0.1;
+/// ความโปร่งของน้ำ อยู่ที่ **vertex alpha** ไม่ใช่ base_color ของ material —
+/// material เป็น unlit + mesh มี vertex color ดังนั้น bevy ใช้ alpha จาก vertex
+/// (ลด base_color.alpha ไม่มีผล) 0 = ใสสุด, 1 = ทึบตัน
+const WATER_ALPHA: f32 = 0.4;
 /// จำนวนชั้นน้ำที่นับว่า "ลึกสุด" สำหรับการไล่สี
 const WATER_DEPTH_RANGE: i32 = 8;
 
@@ -1144,7 +1152,8 @@ fn water_corner_info(
                     BlockType::Water3 => 0.625,
                     BlockType::Water2 => 0.75,
                     BlockType::Water1 => 0.875,
-                    _ => 0.0,
+                    // น้ำเต็ม (source) — ผิวต่ำกว่าขอบบล็อกนิดเดียวแบบ Minecraft
+                    _ => WATER_SURFACE_DROP,
                 };
                 let mut d = 0i32;
                 while d < WATER_DEPTH_RANGE && sample(cx + dx, vy - d, cz + dz).is_water() {
@@ -1487,7 +1496,8 @@ pub fn create_mesh_from_blocks(
                             let br = shade * AO_CURVE[ao[i] as usize] * sky_curve(lit[i]);
                             // น้ำลึกสีเข้มกว่า (corner_depth = 0 สำหรับบล็อกอื่น)
                             let tint = 1.0 - WATER_DEPTH_DARKEN * corner_depth[i];
-                            cols[i] = [base[0] * br * tint, base[1] * br * tint, base[2] * br * tint, base[3]];
+                            let a = if is_w { WATER_ALPHA } else { base[3] };
+                            cols[i] = [base[0] * br * tint, base[1] * br * tint, base[2] * br * tint, a];
                             uvs[i] = face_uv(verts[i]);
                         }
                         let flip = (ao[0] as u32 + ao[2] as u32) < (ao[1] as u32 + ao[3] as u32);
@@ -2526,7 +2536,8 @@ pub fn create_water_mesh(
                         if p[1] > 0.5 { verts[i][1] -= corner_drop[i]; }
                         let br = shade * AO_CURVE[ao[i] as usize];
                         let tint = 1.0 - WATER_DEPTH_DARKEN * corner_depth[i];
-                        cols[i] = [base[0] * br * tint, base[1] * br * tint, base[2] * br * tint, base[3]];
+                        // create_water_mesh วาดเฉพาะน้ำ → alpha ที่ vertex เสมอ (ดู WATER_ALPHA)
+                        cols[i] = [base[0] * br * tint, base[1] * br * tint, base[2] * br * tint, WATER_ALPHA];
                         uvs[i] = face_uv(verts[i]);
                     }
                     let flip = (ao[0] as u32 + ao[2] as u32) < (ao[1] as u32 + ao[3] as u32);
@@ -3047,6 +3058,10 @@ pub fn setup_voxel(
                         materials.add(StandardMaterial {
                             base_color: Color::WHITE,
                             base_color_texture: Some(asset_server.load(*path)),
+                            // unlit: ความสว่างมาจาก vertex sky light ล้วน (แบบ Minecraft)
+                            // ไม่ผ่าน PBR lighting — ไม่งั้นต้องมี DirectionalLight/ambient สูง
+                            // และการเปลี่ยน ambient จะทำให้ทั้งฉาก re-extract → วูบ
+                            unlit: true,
                             perceptual_roughness: 1.0,
                             ..default()
                         })
@@ -3063,6 +3078,7 @@ pub fn setup_voxel(
 
     let material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
+        unlit: true,
         perceptual_roughness: 1.0,
         ..default()
     });
@@ -3070,17 +3086,21 @@ pub fn setup_voxel(
 
     // สีน้ำมาจาก vertex color — material เป็นสีขาวโปร่งใสคูณทับ
     let water_material = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 1.0, 1.0, 0.55),
+        // alpha จริงมาจาก vertex color (WATER_ALPHA) เพราะ unlit+vertex-colored ใช้ alpha
+        // ของ vertex — ตั้ง base_color alpha 1.0 ไว้ ไม่งั้นเข้าใจผิดว่าคุมความโปร่งที่นี่
+        base_color: Color::WHITE,
         alpha_mode: AlphaMode::Blend,
+        unlit: true,
         perceptual_roughness: 0.15,
         ..default()
     });
     commands.insert_resource(WaterMaterial(water_material));
 
-    // กระจก: โปร่งใสกว่าน้ำ ผิวเรียบสะท้อนแสง
+    // กระจก: โปร่งใสกว่าน้ำ
     let glass_material = materials.add(StandardMaterial {
         base_color: Color::srgba(0.80, 0.90, 1.0, 0.30),
         alpha_mode: AlphaMode::Blend,
+        unlit: true,
         perceptual_roughness: 0.08,
         ..default()
     });
@@ -3117,6 +3137,7 @@ pub fn setup_voxel(
                 base_color: Color::WHITE,
                 base_color_texture: Some(asset_server.load(path)),
                 alpha_mode: AlphaMode::Mask(0.5),
+                unlit: true,
                 cull_mode: None,
                 double_sided: true,
                 perceptual_roughness: 1.0,
@@ -3175,6 +3196,26 @@ pub fn setup_voxel(
 #[derive(Component)]
 pub struct Sun;
 
+/// ความยาววันจริง (วินาที) ที่เวลาในเกมเดินครบ 24 ชม. — 20 นาทีเท่า Minecraft
+const GAME_DAY_SECONDS: f32 = 1200.0;
+
+/// เดินเวลาของวันอัตโนมัติ (day-night cycle) — host/single เท่านั้น
+/// client รับเวลาจาก host ผ่าน TimeOfDay message (ดู network.rs) จึงไม่เดินเอง
+pub fn advance_time_system(
+    time: Res<Time>,
+    mut settings: ResMut<crate::GameSettings>,
+    net_client: Option<Res<bevy_renet::RenetClient>>,
+) {
+    if net_client.is_some() {
+        return;
+    }
+    let mut t = settings.time_of_day + time.delta_secs() * 24.0 / GAME_DAY_SECONDS;
+    if t >= 24.0 {
+        t -= 24.0;
+    }
+    settings.time_of_day = t;
+}
+
 /// ความแรงแดดตามเวลา — คูณกับ sky light ที่อบไว้ใน vertex color
 /// แยกออกมาให้ระบบ tint material เรียกใช้ค่าเดียวกันทุกที่
 pub fn sun_tint(time_of_day: f32) -> (f32, Color) {
@@ -3208,22 +3249,26 @@ pub fn update_sun_system(
     glass_mat: Option<Res<GlassMaterial>>,
     water_mat: Option<Res<WaterMaterial>>,
     lod: Option<Res<crate::lod::LodTiles>>,
-    mut last_tint: Local<Option<Color>>,
+    mut last: Local<Option<(f32, bool)>>,
 ) {
+    // **Gate ทั้งฟังก์ชันบนสุด** — day-night ทำให้เวลาเดินทุกเฟรม ถ้าเขียน material/
+    // clear_color ทุกเฟรม bevy จะ re-extract asset ใหม่ทุกเฟรม (เปลืองและเคยทำภาพวูบ)
+    // จึงอัปเดตเฉพาะเมื่อเวลาขยับพอสังเกต (~1 วิจริง) หรือ material เพิ่งพร้อม —
+    // day-night ยังลื่นพอเพราะ base_color เปลี่ยนทีละน้อยอยู่แล้ว
+    let material_ready = chunk_mat.is_some();
+    if let Some((last_time, last_ready)) = *last {
+        if last_ready == material_ready && (settings.time_of_day - last_time).abs() < 0.02 {
+            return;
+        }
+    }
+    *last = Some((settings.time_of_day, material_ready));
+
     let (elevation, tint) = sun_tint(settings.time_of_day);
 
-    // ambient เหลือแค่พื้นบางๆ — ถ้าสูงเท่าเดิม (80-400) ถ้ำจะไม่มืดเพราะ vertex light
-    // ถูกกลบหมด
+    // ambient เหลือแค่พื้นบางๆ — ถ้าสูงเท่าเดิม (80-400) ถ้ำจะไม่มืดเพราะ vertex light ถูกกลบ
     for mut ambient in ambient_query.iter_mut() {
         ambient.brightness = 8.0 + 40.0 * elevation;
     }
-
-    // เขียน material เฉพาะตอนสีเปลี่ยนจริง — การแตะ asset ทุกเฟรมทำให้ bevy re-extract
-    // material ทุกตัวใหม่ทุกเฟรมโดยเปล่าประโยชน์ (เวลาในเกมเดินช้ากว่าเฟรมเรตมาก)
-    if last_tint.map(|c| c.to_linear()) == Some(tint.to_linear()) {
-        return;
-    }
-    *last_tint = Some(tint);
 
     // material ที่รับแสงจากฟ้า — คูณ tint เข้า base_color
     // (LampMaterials ไม่อยู่ในลิสต์: emissive ต้องสว่างเท่าเดิมตอนกลางคืน)
