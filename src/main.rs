@@ -14,6 +14,8 @@ mod command;
 pub mod light;
 pub mod tree;
 mod sky;
+mod audio;
+mod weather;
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RenderMode {
@@ -73,7 +75,8 @@ pub struct GameSettings {
     pub nuke_fuse_seconds: f32,
     /// ภูมิประเทศระยะไกล (LOD แบบ Distant Horizons)
     pub lod_enabled: bool,
-    pub lod_distance_m: f32,
+    /// ระยะ LOD หน่วย "chunk" (เท่ากับ render distance) — × CHUNK_WIDTH = บล็อก/เมตร
+    pub lod_distance_chunks: i32,
     /// เข้าเกมผ่านเมนู Dev Mode — เปิดหน้าต่าง Game Settings เต็ม (สไลเดอร์ noise,
     /// Regenerate, wireframe ฯลฯ) ส่วนโลกปกติเห็นแค่ Options พื้นฐานตอนกด ESC
     pub dev_mode: bool,
@@ -100,8 +103,8 @@ impl Default for GameSettings {
             show_tnt_rays: false,
             nuke_yield: 500.0,
             nuke_fuse_seconds: 5.0,
-            lod_enabled: false,
-            lod_distance_m: 33_000.0,
+            lod_enabled: true,
+            lod_distance_chunks: 2048, // ×16 ≈ 33 กม.
             dev_mode: false,
         }
     }
@@ -196,7 +199,41 @@ fn setup_cluster_settings(mut settings: ResMut<bevy_light::cluster::GlobalCluste
     settings.gpu_clustering = None;
 }
 
+/// panic hook: เขียน crash_log.txt ให้ชัดว่าเกิดอะไร (ส่วนใหญ่คือ GPU DeviceLost)
+/// แล้วเรียก hook เดิมต่อ (ยังได้ backtrace บน stderr) — เกมจะไม่เด้งแบบเงียบอีก
+fn install_crash_handler() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string());
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let report = format!(
+            "\n===== CRASH (unix {secs}) =====\n{msg}\nat {loc}\n\
+             อาจเป็น GPU DeviceLost (การ์ดจอหมด VRAM) — ถ้าเกิดตอน render distance สูง\n\
+             ให้ลด Render Distance ใน Settings (LOD เห็นไกลได้โดยไม่ต้องโหลด chunk เยอะ)\n",
+        );
+        use std::io::Write;
+        let path = crate::voxel::project_root().join("crash_log.txt");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = f.write_all(report.as_bytes());
+        }
+        default(info);
+    }));
+}
+
 fn main() {
+    install_crash_handler();
     // โหมดโหลด DEM: `voxel-game --build-dem <lat0> <lat1> <lon0> <lon1>` แล้วจบ
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--build-dem") {
@@ -282,6 +319,8 @@ fn main() {
             bevy_hanabi::HanabiPlugin,
             item::ItemPlugin,
             sky::SkyPlugin,
+            audio::AudioPlugin,
+            weather::WeatherPlugin,
         ))
         .init_state::<GameState>()
         .add_message::<particles::BlockFx>()
@@ -377,6 +416,7 @@ fn main() {
                 voxel::nuke_apply_system.run_if(network::is_not_client),
                 voxel::explosion_debug_system,
                 lod::update_lod_tiles,
+                lod::hide_near_overlay,
                 dem::dem_stream_system,
                 voxel::start_icon_bake,
                 voxel::finish_icon_bake,

@@ -14,10 +14,12 @@ use crate::voxel::{block_color, BlockType, MeshBuf, TerrainSampler, SEA_LEVEL};
 
 /// วงแหวน LOD: (ขนาด cell เมตร, ขนาด tile บล็อก, รัศมีบล็อก)
 /// tile ของวงละเอียดซ้อน "ใต้" chunk จริงด้วย (offset y ลบ) — ไม่มีรูตอน chunk โหลด/หาย
-const LOD_RINGS: [(f32, i32, f32); 3] = [
+const LOD_RINGS: [(f32, i32, f32); 5] = [
+    (2.0, 128, 400.0),    // ละเอียดสุด ชิด chunk จริง — silhouette เกือบเท่าบล็อกจริง
+    (4.0, 256, 900.0),    // ละเอียดนิด
     (8.0, 512, 2_500.0),
     (32.0, 2048, 10_000.0),
-    (128.0, 8192, 33_000.0),
+    (128.0, 8192, 33_000.0), // หยาบสุด (ระยะไกลมาก)
 ];
 /// จมใต้ระดับจริงเล็กน้อย — chunk จริง/วงละเอียดกว่าวาดทับสนิท ไม่ z-fight
 const LOD_Y_OFFSET: f32 = -1.5;
@@ -95,14 +97,16 @@ impl HeightSource {
     }
 
     /// สีหน้าบนของ "บล็อกหยาบ": น้ำ (OSM) → สีน้ำ, ไม่งั้นหญ้า/ทราย ให้ตรง palette
-    /// กับ chunk ใกล้ๆ (หญ้า = สีเฉลี่ย texture LOD_GRASS, ทราย/น้ำ = block_color)
+    /// กับ chunk ใกล้ๆ (หญ้า = สีเฉลี่ย texture lod_grass(), ทราย/น้ำ = block_color)
     fn top_color(&self, wx: f64, wz: f64, h: f32) -> [f32; 4] {
         if self.is_water(wx, wz) {
             block_color(BlockType::Water)
         } else if self.is_sandy(wx, wz, h) {
             block_color(BlockType::Sand)
         } else {
-            LOD_GRASS
+            // หญ้า + แต้มป่าเป็นหย่อม (เขียวเข้มลง) ให้ไกลๆ อ่านออกว่ามีต้นไม้
+            let f = forest_amount(wx, wz);
+            lerp4(lod_grass(), lod_forest(), f * 0.8)
         }
     }
 }
@@ -112,6 +116,13 @@ pub struct LodTileResult {
     coord: IVec2,
     version: u32,
     buf: MeshBuf,
+    overlay: MeshBuf,
+}
+
+/// overlay (น้ำ/ต้นไม้) ของ tile — ซ่อนเมื่ออยู่ในเขต chunk จริง (เก็บ center world ไว้เช็คระยะ)
+#[derive(Component)]
+pub struct LodOverlay {
+    center: Vec2,
 }
 
 #[derive(Resource)]
@@ -148,7 +159,32 @@ pub fn clear_lod_on_exit(mut commands: Commands, mut lod: ResMut<LodTiles>) {
     lod.last_spec = None;
 }
 
+/// ซ่อน overlay (น้ำ/ต้นไม้) ของ LOD ในเขต chunk จริง — chunk เรนเดอร์ของจริงแทน
+/// แก้บั๊ก LOD น้ำค้างทับใน chunk ที่โหลดแล้ว + กันต้นไม้ LOD ทะลุ chunk จริง
+pub fn hide_near_overlay(
+    settings: Res<crate::GameSettings>,
+    camera: Query<&Transform, With<crate::camera::FreeCamera>>,
+    mut q: Query<(&LodOverlay, &mut Visibility)>,
+) {
+    let Ok(cam) = camera.single() else { return };
+    let cam2 = Vec2::new(cam.translation.x, cam.translation.z);
+    // ซ่อนในรัศมี chunk จริง + margin เล็กน้อย (นอกนั้นให้ LOD overlay โชว์)
+    let hide_r = settings.render_distance as f32 * crate::voxel::CHUNK_WIDTH as f32 + 48.0;
+    let hide_r2 = hide_r * hide_r;
+    for (ov, mut vis) in &mut q {
+        let want = if ov.center.distance_squared(cam2) < hide_r2 {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        if *vis != want {
+            *vis = want;
+        }
+    }
+}
+
 pub fn setup_lod(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
+    let _ = lod_grass(); // อ่านค่าเฉลี่ยสีหญ้าจาก texture ครั้งเดียวตอนนี้ (task ไม่ต้องสะดุด)
     let (s, r) = mpsc::channel();
     commands.insert_resource(LodTiles {
         tiles: HashMap::new(),
@@ -159,6 +195,9 @@ pub fn setup_lod(mut commands: Commands, mut materials: ResMut<Assets<StandardMa
             base_color: Color::WHITE, // สีจาก vertex color
             unlit: true, // เข้าชุดกับบล็อกใกล้ (unlit + vertex sky light)
             perceptual_roughness: 1.0,
+            // double-sided: ต้นไม้ LOD (กล่อง) ไม่ต้องกังวลทิศ winding + heightfield มองจากบน/ข้างพอ
+            double_sided: true,
+            cull_mode: None,
             ..default()
         }),
         version: 0,
@@ -174,7 +213,81 @@ pub fn setup_lod(mut commands: Commands, mut materials: ResMut<Assets<StandardMa
 // LOD ต้องใช้ค่า linear เฉลี่ยของ texture ถึงสีตรงกับบล็อกใกล้ (grass_top จริง
 // เป็นเขียวอมฟ้า ไม่ใช่ [0.2,0.6,0.2] ตาม registry); sand/water ไม่มี texture
 // (ใช้ block_color อยู่แล้วทั้งใกล้และ LOD จึงตรงกันเอง)
-const LOD_GRASS: [f32; 4] = [0.053, 0.254, 0.241, 1.0];
+/// สีหญ้าสำหรับ LOD = ค่าเฉลี่ยจริงของ `grass_top.png` (linear) อ่านจากไฟล์ตอน startup
+/// → สีตรง texture อัตโนมัติ แก้ texture แล้วไม่ต้องมาแก้เลขเอง (fallback = ค่าที่เคยคำนวณไว้)
+static LOD_GRASS_CELL: std::sync::OnceLock<[f32; 4]> = std::sync::OnceLock::new();
+
+fn lod_grass() -> [f32; 4] {
+    *LOD_GRASS_CELL.get_or_init(|| {
+        avg_texture_linear("assets/textures/grass_top.png").unwrap_or([0.0608, 0.2643, 0.0079, 1.0])
+    })
+}
+
+/// พุ่มไม้ = หญ้าเข้มลง (คงโทนเขียว) — derive จากสีหญ้าจริง
+fn lod_forest() -> [f32; 4] {
+    let g = lod_grass();
+    [g[0] * 0.42, g[1] * 0.45, g[2] * 0.9, 1.0]
+}
+
+/// ค่าเฉลี่ยสี texture ในปริภูมิ linear (อ่าน PNG ด้วย crate image, sRGB→linear)
+fn avg_texture_linear(rel_path: &str) -> Option<[f32; 4]> {
+    let path = crate::voxel::project_root().join(rel_path);
+    let img = image::open(path).ok()?.to_rgba8();
+    let srgb_to_lin = |c: u8| -> f64 {
+        let c = c as f64 / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let (mut r, mut g, mut b, mut n) = (0f64, 0f64, 0f64, 0u64);
+    for px in img.pixels() {
+        r += srgb_to_lin(px[0]);
+        g += srgb_to_lin(px[1]);
+        b += srgb_to_lin(px[2]);
+        n += 1;
+    }
+    if n == 0 {
+        return None;
+    }
+    let n = n as f64;
+    Some([(r / n) as f32, (g / n) as f32, (b / n) as f32, 1.0])
+}
+
+fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+        a[3] + (b[3] - a[3]) * t,
+    ]
+}
+
+fn lod_smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn lod_hash2(x: f64, z: f64) -> f32 {
+    let n = (x * 127.1 + z * 311.7).sin() * 43758.5453;
+    (n - n.floor()) as f32
+}
+
+fn lod_vnoise2(x: f64, z: f64) -> f32 {
+    let (xi, zi) = (x.floor(), z.floor());
+    let (xf, zf) = ((x - xi) as f32, (z - zi) as f32);
+    let (u, v) = (xf * xf * (3.0 - 2.0 * xf), zf * zf * (3.0 - 2.0 * zf));
+    let a = lod_hash2(xi, zi);
+    let b = lod_hash2(xi + 1.0, zi);
+    let c = lod_hash2(xi, zi + 1.0);
+    let d = lod_hash2(xi + 1.0, zi + 1.0);
+    let ab = a + (b - a) * u;
+    let cd = c + (d - c) * u;
+    ab + (cd - ab) * v
+}
+
+/// สัดส่วนป่าปกคลุมเป็นหย่อม 0..1 (approximation — ไม่ตรงต้นไม้จริงเป๊ะ แต่ไกลๆ อ่านออก)
+fn forest_amount(wx: f64, wz: f64) -> f32 {
+    let n = lod_vnoise2(wx * 0.006, wz * 0.006) * 0.65 + lod_vnoise2(wx * 0.02, wz * 0.02) * 0.35;
+    lod_smoothstep(0.48, 0.72, n)
+}
 /// เงาประจำทิศ — ค่าตรงกับ FACE_SHADE ใน voxel.rs (top 1.0, +X/-X 0.8, +Z/-Z 0.6)
 /// ให้ความสว่างหน้าบล็อก LOD เท่าบล็อกใกล้ตัว (บล็อกหยาบใช้ flat shade ต่อหน้า
 /// ไม่ใช่ normal ต่อเนื่อง ไม่งั้นเสียคาแรกเตอร์ "บล็อก")
@@ -186,7 +299,9 @@ const SHADE_Z: f32 = 0.6;
 /// จริง: หนึ่งความสูงต่อหนึ่ง "บล็อกหยาบ" (เซลล์ = ก้อนเดียว ไม่ไล่เอียงเนียน)
 /// พื้นบนแบน + กำแพงขั้นบันไดตรงรอยต่อที่สูงต่างกัน ให้เห็นเป็นขั้นบล็อกแบบ
 /// เกมนี้ตอนมองใกล้ ไม่ใช่เนินโค้งมนแบบ terrain LOD ทั่วไป
-fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> MeshBuf {
+/// คืน (terrain, overlay) — overlay = น้ำ + ต้นไม้ ที่ระบบ hide_near_overlay ซ่อนในเขต chunk จริง
+/// (chunk จริงเรนเดอร์น้ำ/ต้นไม้ของจริงแทน — LOD overlay ไม่ทับให้ค้าง/ทะลุ)
+fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> (MeshBuf, MeshBuf) {
     let (cell, tile_size, _) = LOD_RINGS[ring];
     let n = (tile_size as f32 / cell) as usize; // จำนวน cell ต่อด้าน
     let origin_x = coord.x as f64 * tile_size as f64;
@@ -202,7 +317,8 @@ fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> MeshBuf {
     let mut hs = vec![0f32; n * n];
     for j in 0..n {
         for i in 0..n {
-            let base = if ring == 0 {
+            let base = if cell <= 4.0 {
+                // วงละเอียด (2m/4m) ทับ chunk จริง — ใช้ต่ำสุด 3×3 ให้จมใต้พื้นจริงทุกจุด
                 let mut m = f32::INFINITY;
                 for sj in 0..3 {
                     for si in 0..3 {
@@ -230,6 +346,7 @@ fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> MeshBuf {
 
     let water = block_color(BlockType::Water);
     let mut buf = MeshBuf::default();
+    let mut overlay = MeshBuf::default(); // น้ำ + ต้นไม้ (ซ่อนตอนใกล้ chunk จริง)
 
     for j in 0..n {
         for i in 0..n {
@@ -245,10 +362,19 @@ fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> MeshBuf {
             // บนไม่เห็น (เห็นทะลุ/พื้นหาย — บั๊ก "render สลับด้าน" ที่เจอมาก่อน)
             push_quad_flat(&mut buf, [[x0, h, z1], [x1, h, z1], [x1, h, z0], [x0, h, z0]], col);
 
-            // ผิวน้ำแบนที่ sea level เมื่อ cell จมน้ำ
+            // ผิวน้ำแบนที่ sea level เมื่อ cell จมน้ำ — เข้า overlay (ซ่อนใกล้ chunk จริง)
             if h < sea {
                 let wy = sea + LOD_Y_OFFSET + 0.5;
-                push_quad_flat(&mut buf, [[x0, wy, z1], [x1, wy, z1], [x1, wy, z0], [x0, wy, z0]], water);
+                push_quad_flat(&mut overlay, [[x0, wy, z1], [x1, wy, z1], [x1, wy, z0], [x0, wy, z0]], water);
+            }
+
+            // ต้นไม้บนหย่อมป่า (ข้ามทราย/ใต้น้ำ; เฉพาะวงใกล้ที่เห็นต้นชัด cell<=8 ~ ถึง 2.5km)
+            if cell <= 8.0 && h >= sea && !sandy_at(i, j) {
+                let f = forest_amount(wx, wz);
+                let g = lod_hash2(wx * 1.7 + 3.0, wz * 1.3 + 7.0);
+                if f > 0.4 && g < 0.22 * f {
+                    push_tree(&mut overlay, (x0 + x1) * 0.5, (z0 + z1) * 0.5, h);
+                }
             }
 
             // กำแพงขั้นบันไดตรงรอยต่อ +X และ +Z เท่านั้น (พอ — ขอบ -X/-Z ของ
@@ -292,11 +418,61 @@ fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> MeshBuf {
         push_riser_layered(&mut buf, false, t, x0, x1, h - drop, h, true, SHADE_Z, sandy_at(i, n - 1));
     }
 
-    buf
+    (buf, overlay)
 }
 
-/// กำแพงตั้งของ "บล็อก" — ใช้สีผิว (หญ้า/ทราย) ทั้งหน้า ให้ทั้งก้อนดูเป็นบล็อก
-/// หญ้าเต็มๆ (ด้านข้างสีเดียวกับหน้าบน แค่ shade ตามทิศ) ไม่ใช่ดิน/หินแบบเดิม
+/// ต้นไม้ LOD: ลำต้น + กิ่งเฉียง + พุ่มใบแบบ crossed-billboard (ฟูเหมือนต้นไม้จริง
+/// ไม่ใช่กล่องทึบ) — double-sided material เลยเห็น quad ทั้งสองด้าน สัดส่วนตาม tree จริง (~10m)
+fn push_tree(buf: &mut MeshBuf, cx: f32, cz: f32, ground: f32) {
+    let trunk_h = 5.0;
+    let r = 2.6; // รัศมีพุ่มใบ
+    let wood = block_color(BlockType::Wood);
+    let leaf = block_color(BlockType::Leaves);
+
+    // ลำต้น (กล่องบางน้ำตาล)
+    push_box(buf, cx, cz, ground, ground + trunk_h + 1.0, 0.4, wood);
+
+    // กิ่งเฉียง 3 ทิศ (ribbon บางสีไม้) ใกล้ยอดต้น
+    let by = ground + trunk_h * 0.65;
+    push_branch(buf, cx, by, cz, 1.0, 0.0, r, wood);
+    push_branch(buf, cx, by + 0.6, cz, -0.7, 0.7, r, wood);
+    push_branch(buf, cx, by + 0.3, cz, -0.3, -0.9, r, wood);
+
+    // พุ่มใบ: 2 quad ตั้งฉากกัน + 1 quad นอนบน = มวลฟู
+    let cy = ground + trunk_h + r * 0.7;
+    push_quad_flat(buf, [[cx - r, cy - r, cz], [cx + r, cy - r, cz], [cx + r, cy + r, cz], [cx - r, cy + r, cz]], shade(leaf, SHADE_TOP));
+    push_quad_flat(buf, [[cx, cy - r, cz - r], [cx, cy - r, cz + r], [cx, cy + r, cz + r], [cx, cy + r, cz - r]], shade(leaf, SHADE_X));
+    let ry = cy + r * 0.55;
+    push_quad_flat(buf, [[cx - r * 0.8, ry, cz - r * 0.8], [cx + r * 0.8, ry, cz - r * 0.8], [cx + r * 0.8, ry, cz + r * 0.8], [cx - r * 0.8, ry, cz + r * 0.8]], shade(leaf, 0.9));
+}
+
+/// กิ่งเฉียง — ribbon quad บางจากลำต้นยื่นออก-ขึ้น (dx,dz = ทิศแนวราบ)
+fn push_branch(buf: &mut MeshBuf, x: f32, y: f32, z: f32, dx: f32, dz: f32, len: f32, col: [f32; 4]) {
+    let (ex, ey, ez) = (x + dx * len, y + len * 0.55, z + dz * len);
+    let w = 0.18; // ความหนากิ่ง (ตั้งฉากแนวราบ)
+    let (px, pz) = (-dz * w, dx * w);
+    push_quad_flat(
+        buf,
+        [[x - px, y, z - pz], [x + px, y, z + pz], [ex + px, ey, ez + pz], [ex - px, ey, ez - pz]],
+        shade(col, SHADE_X),
+    );
+}
+
+/// กล่องทึบรอบ (cx,cz) กว้าง ±half สูง y0..y1 — 5 หน้า (บน + 4 ข้าง, ไม่ต้องพื้นล่าง)
+fn push_box(buf: &mut MeshBuf, cx: f32, cz: f32, y0: f32, y1: f32, half: f32, col: [f32; 4]) {
+    let (x0, x1, z0, z1) = (cx - half, cx + half, cz - half, cz + half);
+    let top = shade(col, SHADE_TOP);
+    let sx = shade(col, SHADE_X);
+    let sz = shade(col, SHADE_Z);
+    push_quad_flat(buf, [[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]], top);
+    push_quad_flat(buf, [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], sz);
+    push_quad_flat(buf, [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], sz);
+    push_quad_flat(buf, [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], sx);
+    push_quad_flat(buf, [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], sx);
+}
+
+/// กำแพงตั้งของหน้าผา LOD — ไล่สีตามชั้นดินจริงของ worldgen: ผิวบางบน (หญ้า/ทราย),
+/// ดิน 3 บล็อกถัดลงมา, หินที่เหลือ → ภูเขาสูงเห็นเป็นหน้าหิน ไม่ใช่พีระมิดเขียว
 fn push_riser_layered(
     buf: &mut MeshBuf,
     axis_x: bool,
@@ -309,8 +485,25 @@ fn push_riser_layered(
     shade_f: f32,
     sandy: bool,
 ) {
-    let col = shade(if sandy { block_color(BlockType::Sand) } else { LOD_GRASS }, shade_f);
-    push_riser(buf, axis_x, pos, s0, s1, y_lo, y_hi, positive, col);
+    let stone = shade(block_color(BlockType::Stone), shade_f);
+    let band = |buf: &mut MeshBuf, lo: f32, hi: f32, col: [f32; 4]| {
+        if hi > lo {
+            push_riser(buf, axis_x, pos, s0, s1, lo, hi, positive, col);
+        }
+    };
+    if sandy {
+        // ชายหาด/ทะเลทราย: ทรายหนา ~3 บล็อก แล้วหินล่าง
+        let sand_lo = (y_hi - 3.0).max(y_lo);
+        band(buf, y_lo, sand_lo, stone);
+        band(buf, sand_lo, y_hi, shade(block_color(BlockType::Sand), shade_f));
+    } else {
+        // หญ้า 1 + ดิน 3 + หิน ตาม worldgen (yi==h หญ้า, h-3..h ดิน, ต่ำกว่านั้นหิน)
+        let grass_lo = (y_hi - 1.0).max(y_lo);
+        let dirt_lo = (y_hi - 4.0).max(y_lo);
+        band(buf, y_lo, dirt_lo, stone);
+        band(buf, dirt_lo, grass_lo, shade(block_color(BlockType::Dirt), shade_f));
+        band(buf, grass_lo, y_hi, shade(lod_grass(), shade_f));
+    }
 }
 
 fn shade(col: [f32; 4], f: f32) -> [f32; 4] {
@@ -440,16 +633,30 @@ pub fn update_lod_tiles(
             continue; // ผลรุ่นเก่า (สลับโลกไปแล้ว) — ทิ้ง
         }
         let (_, tile_size, _) = LOD_RINGS[res.ring];
+        let origin = Vec3::new(
+            (res.coord.x * tile_size) as f32,
+            0.0,
+            (res.coord.y * tile_size) as f32,
+        );
+        let center = Vec2::new(origin.x + tile_size as f32 * 0.5, origin.z + tile_size as f32 * 0.5);
+        let has_overlay = !res.overlay.positions.is_empty();
+        let overlay_mesh = has_overlay.then(|| meshes.add(res.overlay.into_mesh()));
         let entity = commands
             .spawn((
                 Mesh3d(meshes.add(res.buf.into_mesh())),
                 MeshMaterial3d(lod.material.clone()),
-                Transform::from_xyz(
-                    (res.coord.x * tile_size) as f32,
-                    0.0,
-                    (res.coord.y * tile_size) as f32,
-                ),
+                Transform::from_translation(origin),
             ))
+            .with_children(|parent| {
+                if let Some(m) = overlay_mesh {
+                    parent.spawn((
+                        Mesh3d(m),
+                        MeshMaterial3d(lod.material.clone()),
+                        Transform::default(),
+                        LodOverlay { center },
+                    ));
+                }
+            })
             .id();
         lod.tiles.insert(key, entity);
         spawned += 1;
@@ -487,13 +694,14 @@ pub fn update_lod_tiles(
     let cam_pos = cam.translation;
 
     // ชุดที่ควรมี: ต่อวง เอา tile ที่ "ศูนย์กลางไกลกว่าวงใน" และอยู่ในรัศมีวง/สไลเดอร์
+    let lod_dist_blocks = (settings.lod_distance_chunks * crate::voxel::CHUNK_WIDTH as i32) as f32;
     let mut desired: HashSet<(usize, IVec2)> = HashSet::new();
     for (ring, (_cell, tile_size, radius)) in LOD_RINGS.iter().enumerate() {
-        let radius = radius.min(settings.lod_distance_m);
+        let radius = radius.min(lod_dist_blocks);
         if radius <= 0.0 {
             continue;
         }
-        let inner = if ring == 0 { 0.0 } else { LOD_RINGS[ring - 1].2.min(settings.lod_distance_m) };
+        let inner = if ring == 0 { 0.0 } else { LOD_RINGS[ring - 1].2.min(lod_dist_blocks) };
         let t = *tile_size as f32;
         let (min_tx, max_tx) = (
             ((cam_pos.x - radius) / t).floor() as i32,
@@ -556,8 +764,8 @@ pub fn update_lod_tiles(
         AsyncComputeTaskPool::get()
             .spawn(async move {
                 if let Some(source) = HeightSource::build(spec) {
-                    let buf = build_tile(&source, ring, coord);
-                    let _ = sender.send(LodTileResult { ring, coord, version, buf });
+                    let (buf, overlay) = build_tile(&source, ring, coord);
+                    let _ = sender.send(LodTileResult { ring, coord, version, buf, overlay });
                 }
             })
             .detach();

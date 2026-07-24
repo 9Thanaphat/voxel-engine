@@ -23,6 +23,8 @@ struct SkyUniform {
     star_ctrl: vec4<f32>,
     // x = twinkle_rate_base, y = twinkle_rate_range, z = milkyway_brightness, w = moon_size (รัศมีเชิงมุม)
     star_ctrl2: vec4<f32>,
+    // x = cloudiness (0..1), y = wind scroll, z = overcast/darken (0..1), w = สำรอง
+    cloud_ctrl: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> sky: SkyUniform;
@@ -230,6 +232,29 @@ fn fragment(in: VSOut) -> @location(0) vec4<f32> {
         let moon_body = vec3<f32>(0.92, 0.94, 1.0) * disc * (0.06 + 0.94 * phase) * maria;
         let moon_halo = pow(clamp(mcos, 0.0, 1.0), 2500.0) * 0.15;
         col += (moon_body + vec3<f32>(0.70, 0.75, 0.90) * moon_halo) * moon_vis;
+    }
+
+    // ---- เมฆ: layer บนสุด (บังดวงอาทิตย์/ดาวได้) ----
+    let cloudiness = sky.cloud_ctrl.x;
+    if (cloudiness > 0.001 && dir.y > 0.02) {
+        let wind = sky.cloud_ctrl.y;
+        // project ทิศลงระนาบเมฆ (ยิ่งใกล้ขอบฟ้ายิ่งยืด) + เลื่อนตามลม
+        let p = dir.xz / dir.y;
+        let uv = p * 0.35 + vec2<f32>(globals.time * wind, globals.time * wind * 0.35);
+        let d = fbm(vec3<f32>(uv, 0.0));
+        // coverage: cloudiness ดัน threshold ให้เมฆคลุมมากขึ้น
+        let cover = smoothstep(1.0 - cloudiness * 0.9 - 0.05, 1.0 - cloudiness * 0.9 + 0.20, d);
+        let horizon_fade = smoothstep(0.02, 0.22, dir.y);
+        let a = cover * horizon_fade;
+        // สีเมฆ: รับแสงดวงอาทิตย์ (ด้านที่หันหาดวงสว่างกว่า), กลางคืนเทาเข้ม, overcast เทาลง
+        let lit = clamp(dot(dir, sun_dir) * 0.5 + 0.5, 0.0, 1.0);
+        let day_amt = 1.0 - night;
+        var cloud_col = mix(vec3<f32>(0.55, 0.57, 0.63), vec3<f32>(1.0, 0.98, 0.95), lit)
+            * (0.30 + 0.70 * day_amt);
+        // แต้มสีดวงอาทิตย์ตอนเช้า/เย็นให้ขอบเมฆอมส้ม
+        cloud_col += sky.sun_color.rgb * (0.04 * lit * day_amt);
+        cloud_col = mix(cloud_col, vec3<f32>(0.30, 0.31, 0.36), sky.cloud_ctrl.z);
+        col = mix(col, cloud_col, a);
     }
 
     return vec4<f32>(col, 1.0);

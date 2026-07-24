@@ -2812,9 +2812,10 @@ pub fn options_menu_system(
 
             ui.heading("World");
             ui.add(
-                bevy_egui::egui::Slider::new(&mut settings.render_distance, 2..=32)
+                bevy_egui::egui::Slider::new(&mut settings.render_distance, 2..=16)
                     .text("Render Distance"),
             );
+            render_distance_warning(ui, settings.render_distance);
             // chunk ที่เซฟไว้ override การ generate เสมอ — ปุ่มนี้คืนโลกกลับเป็นตอนสร้าง
             // (เฉพาะโฟลเดอร์ของโลกนี้) ตอนต่อ network ห้ามแตะ = desync
             // สองจังหวะ: คลิกแรกแค่ขอยืนยัน ลบจริงต้องกดปุ่มแดง
@@ -2866,9 +2867,9 @@ pub fn options_menu_system(
             ui.heading("Graphics");
             ui.checkbox(&mut settings.lod_enabled, "Distant Terrain (LOD)");
             ui.add(
-                bevy_egui::egui::Slider::new(&mut settings.lod_distance_m, 2_000.0..=35_000.0)
+                bevy_egui::egui::Slider::new(&mut settings.lod_distance_chunks, 64..=2200)
                     .logarithmic(true)
-                    .text("LOD Distance (m)"),
+                    .text("LOD Distance (chunks)"),
             );
             // FOV: แก้ที่ Projection ของกล้องตรงๆ ไม่เก็บซ้ำใน GameSettings
             if let Some(mut projection) = proj_query.iter_mut().next() {
@@ -2910,6 +2911,19 @@ pub fn options_menu_system(
                 }
             });
         });
+}
+
+/// ป้ายเตือนเมื่อตั้ง render distance สูงจน VRAM อาจไม่พอ (LOD เห็นไกลได้อยู่แล้ว)
+fn render_distance_warning(ui: &mut bevy_egui::egui::Ui, rd: i32) {
+    if rd > 12 {
+        ui.label(
+            bevy_egui::egui::RichText::new(
+                "⚠ High distance may crash on limited-VRAM GPUs — LOD already shows distant terrain",
+            )
+            .small()
+            .color(bevy_egui::egui::Color32::from_rgb(255, 200, 80)),
+        );
+    }
 }
 
 /// section "World Gen Presets" — เซฟ/โหลดค่า world gen เป็นไฟล์ (คืน true = โหลดแล้วต้อง regen)
@@ -2969,6 +2983,7 @@ fn sky_atmosphere_ui(
     ui: &mut bevy_egui::egui::Ui,
     settings: &mut crate::GameSettings,
     sky: &mut crate::sky::SkySettings,
+    weather: &mut crate::weather::Weather,
     preset_name: &mut String,
     status: &mut String,
 ) {
@@ -2976,6 +2991,25 @@ fn sky_atmosphere_ui(
     egui::CollapsingHeader::new("Sky / Atmosphere").show(ui, |ui| {
         ui.add(egui::Slider::new(&mut settings.time_of_day, 0.0..=24.0).text("Time of Day (h)"));
         ui.add(egui::Slider::new(&mut settings.day_speed, 0.0..=50.0).text("Day Speed"));
+
+        ui.separator();
+        ui.label("Weather");
+        use crate::weather::WeatherKind;
+        let mut kind = weather.kind;
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut kind, WeatherKind::Clear, "Clear");
+            ui.radio_value(&mut kind, WeatherKind::Rain, "Rain");
+            ui.radio_value(&mut kind, WeatherKind::Snow, "Snow");
+        });
+        let mut inten = weather.target;
+        let changed_inten = ui
+            .add(egui::Slider::new(&mut inten, 0.0..=1.0).text("intensity"))
+            .changed();
+        if kind != weather.kind || changed_inten {
+            weather.set(kind, inten);
+        }
+        ui.add(egui::Slider::new(&mut sky.cloudiness, 0.0..=1.0).text("cloudiness"));
+        ui.add(egui::Slider::new(&mut sky.cloud_wind, 0.0..=0.05).text("cloud wind"));
 
         ui.label("Sky gradient — day (top / horizon / bottom)");
         ui.horizontal(|ui| {
@@ -3080,8 +3114,9 @@ pub fn egui_settings_system(
     ),
     mut confirm_clear: Local<bool>,
     // รวมเป็น tuple เดียว — Bevy จำกัด system param ที่ 16 ตัว
-    (mut sky_settings, mut preset_name, mut sky_status, mut worldgen_name, mut worldgen_status): (
+    (mut sky_settings, mut weather, mut preset_name, mut sky_status, mut worldgen_name, mut worldgen_status): (
         ResMut<crate::sky::SkySettings>,
+        ResMut<crate::weather::Weather>,
         Local<String>,
         Local<String>,
         Local<String>,
@@ -3150,7 +3185,8 @@ pub fn egui_settings_system(
         // ตอนเล่น multiplayer ห้ามแตะ world gen — noise ที่ไม่ตรงกัน = desync ทันที
         ui.add_enabled_ui(!networked, |ui| {
         ui.heading("World Generation");
-        ui.add(bevy_egui::egui::Slider::new(&mut settings.render_distance, 2..=32).text("Render Distance"));
+        ui.add(bevy_egui::egui::Slider::new(&mut settings.render_distance, 2..=16).text("Render Distance"));
+        render_distance_warning(ui, settings.render_distance);
 
         // สลับชนิดโลกกลางเกมได้ (ล้างโลกใหม่ + สลับโฟลเดอร์เซฟให้เอง)
         let mut src = settings.terrain_source;
@@ -3280,7 +3316,7 @@ pub fn egui_settings_system(
 
         ui.separator();
 
-        sky_atmosphere_ui(ui, &mut settings, &mut sky_settings, &mut preset_name, &mut sky_status);
+        sky_atmosphere_ui(ui, &mut settings, &mut sky_settings, &mut weather, &mut preset_name, &mut sky_status);
 
         ui.separator();
 
@@ -3303,9 +3339,9 @@ pub fn egui_settings_system(
         ui.heading("Distant Terrain");
         ui.checkbox(&mut settings.lod_enabled, "LOD (Distant Horizons style)");
         ui.add(
-            bevy_egui::egui::Slider::new(&mut settings.lod_distance_m, 2_000.0..=35_000.0)
+            bevy_egui::egui::Slider::new(&mut settings.lod_distance_chunks, 64..=2200)
                 .logarithmic(true)
-                .text("LOD Distance (m)"),
+                .text("LOD Distance (chunks)"),
         );
 
         ui.separator();

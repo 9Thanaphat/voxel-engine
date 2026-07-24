@@ -3612,10 +3612,14 @@ pub fn world_generation_system(
     let render_distance = settings.render_distance;
 
     if offsets_cache.0 != render_distance || offsets_cache.1.is_empty() {
+        // โหลดเป็นวงกลม (รัศมี = render_distance) แทนสี่เหลี่ยม — มุมไม่โหลด ขอบฟ้ากลม
+        let r2 = render_distance * render_distance;
         let mut offsets = Vec::new();
         for dx in -render_distance..=render_distance {
             for dz in -render_distance..=render_distance {
-                offsets.push(IVec2::new(dx, dz));
+                if dx * dx + dz * dz <= r2 {
+                    offsets.push(IVec2::new(dx, dz));
+                }
             }
         }
         offsets.sort_by_key(|o| o.x * o.x + o.y * o.y);
@@ -4219,12 +4223,14 @@ pub fn chunk_unloading_system(
     let center_chunk_x = cam_pos.x.div_euclid(CHUNK_WIDTH as f32) as i32;
     let center_chunk_z = cam_pos.z.div_euclid(CHUNK_WIDTH as f32) as i32;
 
-    // Unload chunks that are outside render distance + 2
+    // Unload นอกวงกลมรัศมี render distance + 2 (margin กัน load/unload กระพริบที่ขอบ)
     let unload_distance = settings.render_distance + 2;
+    let unload_r2 = unload_distance * unload_distance;
 
     let is_out_of_range = |chunk_pos: IVec2| {
-        (chunk_pos.x - center_chunk_x).abs() > unload_distance
-            || (chunk_pos.y - center_chunk_z).abs() > unload_distance
+        let dx = chunk_pos.x - center_chunk_x;
+        let dz = chunk_pos.y - center_chunk_z;
+        dx * dx + dz * dz > unload_r2
     };
 
     // รวม chunk ที่มีแค่ block data (ยังไม่มี mesh) ด้วย ไม่งั้นวงนอกสุดของ

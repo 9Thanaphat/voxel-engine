@@ -312,7 +312,7 @@ pub fn dem_stream_system(
     *timer = 0.0;
     let Some(dem) = streamer() else { return };
     let Ok(cam) = camera.single() else { return };
-    let r = settings.lod_distance_m.min(40_000.0) as f64;
+    let r = ((settings.lod_distance_chunks * crate::voxel::CHUNK_WIDTH as i32) as f64).min(40_000.0);
     let (px, pz) = (cam.translation.x as f64, cam.translation.z as f64);
     dem.ensure_ready(px - r, pz - r, px + r, pz + r);
 }

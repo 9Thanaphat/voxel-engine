@@ -61,6 +61,7 @@ pub enum ServerMessage {
     PlayerPositions { players: Vec<(u64, [f32; 3], f32, Option<(u8, u8)>)> },
     Chat { from: u32, text: String },
     TimeOfDay { hours: f32 },
+    Weather { kind: crate::weather::WeatherKind, intensity: f32 },
     Explosion(ExplosionWire),
     PlayerAction { client_id: u64, action: u8 },
 }
@@ -988,6 +989,7 @@ pub fn client_receive_messages(
     mut remote_players: Query<(Entity, &mut RemotePlayer)>,
     mut chat_ui: ResMut<crate::ui::ChatState>,
     mut fx_writer: MessageWriter<crate::particles::ExplosionFx>,
+    mut weather: ResMut<crate::weather::Weather>,
 ) {
     while let Some(bytes) = client.receive_message(DefaultChannel::ReliableOrdered) {
         match decode::<ServerMessage>(&bytes) {
@@ -1082,6 +1084,9 @@ pub fn client_receive_messages(
             }
             Some(ServerMessage::TimeOfDay { hours }) => {
                 settings.time_of_day = hours;
+            }
+            Some(ServerMessage::Weather { kind, intensity }) => {
+                weather.set(kind, intensity);
             }
             Some(ServerMessage::Explosion(wire)) => {
                 fx_writer.write(crate::particles::ExplosionFx {

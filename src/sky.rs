@@ -51,6 +51,9 @@ pub struct SkySettings {
     // ดวงจันทร์
     pub moon_size: f32,       // รัศมีเชิงมุม
     pub moon_brightness: f32, // 0 = ปิด
+    // เมฆ
+    pub cloudiness: f32, // 0 = ฟ้าโล่ง .. 1 = เมฆเต็มฟ้า
+    pub cloud_wind: f32, // ความเร็วเมฆลอย
 }
 
 impl Default for SkySettings {
@@ -77,6 +80,8 @@ impl Default for SkySettings {
             milkyway_brightness: 0.22,
             moon_size: 0.0678,
             moon_brightness: 1.0,
+            cloudiness: 0.40,
+            cloud_wind: 0.006,
         }
     }
 }
@@ -157,6 +162,8 @@ pub struct SkyUniform {
     pub star_ctrl: Vec4,
     /// x = twinkle_rate_base, y = twinkle_rate_range, z = milkyway_brightness, w = moon_size
     pub star_ctrl2: Vec4,
+    /// x = cloudiness (0..1), y = wind scroll, z = overcast/darken (0..1), w = สำรอง
+    pub cloud_ctrl: Vec4,
 }
 
 impl Material for SkyMaterial {
@@ -289,6 +296,7 @@ fn sky_uniform(time_of_day: f32, day_speed: f32, sky: &SkySettings) -> SkyUnifor
             sky.milkyway_brightness,
             sky.moon_size,
         ),
+        cloud_ctrl: Vec4::new(sky.cloudiness, sky.cloud_wind, 0.0, 0.0),
     }
 }
 
@@ -303,11 +311,21 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 fn update_sky(
     settings: Res<crate::GameSettings>,
     sky: Res<SkySettings>,
+    weather: Option<Res<crate::weather::Weather>>,
     dome: Option<Res<SkyDome>>,
     mut materials: ResMut<Assets<SkyMaterial>>,
 ) {
     let Some(dome) = dome else { return };
     if let Some(mut mat) = materials.get_mut(&dome.material) {
-        mat.data = sky_uniform(settings.time_of_day, settings.day_speed, &sky);
+        let mut data = sky_uniform(settings.time_of_day, settings.day_speed, &sky);
+        // อากาศครึ้ม: ดันเมฆให้คลุมเต็มฟ้า + เทาลง
+        if let Some(w) = weather {
+            let oc = w.overcast();
+            if oc > 0.0 {
+                data.cloud_ctrl.x = data.cloud_ctrl.x.max(0.45 + 0.55 * oc);
+                data.cloud_ctrl.z = 0.75 * oc;
+            }
+        }
+        mat.data = data;
     }
 }

@@ -226,7 +226,7 @@ pub fn auto_save_system(
     mut chat: bevy::prelude::ResMut<crate::ui::ChatState>,
 ) {
     *timer += time.delta_secs();
-    if *timer >= 120.0 { // 2 minutes
+    if *timer >= 45.0 { // เซฟบ่อยขึ้น กัน crash เสียความคืบหน้ามาก
         *timer = 0.0;
         if let Ok((transform, camera)) = camera_q.single() {
             save_player_and_electricity(&grid, transform, camera, &hotbar);

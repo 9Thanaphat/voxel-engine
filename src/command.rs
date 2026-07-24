@@ -22,6 +22,7 @@ const HELP: &[&str] = &[
     "/setblock <x> <y> <z> <block> - place a block (host only)",
     "/time <0-24> - set time of day (host only)",
     "/daynight <speed> - day-night cycle speed (1 = normal, 0 = frozen, host only)",
+    "/weather <clear|rain|snow> [intensity] - set weather (host only)",
     "/seed - show the world seed",
 ];
 
@@ -33,6 +34,7 @@ pub struct CommandWorld<'w, 's> {
     pub pending: ResMut<'w, crate::network::PendingNetEdits>,
     pub incoming: ResMut<'w, crate::network::IncomingNetEdits>,
     pub camera: Query<'w, 's, &'static mut Transform, With<crate::camera::FreeCamera>>,
+    pub weather: ResMut<'w, crate::weather::Weather>,
 }
 
 pub fn run_commands(
@@ -105,6 +107,7 @@ fn dispatch(
         "give" => cmd_give(&args, chat, world),
         "time" => cmd_time(&args, chat, world, server, is_client),
         "daynight" => cmd_daynight(&args, chat, world, is_client),
+        "weather" => cmd_weather(&args, chat, world, server, is_client),
         "setblock" => cmd_setblock(&args, chat, world, is_client),
         other => chat.push_error(format!("unknown command '{other}' - try /help")),
     }
@@ -267,6 +270,44 @@ fn cmd_daynight(
         let minutes = 1200.0 / speed / 60.0;
         chat.push_system(format!("Day-night speed x{speed} ({minutes:.1} min per day)"));
     }
+}
+
+fn cmd_weather(
+    args: &[&str],
+    chat: &mut crate::ui::ChatState,
+    world: &mut CommandWorld,
+    server: Option<&mut bevy_renet::RenetServer>,
+    is_client: bool,
+) {
+    use crate::weather::WeatherKind;
+    if is_client {
+        chat.push_error("/weather is host only");
+        return;
+    }
+    let kind = match args.first().map(|a| a.to_ascii_lowercase()).as_deref() {
+        Some("clear") => WeatherKind::Clear,
+        Some("rain") => WeatherKind::Rain,
+        Some("snow") => WeatherKind::Snow,
+        _ => {
+            chat.push_error("usage: /weather <clear|rain|snow> [intensity 0..1]");
+            return;
+        }
+    };
+    let intensity = args
+        .get(1)
+        .and_then(|a| a.parse::<f32>().ok())
+        .unwrap_or(0.8)
+        .clamp(0.0, 1.0);
+    world.weather.set(kind, intensity);
+    // broadcast ให้ client (host-authoritative เหมือน /time)
+    if let Some(server) = server {
+        let target = world.weather.target;
+        server.broadcast_message(
+            bevy_renet::renet::DefaultChannel::ReliableOrdered,
+            crate::network::encode(&crate::network::ServerMessage::Weather { kind, intensity: target }),
+        );
+    }
+    chat.push_system(format!("Weather: {kind:?} ({intensity:.1})"));
 }
 
 fn cmd_setblock(
