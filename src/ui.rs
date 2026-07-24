@@ -2516,8 +2516,15 @@ pub fn pause_menu_system(
     if keyboard.just_pressed(KeyCode::Escape) {
         if inventory.0 {
             inventory.0 = false;
+        } else if paused.0 && show_options.0 {
+            // ESC ตอน Options เปิด = ถอยกลับหน้า pause (ไม่ใช่กระโดดออกเข้าเกมเลย)
+            show_options.0 = false;
         } else {
             paused.0 = !paused.0;
+            // ปิด pause = เก็บหน้าต่าง Options ที่ค้างด้วย ไม่งั้นเปิด pause รอบหน้าเด้งทับทันที
+            if !paused.0 {
+                show_options.0 = false;
+            }
         }
     }
     if !paused.0 {
@@ -2621,6 +2628,19 @@ pub fn update_coordinate_ui_system(
             let pos = camera_transform.translation;
             // อัปเดตข้อความบนจอ
             text.0 = format!("X: {:.2}, Y: {:.2}, Z: {:.2}", pos.x, pos.y, pos.z);
+            // เวลา + ปฏิทิน + ละติจูด (ระบบท้องฟ้าดาราศาสตร์ ดู crate::astro)
+            let hh = settings.time_of_day.rem_euclid(24.0);
+            let h = hh.floor() as u32;
+            let m = ((hh - h as f32) * 60.0).floor() as u32;
+            text.0.push_str(&format!(
+                "\n{:02}:{:02} | Day {}/{} Yr {} ({}) | Lat {:.1}°",
+                h, m,
+                settings.day_of_year,
+                crate::astro::DAYS_PER_YEAR as u16,
+                settings.year,
+                crate::astro::season_name(settings.day_of_year),
+                settings.latitude_deg,
+            ));
             // โลกจริง: โชว์พิกัด GPS + ความสูงจากระดับน้ำทะเลจริง (เทียบแผนที่ได้เลย)
             if settings.terrain_source == crate::TerrainSource::RealWorld
                 && crate::dem::streamer().is_some()
@@ -2991,6 +3011,9 @@ fn sky_atmosphere_ui(
     egui::CollapsingHeader::new("Sky / Atmosphere").show(ui, |ui| {
         ui.add(egui::Slider::new(&mut settings.time_of_day, 0.0..=24.0).text("Time of Day (h)"));
         ui.add(egui::Slider::new(&mut settings.day_speed, 0.0..=50.0).text("Day Speed"));
+        ui.add(egui::Slider::new(&mut settings.day_of_year, 0..=364).text("Day of Year (0 = spring equinox)"));
+        // Real World เขียนทับละติจูดจากตำแหน่งจริงทุกเฟรม สไลเดอร์นี้จึงมีผลเฉพาะโหมด Noise
+        ui.add(egui::Slider::new(&mut settings.latitude_deg, -66.0..=66.0).text("Latitude (°, Noise mode)"));
 
         ui.separator();
         ui.label("Weather");

@@ -17,3 +17,6 @@ saves_dem/
 /assets/dem/tiles/
 /assets/dem/water/
 /error_log.txt
+
+# ค่าตั้งค่ารวมต่อเครื่อง (สร้างตอนเล่น) — ไม่ commit
+/settings.json

@@ -25,6 +25,14 @@ struct SkyUniform {
     star_ctrl2: vec4<f32>,
     // x = cloudiness (0..1), y = wind scroll, z = overcast/darken (0..1), w = สำรอง
     cloud_ctrl: vec4<f32>,
+    // คอลัมน์เมทริกซ์ horizon→celestial (ประกอบ mat3) — map ทิศมอง→กรอบฟ้าคงที่ที่ดาวติดตรึง
+    cel0: vec4<f32>,
+    cel1: vec4<f32>,
+    cel2: vec4<f32>,
+    // xyz = ทิศใจกลางกาแล็กซี (celestial), w = ความสว่างเฟสจันทร์ 0..1 (กลบดาว/ทางช้างเผือก)
+    gal_center: vec4<f32>,
+    // xyz = ขั้วเหนือกาแล็กซี (celestial, ตั้งฉากระนาบทางช้างเผือก), w = สำรอง
+    gal_pole: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> sky: SkyUniform;
@@ -93,11 +101,10 @@ fn fbm(p: vec3<f32>) -> f32 {
     return v;
 }
 
-// หมุนเวกเตอร์รอบแกน Z (ระนาบเดียวกับที่ดวงอาทิตย์/โดมดาวหมุน)
-fn spin_z(v: vec3<f32>, a: f32) -> vec3<f32> {
-    let c = cos(a);
-    let s = sin(a);
-    return vec3<f32>(c * v.x - s * v.y, s * v.x + c * v.y, v.z);
+// map ทิศมอง (horizon) → กรอบ celestial ที่ดาว/ทางช้างเผือกติดตรึง (เมทริกซ์จาก astro.rs)
+fn celestial(dir: vec3<f32>) -> vec3<f32> {
+    let m = mat3x3<f32>(sky.cel0.xyz, sky.cel1.xyz, sky.cel2.xyz);
+    return m * dir;
 }
 
 const STAR_SCALE: f32 = 220.0;
@@ -136,9 +143,9 @@ fn star_sample(dir: vec3<f32>, spin: f32) -> vec4<f32> {
     return vec4<f32>(star_color(ct * ct), b);
 }
 
-// ดาว + star trail: integrate ถอยหลังไปตาม `trail_span` (เรเดียน) เก็บ sample ที่สว่างสุด
-// trail_span ∝ day_speed → เวลาปกติสั้นจนเป็นจุดกลม, เร่งเวลายิ่งเป็นเส้นยาวเหมือนถ่ายดาว
-fn stars(dir: vec3<f32>, twinkle_t: f32, spin: f32, trail_span: f32) -> vec3<f32> {
+// ดาว + star trail: `cdir` = ทิศในกรอบ celestial (ดาวติดตรึง). trail หมุน cdir รอบแกน Z
+// (=ขั้วฟ้า) ถอยไปอดีตตาม `trail_span` เก็บ sample สว่างสุด → เร่งเวลาดาวลากเป็นเส้น
+fn stars(cdir: vec3<f32>, twinkle_t: f32, trail_span: f32) -> vec3<f32> {
     // จำนวน sample ปรับตามความยาว trail (~1 ต่อเซลล์) — เวลาปกติเหลือ 1 แซมเปิล จึงถูก
     let n = i32(clamp(trail_span * STAR_SCALE * 1.3, 1.0, 30.0));
     let denom = max(f32(n - 1), 1.0);
@@ -146,15 +153,12 @@ fn stars(dir: vec3<f32>, twinkle_t: f32, spin: f32, trail_span: f32) -> vec3<f32
     for (var i = 0; i < n; i = i + 1) {
         let k = f32(i) / denom;          // 0 = หัว (ปัจจุบัน) .. 1 = หาง (อดีต)
         let taper = 1.0 - 0.7 * k;       // หางจางลงเหมือน long-exposure ที่เพิ่งจาง
-        let smp = star_sample(dir, spin - trail_span * k);
+        let smp = star_sample(cdir, trail_span * k); // หมุน cdir รอบขั้วฟ้าไปอดีต
         let b = smp.w * taper;
         if (b > best.w) { best = vec4<f32>(smp.xyz, b); }
     }
     // twinkle เฉพาะตอน trail สั้น (เวลาปกติ) — พอเป็นเส้นแล้วดาวไม่ควรกะพริบ
-    let h = hash3(floor(
-        vec3<f32>(cos(spin) * dir.x - sin(spin) * dir.y,
-                  sin(spin) * dir.x + cos(spin) * dir.y,
-                  dir.z) * STAR_SCALE));
+    let h = hash3(floor(cdir * STAR_SCALE));
     // twinkle ช้าและเบา + แต่ละดวงจังหวะต่างกัน (rate สุ่มจาก h) ไม่กะพริบพร้อมกันเป็นพรืด
     let rate = sky.star_ctrl2.x + sky.star_ctrl2.y * h;
     let amp = sky.star_ctrl.w;
@@ -189,26 +193,38 @@ fn fragment(in: VSOut) -> @location(0) vec4<f32> {
 
     // ---- องค์ประกอบกลางคืน ----
     let star_i = sky.params.y;
-    let spin = sky.params.z;
     // extinction: ใกล้ขอบฟ้าบรรยากาศหนา ดาวจางลง + อมส้ม
     let ext = smoothstep(-0.02, 0.28, up);
     let redden = mix(vec3<f32>(1.0, 0.60, 0.40), vec3<f32>(1.0, 1.0, 1.0), smoothstep(0.0, 0.22, up));
 
-    // ทางช้างเผือก: แถบฝ้าจางบนระนาบกาแลกซี หมุนตามโดมดาว
-    if (night > 0.01) {
-        let mw_axis = normalize(vec3<f32>(0.55, 0.30, 0.78));
-        let rdir = spin_z(dir, spin);
-        let band = smoothstep(0.72, 0.99, 1.0 - abs(dot(rdir, mw_axis)));
-        let haze = fbm(rdir * 5.0);
-        let mw = band * (0.10 + 0.55 * haze * haze);
-        let mw_col = mix(vec3<f32>(0.55, 0.62, 0.85), vec3<f32>(0.92, 0.86, 0.80), haze);
-        col += mw_col * (mw * night * ext * sky.star_ctrl2.z) * redden;
+    // ต้องมืดสนิทถึงเห็น: fade ตามความต่ำของดวงอาทิตย์ (แสงสนธยา ~ −18°) แทน gate หลวมๆ
+    let twilight = 1.0 - smoothstep(-0.20, 0.02, sky.sun_dir_night.y);
+    // แสงจันทร์กลบ: จันทร์ยิ่งสว่าง (เฟส) และยิ่งสูง ยิ่งกลบดาว/ทางช้างเผือก
+    let moon_illum = sky.gal_center.w;
+    let moon_up = smoothstep(-0.05, 0.25, sky.moon_dir.y);
+    let moon_wash = 1.0 - 0.85 * moon_illum * moon_up;
+    let sky_dark = twilight * moon_wash;
+
+    // ทิศในกรอบฟ้าคงที่ — ดาว/ทางช้างเผือกติดตรึงที่นี่ ขึ้น/ตก/เลื่อนตามฤดู+ละติจูดเอง
+    let cdir = celestial(dir);
+
+    // ทางช้างเผือก: แถบสว่างตามระนาบกาแล็กซี + ป่องสว่างที่ใจกลาง (Sagittarius) + ริ้วฝุ่นมืดกลางแถบ
+    if (sky_dark > 0.01) {
+        let gcos = dot(cdir, sky.gal_pole.xyz);       // 0 = อยู่บนระนาบกาแล็กซีพอดี
+        let band = smoothstep(0.32, 0.0, abs(gcos));  // สว่างใกล้ระนาบ
+        let dust = smoothstep(0.0, 0.05, abs(gcos));  // ริ้วฝุ่นมืดบางๆ คาบระนาบ
+        let bulge = smoothstep(0.25, 0.95, dot(cdir, sky.gal_center.xyz)); // ป่องใจกลาง
+        let haze = fbm(cdir * 6.0);
+        let mw = band * dust * (0.10 + 0.9 * bulge) * (0.35 + 0.65 * haze * haze);
+        let mw_col = mix(vec3<f32>(0.55, 0.62, 0.85), vec3<f32>(0.95, 0.88, 0.78), bulge);
+        col += mw_col * (mw * sky_dark * ext * sky.star_ctrl2.z) * redden;
     }
 
-    // ดาว (สีตามอุณหภูมิ + extinction ที่ขอบฟ้า)
+    // ดาว (สีตามอุณหภูมิ + extinction ที่ขอบฟ้า) — ดาวสว่างทนแสงจันทร์กว่าทางช้างเผือก
     if (star_i > 0.001) {
-        let s = stars(dir, globals.time, spin, sky.params.w);
-        col += s * redden * (star_i * night * ext);
+        let s = stars(cdir, globals.time, sky.params.w);
+        let star_dark = twilight * (0.4 + 0.6 * moon_wash);
+        col += s * redden * (star_i * star_dark * ext);
     }
 
     // ---- ดวงจันทร์ ----
@@ -237,11 +253,17 @@ fn fragment(in: VSOut) -> @location(0) vec4<f32> {
     // ---- เมฆ: layer บนสุด (บังดวงอาทิตย์/ดาวได้) ----
     let cloudiness = sky.cloud_ctrl.x;
     if (cloudiness > 0.001 && dir.y > 0.02) {
-        let wind = sky.cloud_ctrl.y;
         // project ทิศลงระนาบเมฆ (ยิ่งใกล้ขอบฟ้ายิ่งยืด) + เลื่อนตามลม
         let p = dir.xz / dir.y;
-        let uv = p * 0.35 + vec2<f32>(globals.time * wind, globals.time * wind * 0.35);
-        let d = fbm(vec3<f32>(uv, 0.0));
+        // t = เฟสเมฆสะสมจากฝั่ง Rust (∝ cloud_wind × day_speed) — เดินตามรอบวัน
+        // ไม่ใช่นาฬิกาจริง เร่ง/หยุดเวลาเมฆจึงเร็ว/หยุดตาม และต่อเนื่องแม้เปลี่ยนความเร็ว
+        let t = sky.cloud_ctrl.y;
+        let uv = p * 0.35 + vec2<f32>(t, t * 0.35);
+        // domain warp: บิด uv ด้วย noise ความถี่ต่ำที่เลื่อนตามเวลา → เมฆม้วนวน ไม่ไถลตรงเป๊ะ
+        let warp = fbm(vec3<f32>(uv * 0.5, t * 2.0));
+        let uvw = uv + vec2<f32>(warp, warp) * 0.12;
+        // z ของ noise เลื่อนตามเวลา → ก้อนเมฆค่อยๆ ก่อตัว/สลาย แทนที่จะไถลเป็นแผ่นแข็ง
+        let d = fbm(vec3<f32>(uvw, t * 6.0));
         // coverage: cloudiness ดัน threshold ให้เมฆคลุมมากขึ้น
         let cover = smoothstep(1.0 - cloudiness * 0.9 - 0.05, 1.0 - cloudiness * 0.9 + 0.20, d);
         let horizon_fade = smoothstep(0.02, 0.22, dir.y);

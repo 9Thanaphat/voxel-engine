@@ -1,8 +1,9 @@
 //! แสงแบบ Minecraft: lightmap ต่อบล็อกที่ flood-fill ไว้ล่วงหน้า แล้วอบลง vertex color
 //! ตอน mesh — ไม่มี shadow map เรียลไทม์เลย
 //!
-//! รอบนี้มีเฉพาะ **sky light** (แสงจากฟ้า) ส่วนไฟจากโคม/คบไฟยังเป็น `PointLight` แยก
-//! (ดู `refresh_chunk_lamp_lights` ใน voxel.rs)
+//! รอบนี้มีทั้ง **sky light** (แสงจากฟ้า BFS) และ **block light** สี RGB (โคม/คบไฟ BFS)
+//! sky light อบลง vertex color ตรง ส่วน block light วาดเป็น additive overlay mesh แยก entity
+//! (PointLight แยกจาก `refresh_chunk_lamp_lights` ใน voxel.rs ยังอยู่ — เป็น fallback เรียลไทม์)
 //!
 //! ข้อจำกัดที่กำหนดการออกแบบทั้งหมด: `CHUNK_HEIGHT = 3072` (โลกจริง 1 บล็อก = 1 เมตร)
 //! ถ้าเก็บ 1 byte ต่อบล็อกตรงๆ จะกิน 786 KB ต่อ chunk ซึ่งใช้ไม่ได้ จึง
@@ -225,6 +226,118 @@ pub fn compute_sky_light(sample: BlockSampler, scan_top: usize) -> ChunkLight {
         }
     }
 
+    light.compact();
+    light
+}
+
+/// ระดับแสง RGB ที่บล็อกนี้เปล่งออกมา (0..15 ต่อ channel) — [0,0,0] = ไม่เปล่งแสง
+/// สีตามชนิดโคม: ขาว/แดง/เขียว/ฟ้า/ส้มไฟ
+pub fn emitter_rgb(block: BlockType) -> [u8; 3] {
+    use BlockType::*;
+    match block {
+        Glowstone | SmartLampOn => [15, 14, 12], // ขาวอุ่น
+        LampRed => [15, 3, 3],
+        LampGreen => [3, 15, 3],
+        LampBlue => [4, 5, 15],
+        Campfire | TntLit => [14, 6, 2], // ส้มไฟ
+        NukeLit => [14, 9, 3],
+        _ => [0, 0, 0],
+    }
+}
+
+/// block light สี (RGB) ต่อบล็อก — 3 channel เก็บด้วย ChunkLight เดิม (Uniform(0) ส่วนใหญ่ = เบา)
+#[derive(Clone, PartialEq)]
+pub struct BlockLight {
+    ch: [ChunkLight; 3],
+}
+
+impl Default for BlockLight {
+    fn default() -> Self {
+        Self { ch: [ChunkLight::new_uniform(0), ChunkLight::new_uniform(0), ChunkLight::new_uniform(0)] }
+    }
+}
+
+impl BlockLight {
+    #[inline]
+    pub fn get(&self, x: usize, y: usize, z: usize) -> [u8; 3] {
+        [self.ch[0].get(x, y, z), self.ch[1].get(x, y, z), self.ch[2].get(x, y, z)]
+    }
+    fn set(&mut self, x: usize, y: usize, z: usize, v: [u8; 3]) {
+        for c in 0..3 {
+            self.ch[c].set(x, y, z, v[c]);
+        }
+    }
+    fn compact(&mut self) {
+        for c in &mut self.ch {
+            c.compact();
+        }
+    }
+}
+
+/// คำนวณ block light สี (RGB) — BFS จากโคม ลด 1/ก้าว (บวก opacity) ทุก channel พร้อมกัน max-combine
+///
+/// **ข้าม chunk**: seed + เดิน BFS ทั่ว halo ±15 บล็อกรอบ chunk (โคมในเพื่อนบ้านสาดเข้ามาถูก
+/// แม้อยู่ห่างขอบ) แต่ **เก็บผลเฉพาะเซลล์ใน [0,w)** ของ chunk นี้ — working set ใช้ HashMap
+/// (เซลล์ที่ติดไฟมีไม่เยอะ รอบๆ โคมเท่านั้น) กัน scan/เก็บทั้ง halo เต็มๆ
+/// `seeds` = โคมในระยะ halo (พิกัด local ของ chunk นี้ อาจติดลบ/เกิน w ถ้าอยู่เพื่อนบ้าน) + สี
+/// มาจาก emitter registry (ไม่ต้อง scan) — ผู้เรียกกรองให้อยู่ในระยะ ±15 แล้ว
+pub fn compute_block_light(
+    sample: BlockSampler,
+    y_lo: usize,
+    y_hi: usize,
+    seeds: &[([i32; 3], [u8; 3])],
+) -> BlockLight {
+    let w = CHUNK_WIDTH as i32;
+    let r = MAX_LIGHT as i32; // 15 = ระยะไกลสุดที่แสงโคมเดินถึง
+    let ylo = y_lo.min(CHUNK_HEIGHT - 1) as i32;
+    let yhi = y_hi.min(CHUNK_HEIGHT - 1) as i32;
+
+    let mut lv: std::collections::HashMap<(i32, i32, i32), [u8; 3]> = std::collections::HashMap::new();
+    let mut queue: std::collections::VecDeque<(i32, i32, i32, [u8; 3])> = Default::default();
+
+    // seed จาก registry (พิกัด local; รวมเพื่อนบ้านใน halo)
+    for &([x, y, z], color) in seeds {
+        if y < ylo || y > yhi {
+            continue;
+        }
+        lv.insert((x, y, z), color);
+        queue.push_back((x, y, z, color));
+    }
+
+    const DIRS: [(i32, i32, i32); 6] =
+        [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)];
+    while let Some((x, y, z, cur)) = queue.pop_front() {
+        if cur[0].max(cur[1]).max(cur[2]) <= 1 {
+            continue;
+        }
+        for (dx, dy, dz) in DIRS {
+            let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+            // เดินได้ทั่ว halo แต่ไม่ออกนอก r + อยู่ในแถบ y
+            if nx < -r || nx >= w + r || nz < -r || nz >= w + r || ny < ylo || ny > yhi {
+                continue;
+            }
+            let op = light_opacity(sample(nx, ny, nz));
+            if op >= MAX_LIGHT {
+                continue;
+            }
+            let drop = 1 + op;
+            let next = [cur[0].saturating_sub(drop), cur[1].saturating_sub(drop), cur[2].saturating_sub(drop)];
+            let e = lv.entry((nx, ny, nz)).or_insert([0, 0, 0]);
+            if next[0] > e[0] || next[1] > e[1] || next[2] > e[2] {
+                *e = [next[0].max(e[0]), next[1].max(e[1]), next[2].max(e[2])];
+                let merged = *e;
+                queue.push_back((nx, ny, nz, merged));
+            }
+        }
+    }
+
+    // เก็บเฉพาะเซลล์ในกรอบ chunk นี้
+    let mut light = BlockLight::default();
+    for ((x, y, z), v) in &lv {
+        if (0..w).contains(x) && (0..w).contains(z) {
+            light.set(*x as usize, *y as usize, *z as usize, *v);
+        }
+    }
     light.compact();
     light
 }

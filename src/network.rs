@@ -13,7 +13,7 @@ use crate::voxel::{VoxelWorld, CHUNK_VOLUME, CHUNK_WIDTH};
 pub const SERVER_PORT: u16 = 5000;
 /// ต้องตรงกันทั้ง host และ client ไม่งั้น netcode ปฏิเสธการเชื่อมต่อ
 /// (0003: Position/PlayerPositions เพิ่มของที่ถือ — โครง encode เปลี่ยน)
-pub const PROTOCOL_ID: u64 = 0xB10C_CAFE_0003;
+pub const PROTOCOL_ID: u64 = 0xB10C_CAFE_0004;
 /// id ตัวแทน host ในข้อความ PlayerPositions (client จริงใช้ id ที่ไม่ใช่ 0)
 pub const HOST_PLAYER_ID: u64 = 0;
 
@@ -41,6 +41,9 @@ pub enum ServerMessage {
         terrain: crate::TerrainSource,
         spawn_pos: [f32; 3],
         time_of_day: f32,
+        /// ปฏิทินโลก (วันในปี + ปี) — คุมฤดู/ตำแหน่งดาราศาสตร์ให้ client ตรงกับ host
+        day_of_year: u16,
+        year: u32,
         game_mode: crate::GameMode,
     },
     ChunkData {
@@ -60,7 +63,7 @@ pub enum ServerMessage {
     /// (id, ตำแหน่งตา, yaw, ของที่ถือเป็น wire (kind,id) — None = มือเปล่า)
     PlayerPositions { players: Vec<(u64, [f32; 3], f32, Option<(u8, u8)>)> },
     Chat { from: u32, text: String },
-    TimeOfDay { hours: f32 },
+    TimeOfDay { hours: f32, day_of_year: u16, year: u32 },
     Weather { kind: crate::weather::WeatherKind, intensity: f32 },
     Explosion(ExplosionWire),
     PlayerAction { client_id: u64, action: u8 },
@@ -706,6 +709,8 @@ pub fn on_server_event(
                 terrain: settings.terrain_source,
                 spawn_pos: spawn_pos.to_array(),
                 time_of_day: settings.time_of_day,
+                day_of_year: settings.day_of_year,
+                year: settings.year,
                 game_mode: settings.game_mode,
             };
             server.send_message(client_id, DefaultChannel::ReliableOrdered, encode(&welcome));
@@ -993,11 +998,13 @@ pub fn client_receive_messages(
 ) {
     while let Some(bytes) = client.receive_message(DefaultChannel::ReliableOrdered) {
         match decode::<ServerMessage>(&bytes) {
-            Some(ServerMessage::Welcome { client_id: _, player_number, noise, terrain, spawn_pos, time_of_day, game_mode: _ }) => {
+            Some(ServerMessage::Welcome { client_id: _, player_number, noise, terrain, spawn_pos, time_of_day, day_of_year, year, game_mode: _ }) => {
                 client_sync.my_number = player_number;
                 settings.noise = noise;
                 settings.terrain_source = terrain;
                 settings.time_of_day = time_of_day;
+                settings.day_of_year = day_of_year;
+                settings.year = year;
                 if let Some(mut transform) = camera_query.iter_mut().next() {
                     transform.translation = Vec3::from_array(spawn_pos);
                 }
@@ -1082,8 +1089,10 @@ pub fn client_receive_messages(
             Some(ServerMessage::Chat { from, text }) => {
                 chat_ui.push_player(from, text);
             }
-            Some(ServerMessage::TimeOfDay { hours }) => {
+            Some(ServerMessage::TimeOfDay { hours, day_of_year, year }) => {
                 settings.time_of_day = hours;
+                settings.day_of_year = day_of_year;
+                settings.year = year;
             }
             Some(ServerMessage::Weather { kind, intensity }) => {
                 weather.set(kind, intensity);

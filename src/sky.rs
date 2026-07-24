@@ -81,7 +81,7 @@ impl Default for SkySettings {
             moon_size: 0.0678,
             moon_brightness: 1.0,
             cloudiness: 0.40,
-            cloud_wind: 0.006,
+            cloud_wind: 0.010,
         }
     }
 }
@@ -164,6 +164,15 @@ pub struct SkyUniform {
     pub star_ctrl2: Vec4,
     /// x = cloudiness (0..1), y = wind scroll, z = overcast/darken (0..1), w = สำรอง
     pub cloud_ctrl: Vec4,
+    /// คอลัมน์เมทริกซ์ horizon→celestial (ประกอบ mat3 ใน shader) — map ทิศมอง→กรอบฟ้าคงที่
+    /// ที่ดาว/ทางช้างเผือกติดตรึง ทำให้ขึ้น/ตก/เลื่อนตามฤดู+ละติจูดเอง (ดู [`crate::astro`])
+    pub cel0: Vec4,
+    pub cel1: Vec4,
+    pub cel2: Vec4,
+    /// xyz = ทิศใจกลางกาแล็กซี (celestial), w = ความสว่างเฟสจันทร์ 0..1 (ไว้กลบดาว/ทางช้างเผือก)
+    pub gal_center: Vec4,
+    /// xyz = ขั้วเหนือกาแล็กซี (celestial, ตั้งฉากระนาบทางช้างเผือก), w = สำรอง
+    pub gal_pole: Vec4,
 }
 
 impl Material for SkyMaterial {
@@ -202,12 +211,19 @@ pub struct SkyDome {
 
 pub struct SkyPlugin;
 
+/// เฟสการเลื่อนของเมฆที่สะสมทีละเฟรม (∝ cloud_wind × day_speed) — เก็บแยกจากนาฬิกาจริง
+/// เพราะขับด้วยความเร็วรอบวัน ต้อง integrate เองให้ต่อเนื่องแม้ day_speed เปลี่ยนกลางคัน
+/// (เหมือน time_of_day) ถ้าคูณ day_speed กับนาฬิกาจริงตรงๆ เมฆจะกระโดดตอนสไลด์ปรับความเร็ว
+#[derive(Resource, Default)]
+pub struct CloudPhase(pub f32);
+
 impl Plugin for SkyPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<SkyMaterial>::default())
             .init_resource::<SkySettings>()
+            .init_resource::<CloudPhase>()
             .add_systems(Startup, spawn_skydome)
-            .add_systems(Update, (follow_camera, update_sky));
+            .add_systems(Update, (follow_camera, update_observer_latitude, update_sky));
     }
 }
 
@@ -219,7 +235,7 @@ fn spawn_skydome(
     let mesh = meshes.add(Sphere::new(1.0).mesh().uv(32, 18));
     let material = materials.add(SkyMaterial {
         // เริ่มที่เที่ยงวันด้วยค่า default เดี๋ยว update_sky เขียนทับ
-        data: sky_uniform(12.0, 1.0, &SkySettings::default()),
+        data: sky_uniform(12.0, 172, 15.0, 1.0, &SkySettings::default()),
     });
     let entity = commands
         .spawn((
@@ -244,12 +260,12 @@ fn follow_camera(
     }
 }
 
-/// สร้างค่า uniform จากเวลา + ค่าปรับแต่ง — reuse elevation/ทิศดวงอาทิตย์แบบเดียวกับ voxel::sun_tint
-/// day_speed คุมความยาว star trail: ปกติ (1.0) ดาวเป็นจุด, เร่งเวลาแล้วดาวลากเป็นเส้น
-fn sky_uniform(time_of_day: f32, day_speed: f32, sky: &SkySettings) -> SkyUniform {
-    let hour_angle = (time_of_day - 6.0) / 12.0 * std::f32::consts::PI;
-    let raw = Vec3::new(hour_angle.cos(), hour_angle.sin(), 0.3);
-    let sun_dir = raw.normalize();
+/// สร้างค่า uniform จากเวลา + วัน + ละติจูด + ค่าปรับแต่ง — ทิศดวงอาทิตย์/จันทร์/ดาว อิงดาราศาสตร์จริง
+/// (`crate::astro`) ดวงอาทิตย์ตัวเดียวกับ `voxel::sun_tint`; day_speed คุมความยาว star trail
+fn sky_uniform(time_of_day: f32, day_of_year: u16, latitude_deg: f32, day_speed: f32, sky: &SkySettings) -> SkyUniform {
+    let lat = latitude_deg.to_radians();
+    let day = day_of_year as f32;
+    let sun_dir = crate::astro::sun_direction(time_of_day, day, lat);
     let elevation = sun_dir.y.clamp(0.0, 1.0);
 
     // 0 กลางวัน -> 1 กลางคืน (โค้งให้พลบค่ำยังไม่มืดเร็วเกิน)
@@ -275,10 +291,16 @@ fn sky_uniform(time_of_day: f32, day_speed: f32, sky: &SkySettings) -> SkyUnifor
     // ความยาว star trail (เรเดียน) ∝ day_speed
     let trail_span = (day_speed * sky.trail_sensitivity).clamp(0.0, sky.trail_max);
 
-    // ดวงจันทร์: โคจรตรงข้ามดวงอาทิตย์ (เอียงคนละระนาบเล็กน้อยให้ไม่ทับเป๊ะ) ขึ้นตอนกลางคืน
-    let moon_angle = hour_angle + std::f32::consts::PI;
-    let moon_dir = Vec3::new(moon_angle.cos(), moon_angle.sin(), -0.35).normalize();
+    // ดวงจันทร์: ตำแหน่ง+เฟสอิงดาราศาสตร์ (ขึ้นช้าลง ~50 นาที/วัน, เพ็ญ/ดับตามรอบ synodic)
+    let moon_dir = crate::astro::moon_direction(time_of_day, day, lat);
     let moon_vis = smoothstep(-0.05, 0.18, moon_dir.y) * sky.moon_brightness;
+    let moon_illum = crate::astro::moon_illumination(day);
+
+    // เมทริกซ์ horizon→celestial + ทิศกาแล็กซี (กรอบฟ้าคงที่) สำหรับ lookup ดาว/ทางช้างเผือกใน shader
+    let lst = crate::astro::local_sidereal(time_of_day, day);
+    let m = crate::astro::horizon_to_equatorial(lat, lst);
+    let gc = crate::astro::galactic_center_cel();
+    let gp = crate::astro::galactic_pole_cel();
 
     SkyUniform {
         sky_top: top.extend(1.0),
@@ -286,8 +308,8 @@ fn sky_uniform(time_of_day: f32, day_speed: f32, sky: &SkySettings) -> SkyUnifor
         sky_bottom: bot.extend(1.0),
         sun_color: sun_rgb.extend(1.0),
         sun_dir_night: sun_dir.extend(night),
-        // z = hour_angle: หมุนโดมดาวให้ล็อกกับดวงอาทิตย์ (ต่อเนื่องตอนข้ามเที่ยงคืนเพราะต่างกัน 2π)
-        params: Vec4::new(sky.sun_size, star_intensity, hour_angle, trail_span),
+        // z: เดิมเป็น hour_angle หมุนโดมดาว — ตอนนี้ใช้เมทริกซ์ celestial แทน (z สำรอง)
+        params: Vec4::new(sky.sun_size, star_intensity, 0.0, trail_span),
         moon_dir: moon_dir.extend(moon_vis),
         star_ctrl: Vec4::new(sky.star_density, sky.star_size_min, sky.star_size_max, sky.twinkle_amp),
         star_ctrl2: Vec4::new(
@@ -297,6 +319,11 @@ fn sky_uniform(time_of_day: f32, day_speed: f32, sky: &SkySettings) -> SkyUnifor
             sky.moon_size,
         ),
         cloud_ctrl: Vec4::new(sky.cloudiness, sky.cloud_wind, 0.0, 0.0),
+        cel0: m.x_axis.extend(0.0),
+        cel1: m.y_axis.extend(0.0),
+        cel2: m.z_axis.extend(0.0),
+        gal_center: gc.extend(moon_illum),
+        gal_pole: gp.extend(0.0),
     }
 }
 
@@ -313,11 +340,18 @@ fn update_sky(
     sky: Res<SkySettings>,
     weather: Option<Res<crate::weather::Weather>>,
     dome: Option<Res<SkyDome>>,
+    time: Res<Time>,
+    mut cloud_phase: ResMut<CloudPhase>,
     mut materials: ResMut<Assets<SkyMaterial>>,
 ) {
+    // เดินเฟสเมฆตามความเร็วรอบวัน: day_speed=1 → เท่าเดิม, เร่งวันเมฆเร็วตาม, หยุดเวลาเมฆหยุด
+    cloud_phase.0 += time.delta_secs() * sky.cloud_wind * settings.day_speed;
+
     let Some(dome) = dome else { return };
     if let Some(mut mat) = materials.get_mut(&dome.material) {
-        let mut data = sky_uniform(settings.time_of_day, settings.day_speed, &sky);
+        let mut data = sky_uniform(settings.time_of_day, settings.day_of_year, settings.latitude_deg, settings.day_speed, &sky);
+        // เฟสสะสมไปที่ cloud_ctrl.y (shader ใช้เป็น t) แทนค่า cloud_wind ดิบ
+        data.cloud_ctrl.y = cloud_phase.0;
         // อากาศครึ้ม: ดันเมฆให้คลุมเต็มฟ้า + เทาลง
         if let Some(w) = weather {
             let oc = w.overcast();
@@ -327,5 +361,22 @@ fn update_sky(
             }
         }
         mat.data = data;
+    }
+}
+
+/// โหมด Real World: ตั้งละติจูดผู้สังเกตจากตำแหน่งจริงของผู้เล่นบนโลก → ท้องฟ้าตรงกับสถานที่จริง
+/// (โหมด Noise ปล่อยตามค่า setting) — เป็นค่า local ต่อผู้เล่น ไม่ sync ข้าม MP
+fn update_observer_latitude(
+    mut settings: ResMut<crate::GameSettings>,
+    cam: Query<&Transform, With<crate::camera::FreeCamera>>,
+) {
+    if settings.terrain_source != crate::TerrainSource::RealWorld {
+        return;
+    }
+    let Ok(t) = cam.single() else { return };
+    let (lat, _lon) = crate::dem::block_to_latlon(t.translation.x as f64, t.translation.z as f64);
+    // เขียนเฉพาะตอนขยับพอสังเกต — กัน change-detection ปลุกระบบอื่นทุกเฟรม
+    if (settings.latitude_deg - lat as f32).abs() > 0.05 {
+        settings.latitude_deg = lat as f32;
     }
 }

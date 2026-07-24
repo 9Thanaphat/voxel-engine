@@ -14,6 +14,7 @@ mod command;
 pub mod light;
 pub mod tree;
 mod sky;
+mod astro;
 mod audio;
 mod weather;
 
@@ -60,6 +61,13 @@ pub struct GameSettings {
     pub noise: NoiseParams,
     /// เวลาในเกม หน่วยชั่วโมง 0-24 (6 = พระอาทิตย์ขึ้น, 12 = เที่ยง, 18 = ตก)
     pub time_of_day: f32,
+    /// วันในปี 0..364 (0 = วสันตวิษุวัต) — คุมฤดู/ตำแหน่งดาราศาสตร์ (ดู [`crate::astro`])
+    pub day_of_year: u16,
+    /// ปีที่ผ่านไป (นับรอบ 365 วัน) — ไว้แสดงผล/บันทึกเวลา
+    pub year: u32,
+    /// ละติจูดผู้สังเกต (องศา) — คุมความสูงขั้วฟ้า/เส้นทางดวงอาทิตย์ (ดู [`crate::astro`])
+    /// เป็นค่า local ต่อผู้เล่น (Real World อัปเดตจากตำแหน่งจริง) ไม่ sync ข้าม MP
+    pub latitude_deg: f32,
     /// ตัวคูณความเร็วรอบวัน-คืน (1.0 = ปกติ ~20 นาที/วัน, 0 = หยุดเวลานิ่ง) — ปรับด้วย /daynight
     pub day_speed: f32,
     /// คาบ tick ของ fluid sim (วินาที) — น้อย = น้ำไหลเร็ว, มาก = ช้า/เบาเครื่อง
@@ -96,6 +104,9 @@ impl Default for GameSettings {
                 seed: 1,
             },
             time_of_day: 10.0,
+            day_of_year: 172, // ~ครีษมายัน (ทางช้างเผือกเด่นคืนหน้าร้อน) เป็นค่าเริ่มโชว์สวย
+            year: 0,
+            latitude_deg: 15.0, // ~ไทย (Real World เขียนทับจากตำแหน่งจริง)
             day_speed: 1.0,
             fluid_tick_seconds: 0.1,
             tnt_power: 10.0,
@@ -254,8 +265,15 @@ fn main() {
         return;
     }
 
+    // โหลดค่าตั้งค่ารวมจาก settings.json (คืน default ถ้าไม่มี) แล้ว apply ลง GameSettings
+    // fov/fly เก็บใน UserPrefs resource ให้ apply_camera_prefs_system เอาไปใส่กล้องทีหลัง
+    let user_prefs = world_save::load_user_prefs();
+    let mut initial_settings = GameSettings::default();
+    user_prefs.apply_to_settings(&mut initial_settings);
+
     App::new()
-        .init_resource::<GameSettings>()
+        .insert_resource(initial_settings)
+        .insert_resource(user_prefs)
         .init_resource::<RegenerateWorld>()
         .init_resource::<voxel::TargetedBlock>()
         .init_resource::<voxel::SelectedBlock>()
@@ -429,6 +447,8 @@ fn main() {
                     voxel::relight_system.before(voxel::world_generation_system),
                     voxel::branch_remesh_system.after(voxel::block_update_system),
                     voxel::advance_time_system.before(voxel::update_sun_system),
+                    // ใส่ FOV/fly speed ที่จำไว้ (settings.json) ให้กล้องครั้งแรกที่พร้อม
+                    world_save::apply_camera_prefs_system,
                 ),
             ).run_if(in_state(GameState::InGame)),
         )

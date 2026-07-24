@@ -179,6 +179,9 @@ pub fn parse_seed(input: &str) -> u32 {
     hasher.finish() as u32
 }
 
+fn def_time_of_day() -> f32 { 10.0 }
+fn def_day_of_year() -> u16 { 172 }
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct PlayerSaveData {
     pub position: [f32; 3],
@@ -189,6 +192,13 @@ pub struct PlayerSaveData {
     pub third_person: bool,
     pub hotbar_selected: usize,
     pub hotbar_items: Vec<Option<crate::item::WireItemStack>>,
+    // เวลา/ปฏิทินต่อโลก — โลกกลับมาที่เวลา/ฤดูเดิม (serde default เผื่อ save เก่าไม่มีฟิลด์)
+    #[serde(default = "def_time_of_day")]
+    pub time_of_day: f32,
+    #[serde(default = "def_day_of_year")]
+    pub day_of_year: u16,
+    #[serde(default)]
+    pub year: u32,
 }
 
 pub fn save_player_and_electricity(
@@ -196,6 +206,7 @@ pub fn save_player_and_electricity(
     transform: &bevy::prelude::Transform,
     camera: &crate::camera::FreeCamera,
     hotbar: &crate::voxel::Hotbar,
+    settings: &crate::GameSettings,
 ) {
     let dir = crate::voxel::active_save_dir();
         if let Ok(bytes) = bincode::serialize(grid) {
@@ -211,10 +222,134 @@ pub fn save_player_and_electricity(
             third_person: camera.third_person,
             hotbar_selected: hotbar.selected,
             hotbar_items: items,
+            time_of_day: settings.time_of_day,
+            day_of_year: settings.day_of_year,
+            year: settings.year,
         };
         if let Ok(json) = serde_json::to_string_pretty(&player_data) {
             let _ = std::fs::write(dir.join("player.json"), json);
         }
+}
+
+// ============================================================================
+// UserPrefs — ค่าตั้งค่ารวม (ต่อเครื่อง ไม่ผูกโลก) เซฟเป็น settings.json ที่ root โปรเจกต์
+// โหลดตอนเปิดเกม, เซฟตอน auto-save/ออกเกม → ปรับใน Options แล้วจำข้ามรอบเล่น
+// ============================================================================
+
+#[derive(Serialize, Deserialize, Clone, bevy::prelude::Resource)]
+pub struct UserPrefs {
+    pub render_distance: i32,
+    pub render_mode: crate::RenderMode,
+    pub lod_enabled: bool,
+    pub lod_distance_chunks: i32,
+    pub fluid_tick_seconds: f32,
+    pub day_speed: f32,
+    pub latitude_deg: f32,
+    pub fov_deg: f32,
+    pub fly_speed: f32,
+}
+
+impl Default for UserPrefs {
+    fn default() -> Self {
+        let s = crate::GameSettings::default();
+        Self {
+            render_distance: s.render_distance,
+            render_mode: s.render_mode,
+            lod_enabled: s.lod_enabled,
+            lod_distance_chunks: s.lod_distance_chunks,
+            fluid_tick_seconds: s.fluid_tick_seconds,
+            day_speed: s.day_speed,
+            latitude_deg: s.latitude_deg,
+            fov_deg: 70.0,   // ตรงกับ default FOV (camera.rs)
+            fly_speed: 50.0, // ตรงกับ FreeCamera::default().speed
+        }
+    }
+}
+
+impl UserPrefs {
+    /// เขียนค่าที่จำได้ลง GameSettings (fov/fly ไปที่กล้อง ดู [`apply_camera_prefs_system`])
+    pub fn apply_to_settings(&self, s: &mut crate::GameSettings) {
+        s.render_distance = self.render_distance;
+        s.render_mode = self.render_mode;
+        s.lod_enabled = self.lod_enabled;
+        s.lod_distance_chunks = self.lod_distance_chunks;
+        s.fluid_tick_seconds = self.fluid_tick_seconds;
+        s.day_speed = self.day_speed;
+        s.latitude_deg = self.latitude_deg;
+    }
+}
+
+fn user_prefs_path() -> PathBuf {
+    crate::voxel::project_root().join("settings.json")
+}
+
+/// โหลด settings.json (คืน default ถ้าไม่มี/พัง) — เรียกตอน main() ก่อน insert GameSettings
+pub fn load_user_prefs() -> UserPrefs {
+    std::fs::read_to_string(user_prefs_path())
+        .ok()
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default()
+}
+
+/// เซฟค่า global ปัจจุบันลง settings.json (fov/fly มาจากกล้อง)
+pub fn save_user_prefs(settings: &crate::GameSettings, fov_deg: f32, fly_speed: f32) {
+    let prefs = UserPrefs {
+        render_distance: settings.render_distance,
+        render_mode: settings.render_mode,
+        lod_enabled: settings.lod_enabled,
+        lod_distance_chunks: settings.lod_distance_chunks,
+        fluid_tick_seconds: settings.fluid_tick_seconds,
+        day_speed: settings.day_speed,
+        latitude_deg: settings.latitude_deg,
+        fov_deg,
+        fly_speed,
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&prefs) {
+        let _ = std::fs::write(user_prefs_path(), json);
+    }
+}
+
+/// ใช้ค่า fov/fly ที่จำไว้กับกล้องครั้งแรกที่พร้อม (รันจนกว่าจะ apply สำเร็จ)
+pub fn apply_camera_prefs_system(
+    prefs: bevy::prelude::Res<UserPrefs>,
+    mut done: bevy::prelude::Local<bool>,
+    mut cam_q: bevy::prelude::Query<&mut crate::camera::FreeCamera>,
+    mut proj_q: bevy::prelude::Query<&mut bevy::prelude::Projection, bevy::prelude::With<crate::camera::MainCamera>>,
+) {
+    if *done {
+        return;
+    }
+    let mut applied = false;
+    if let Ok(mut cam) = cam_q.single_mut() {
+        cam.speed = prefs.fly_speed;
+        applied = true;
+    }
+    if let Ok(mut proj) = proj_q.single_mut() {
+        if let bevy::prelude::Projection::Perspective(p) = &mut *proj {
+            p.fov = prefs.fov_deg.to_radians();
+            applied = true;
+        }
+    }
+    if applied {
+        *done = true;
+    }
+}
+
+/// ดึง FOV (องศา) + fly speed ปัจจุบันจากกล้อง เพื่อประกอบ save (ใช้ใน auto-save/on-exit)
+fn camera_fov_speed(
+    cam_q: &bevy::prelude::Query<(&bevy::prelude::Transform, &crate::camera::FreeCamera)>,
+    proj_q: &bevy::prelude::Query<&bevy::prelude::Projection, bevy::prelude::With<crate::camera::MainCamera>>,
+) -> (f32, f32) {
+    let fly = cam_q.single().map(|(_, c)| c.speed).unwrap_or(50.0);
+    let fov = proj_q
+        .single()
+        .ok()
+        .and_then(|p| match p {
+            bevy::prelude::Projection::Perspective(pp) => Some(pp.fov.to_degrees()),
+            _ => None,
+        })
+        .unwrap_or(70.0);
+    (fov, fly)
 }
 
 pub fn auto_save_system(
@@ -222,14 +357,18 @@ pub fn auto_save_system(
     mut timer: bevy::prelude::Local<f32>,
     grid: bevy::prelude::Res<crate::electricity::ElectricalGrid>,
     camera_q: bevy::prelude::Query<(&bevy::prelude::Transform, &crate::camera::FreeCamera)>,
+    proj_q: bevy::prelude::Query<&bevy::prelude::Projection, bevy::prelude::With<crate::camera::MainCamera>>,
     hotbar: bevy::prelude::Res<crate::voxel::Hotbar>,
+    settings: bevy::prelude::Res<crate::GameSettings>,
     mut chat: bevy::prelude::ResMut<crate::ui::ChatState>,
 ) {
     *timer += time.delta_secs();
     if *timer >= 45.0 { // เซฟบ่อยขึ้น กัน crash เสียความคืบหน้ามาก
         *timer = 0.0;
         if let Ok((transform, camera)) = camera_q.single() {
-            save_player_and_electricity(&grid, transform, camera, &hotbar);
+            save_player_and_electricity(&grid, transform, camera, &hotbar, &settings);
+            let (fov, fly) = camera_fov_speed(&camera_q, &proj_q);
+            save_user_prefs(&settings, fov, fly);
             chat.push_system("Auto-saved game.");
         }
     }
@@ -238,10 +377,14 @@ pub fn auto_save_system(
 pub fn save_on_exit_system(
     grid: bevy::prelude::Res<crate::electricity::ElectricalGrid>,
     camera_q: bevy::prelude::Query<(&bevy::prelude::Transform, &crate::camera::FreeCamera)>,
+    proj_q: bevy::prelude::Query<&bevy::prelude::Projection, bevy::prelude::With<crate::camera::MainCamera>>,
     hotbar: bevy::prelude::Res<crate::voxel::Hotbar>,
+    settings: bevy::prelude::Res<crate::GameSettings>,
 ) {
     if let Ok((transform, camera)) = camera_q.single() {
-        save_player_and_electricity(&grid, transform, camera, &hotbar);
+        save_player_and_electricity(&grid, transform, camera, &hotbar, &settings);
+        let (fov, fly) = camera_fov_speed(&camera_q, &proj_q);
+        save_user_prefs(&settings, fov, fly);
     }
 }
 
@@ -251,6 +394,8 @@ pub fn load_game_system(
     mut hotbar: bevy::prelude::ResMut<crate::voxel::Hotbar>,
     mut topo_writer: bevy::prelude::MessageWriter<crate::electricity::PowerTopologyChanged>,
     mut world: bevy::prelude::ResMut<crate::voxel::VoxelWorld>,
+    mut settings: bevy::prelude::ResMut<crate::GameSettings>,
+    net_client: Option<bevy::prelude::Res<bevy_renet::RenetClient>>,
 ) {
     let dir = crate::voxel::active_save_dir();
         if let Ok(bytes) = std::fs::read(dir.join("electricity.bin")) {
@@ -278,6 +423,12 @@ pub fn load_game_system(
                     if i < hotbar.slots.len() {
                         hotbar.slots[i] = wire_item.and_then(|w| w.to_stack());
                     }
+                }
+                // เวลา/ปฏิทินต่อโลก — client รับจาก host (Welcome) จึงไม่เขียนทับ
+                if net_client.is_none() {
+                    settings.time_of_day = data.time_of_day;
+                    settings.day_of_year = data.day_of_year;
+                    settings.year = data.year;
                 }
             }
         }

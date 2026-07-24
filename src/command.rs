@@ -21,6 +21,7 @@ const HELP: &[&str] = &[
     "/give <block|tool> [count] - put an item in the selected slot (tools: pickaxe, axe, shovel, chisel, wire)",
     "/setblock <x> <y> <z> <block> - place a block (host only)",
     "/time <0-24> - set time of day (host only)",
+    "/date <0-364> - set day of year (0 = spring equinox, host only)",
     "/daynight <speed> - day-night cycle speed (1 = normal, 0 = frozen, host only)",
     "/weather <clear|rain|snow> [intensity] - set weather (host only)",
     "/seed - show the world seed",
@@ -106,6 +107,7 @@ fn dispatch(
         "gamemode" => cmd_gamemode(&args, chat, world),
         "give" => cmd_give(&args, chat, world),
         "time" => cmd_time(&args, chat, world, server, is_client),
+        "date" => cmd_date(&args, chat, world, server, is_client),
         "daynight" => cmd_daynight(&args, chat, world, is_client),
         "weather" => cmd_weather(&args, chat, world, server, is_client),
         "setblock" => cmd_setblock(&args, chat, world, is_client),
@@ -232,14 +234,48 @@ fn cmd_time(
         return;
     }
     world.settings.time_of_day = hours;
-    // เดิม time sync แค่ครั้งเดียวตอน Welcome — ต้อง broadcast เองถึงจะถึง client ที่ต่ออยู่
+    broadcast_time(server, world);
+    chat.push_system(format!("Time set to {hours:.1}"));
+}
+
+/// broadcast เวลา+ปฏิทินปัจจุบันให้ client ที่ต่ออยู่ (time sync ไม่มี periodic — ต้องยิงเอง)
+fn broadcast_time(server: Option<&mut bevy_renet::RenetServer>, world: &CommandWorld) {
     if let Some(server) = server {
         server.broadcast_message(
             bevy_renet::renet::DefaultChannel::ReliableOrdered,
-            crate::network::encode(&crate::network::ServerMessage::TimeOfDay { hours }),
+            crate::network::encode(&crate::network::ServerMessage::TimeOfDay {
+                hours: world.settings.time_of_day,
+                day_of_year: world.settings.day_of_year,
+                year: world.settings.year,
+            }),
         );
     }
-    chat.push_system(format!("Time set to {hours:.1}"));
+}
+
+/// ตั้งวันในปี 0..364 (0 = วสันตวิษุวัต) — คุมฤดู/ท้องฟ้ากลางคืน host only เหมือน /time
+fn cmd_date(
+    args: &[&str],
+    chat: &mut crate::ui::ChatState,
+    world: &mut CommandWorld,
+    server: Option<&mut bevy_renet::RenetServer>,
+    is_client: bool,
+) {
+    if is_client {
+        chat.push_error("/date is host only");
+        return;
+    }
+    let dpy = crate::astro::DAYS_PER_YEAR as i32;
+    let Some(day) = args.first().and_then(|a| a.parse::<i32>().ok()) else {
+        chat.push_error("usage: /date <0-364>  (0 = spring equinox)");
+        return;
+    };
+    if !(0..dpy).contains(&day) {
+        chat.push_error(format!("date must be between 0 and {}", dpy - 1));
+        return;
+    }
+    world.settings.day_of_year = day as u16;
+    broadcast_time(server, world);
+    chat.push_system(format!("Date set to day {day} of the year"));
 }
 
 /// ปรับความเร็วรอบวัน-คืน — host only เพราะมีแต่ host/single ที่เดินเวลาเอง
