@@ -307,7 +307,7 @@ pub fn setup_camera(
     mut commands: Commands,
 ) {
     let transform =
-        Transform::from_xyz(-2.0, 250.0, -2.0).looking_at(Vec3::new(8.0, 200.0, 8.0), Vec3::Y);
+        Transform::from_xyz(-2.0, 140.0, -2.0).looking_at(Vec3::new(8.0, 96.0, 8.0), Vec3::Y);
 
     // ดึง yaw/pitch จาก rotation เริ่มต้น ให้ตรงกับสูตรใน camera_look_system
     // (Quat::from_axis_angle(Y, yaw) * Quat::from_axis_angle(X, pitch))

@@ -42,7 +42,6 @@ pub fn worlds_root() -> PathBuf {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct WorldGenPreset {
     pub render_mode: crate::RenderMode,
-    pub terrain_source: crate::TerrainSource,
     pub noise: crate::NoiseParams,
     pub render_distance: i32,
 }
@@ -51,7 +50,6 @@ impl WorldGenPreset {
     pub fn from_settings(s: &crate::GameSettings) -> Self {
         Self {
             render_mode: s.render_mode,
-            terrain_source: s.terrain_source,
             noise: s.noise,
             render_distance: s.render_distance,
         }
@@ -91,6 +89,32 @@ pub fn load_worldgen_preset(name: &str) -> Option<WorldGenPreset> {
 
 pub fn delete_worldgen_preset(name: &str) -> std::io::Result<()> {
     std::fs::remove_file(worldgen_presets_root().join(format!("{}.json", slugify(name))))
+}
+
+// ---- default preset: โลกใหม่ (Create World) ดึงค่า gen จากตัวนี้ ----
+// เก็บแค่ "ชื่อ" preset ที่ตั้งเป็น default ในไฟล์ marker เดียว (single source of truth)
+// ไม่มีนามสกุล .json → list_worldgen_presets มองข้าม ไม่โผล่เป็น preset
+
+fn default_marker_path() -> PathBuf {
+    worldgen_presets_root().join(".default")
+}
+
+/// ตั้ง preset ชื่อนี้เป็น default ที่โลกใหม่จะดึงค่า gen ไปใช้
+pub fn set_default_worldgen(name: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(worldgen_presets_root())?;
+    std::fs::write(default_marker_path(), name)
+}
+
+/// ชื่อ preset ที่เป็น default ตอนนี้ (ไว้ให้ UI โชว์ว่าอันไหน default) — None ถ้ายังไม่ตั้ง
+pub fn default_worldgen_name() -> Option<String> {
+    let s = std::fs::read_to_string(default_marker_path()).ok()?;
+    let s = s.trim();
+    if s.is_empty() { None } else { Some(s.to_string()) }
+}
+
+/// ค่า gen ของ default preset — คืน None ถ้ายังไม่ตั้ง/preset ถูกลบไปแล้ว
+pub fn load_default_worldgen() -> Option<WorldGenPreset> {
+    default_worldgen_name().and_then(|n| load_worldgen_preset(&n))
 }
 
 /// ชื่อโฟลเดอร์จากชื่อโลก — กันอักขระที่ใช้ใน path ไม่ได้ (ชื่อไทยกลายเป็น `_` หมด
@@ -281,6 +305,27 @@ impl UserPrefs {
 
 fn user_prefs_path() -> PathBuf {
     crate::voxel::project_root().join("settings.json")
+}
+
+// ---- BiomeConfig (data-driven biomes) — global, เซฟ biomes.json, sync ให้ client ----
+
+fn biome_config_path() -> PathBuf {
+    crate::voxel::project_root().join("biomes.json")
+}
+
+/// โหลดชุด biome จาก biomes.json (คืน default ถ้าไม่มี/พัง) — เรียกตอน main() ก่อน insert resource
+pub fn load_biome_config() -> crate::biomegen::BiomeConfig {
+    std::fs::read_to_string(biome_config_path())
+        .ok()
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default()
+}
+
+/// เซฟชุด biome ปัจจุบันลง biomes.json (เรียกตอนแก้ใน dev UI)
+pub fn save_biome_config(cfg: &crate::biomegen::BiomeConfig) {
+    if let Ok(json) = serde_json::to_string_pretty(cfg) {
+        let _ = std::fs::write(biome_config_path(), json);
+    }
 }
 
 /// โหลด settings.json (คืน default ถ้าไม่มี/พัง) — เรียกตอน main() ก่อน insert GameSettings

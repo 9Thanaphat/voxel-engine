@@ -37,14 +37,17 @@ pub enum ServerMessage {
         /// ลำดับผู้เล่น (host = 1, client ตามลำดับ join = 2, 3, ...)
         player_number: u32,
         noise: crate::NoiseParams,
-        /// client generate chunk เองจากค่านี้ — RealWorld ต้องมีไฟล์ dem ตรงกัน
-        terrain: crate::TerrainSource,
         spawn_pos: [f32; 3],
         time_of_day: f32,
         /// ปฏิทินโลก (วันในปี + ปี) — คุมฤดู/ตำแหน่งดาราศาสตร์ให้ client ตรงกับ host
         day_of_year: u16,
         year: u32,
         game_mode: crate::GameMode,
+        /// อากาศปัจจุบันของ host — ให้ client เห็นฝน/หิมะทันทีตั้งแต่เข้า (อากาศอยู่นานเป็นวัน)
+        weather_kind: crate::weather::WeatherKind,
+        weather_intensity: f32,
+        /// ชุด biome ของ host — client ต้อง gen chunk ด้วย config เดียวกัน terrain จึงตรง
+        biomes: crate::biomegen::BiomeConfig,
     },
     ChunkData {
         chunk_pos: [i32; 2],
@@ -233,9 +236,8 @@ pub struct ClientSync {
     /// ตั้งใจออกเอง (จาก pause menu) — watchdog จะพากลับ MainMenu เงียบๆ
     /// แทนที่จะเด้งไปหน้า multiplayer พร้อมข้อความ "หลุดจากเซิร์ฟเวอร์"
     pub leaving: bool,
-    /// noise/terrain เดิมของผู้เล่น ไว้คืนค่าตอน disconnect
+    /// noise เดิมของผู้เล่น ไว้คืนค่าตอน disconnect
     pub prev_noise: Option<crate::NoiseParams>,
-    pub prev_terrain: Option<crate::TerrainSource>,
     /// chunk cache จาก host — อยู่ข้าม unload/reload โดยไม่แตะ disk
     pub full_chunks: HashMap<IVec2, ReceivedChunk>,
     /// edit ที่มาถึงก่อน chunk จะโหลด
@@ -438,7 +440,6 @@ pub fn start_client(
     commands: &mut Commands,
     mp_ui: &mut MultiplayerUi,
     current_noise: crate::NoiseParams,
-    current_terrain: crate::TerrainSource,
 ) {
     let text = mp_ui.address.trim();
     let addr_text = if text.is_empty() {
@@ -484,7 +485,6 @@ pub fn start_client(
     commands.insert_resource(ClientSync {
         my_id: client_id,
         prev_noise: Some(current_noise),
-        prev_terrain: Some(current_terrain),
         ..Default::default()
     });
     mp_ui.status = "กำลังเชื่อมต่อ...".into();
@@ -681,6 +681,8 @@ pub fn on_server_event(
     server: Option<ResMut<RenetServer>>,
     host_sync: Option<ResMut<HostSync>>,
     settings: Res<crate::GameSettings>,
+    weather: Res<crate::weather::Weather>,
+    biomes: Res<crate::biomegen::BiomeConfig>,
     camera_query: Query<&Transform, With<crate::camera::FreeCamera>>,
     models: Res<PlayerModelAssets>,
     remote_players: Query<(Entity, &RemotePlayer)>,
@@ -701,17 +703,19 @@ pub fn on_server_event(
                 .iter()
                 .next()
                 .map(|t| t.translation)
-                .unwrap_or(Vec3::new(0.0, 250.0, 0.0));
+                .unwrap_or(Vec3::new(0.0, 160.0, 0.0));
             let welcome = ServerMessage::Welcome {
                 client_id,
                 player_number,
                 noise: settings.noise,
-                terrain: settings.terrain_source,
                 spawn_pos: spawn_pos.to_array(),
                 time_of_day: settings.time_of_day,
                 day_of_year: settings.day_of_year,
                 year: settings.year,
                 game_mode: settings.game_mode,
+                weather_kind: weather.kind,
+                weather_intensity: weather.target,
+                biomes: biomes.clone(),
             };
             server.send_message(client_id, DefaultChannel::ReliableOrdered, encode(&welcome));
 
@@ -994,17 +998,25 @@ pub fn client_receive_messages(
     mut remote_players: Query<(Entity, &mut RemotePlayer)>,
     mut chat_ui: ResMut<crate::ui::ChatState>,
     mut fx_writer: MessageWriter<crate::particles::ExplosionFx>,
-    mut weather: ResMut<crate::weather::Weather>,
+    // รวมเป็น tuple เดียว — Bevy จำกัด system param ที่ 16 ตัว
+    (mut weather, mut biome_config): (
+        ResMut<crate::weather::Weather>,
+        ResMut<crate::biomegen::BiomeConfig>,
+    ),
 ) {
     while let Some(bytes) = client.receive_message(DefaultChannel::ReliableOrdered) {
         match decode::<ServerMessage>(&bytes) {
-            Some(ServerMessage::Welcome { client_id: _, player_number, noise, terrain, spawn_pos, time_of_day, day_of_year, year, game_mode: _ }) => {
+            Some(ServerMessage::Welcome { client_id: _, player_number, noise, spawn_pos, time_of_day, day_of_year, year, game_mode: _, weather_kind, weather_intensity, biomes }) => {
                 client_sync.my_number = player_number;
                 settings.noise = noise;
-                settings.terrain_source = terrain;
                 settings.time_of_day = time_of_day;
                 settings.day_of_year = day_of_year;
+                crate::voxel::CURRENT_DAY_OF_YEAR.store(day_of_year as u32, std::sync::atomic::Ordering::Relaxed);
                 settings.year = year;
+                weather.set(weather_kind, weather_intensity);
+                // ชุด biome ของ host → gen chunk ให้ตรงกัน (ต้องตั้ง global ก่อน regen)
+                crate::voxel::set_worldgen_biomes(biomes.clone());
+                *biome_config = biomes;
                 if let Some(mut transform) = camera_query.iter_mut().next() {
                     transform.translation = Vec3::from_array(spawn_pos);
                 }
@@ -1092,6 +1104,7 @@ pub fn client_receive_messages(
             Some(ServerMessage::TimeOfDay { hours, day_of_year, year }) => {
                 settings.time_of_day = hours;
                 settings.day_of_year = day_of_year;
+                crate::voxel::CURRENT_DAY_OF_YEAR.store(day_of_year as u32, std::sync::atomic::Ordering::Relaxed);
                 settings.year = year;
             }
             Some(ServerMessage::Weather { kind, intensity }) => {
@@ -1217,12 +1230,9 @@ pub fn client_connection_watchdog(
         .unwrap_or_else(|| "connection lost".into());
 
     if client_sync.received_welcome {
-        // ออกจากเกม → คืนค่า noise/terrain เดิม ล้างโลกของ host ทิ้ง
+        // ออกจากเกม → คืนค่า noise เดิม ล้างโลกของ host ทิ้ง
         if let Some(prev) = client_sync.prev_noise {
             settings.noise = prev;
-        }
-        if let Some(prev) = client_sync.prev_terrain {
-            settings.terrain_source = prev;
         }
         regenerate.0 = true;
         if client_sync.leaving {
@@ -1261,7 +1271,7 @@ pub fn autostart_from_args(
     } else if let Some(i) = args.iter().position(|a| a == "--join") {
         mp_ui.address = args.get(i + 1).cloned().unwrap_or_else(|| "127.0.0.1".into());
         next_state.set(crate::GameState::MultiplayerMenu);
-        start_client(&mut commands, &mut mp_ui, settings.noise, settings.terrain_source);
+        start_client(&mut commands, &mut mp_ui, settings.noise);
     }
 }
 

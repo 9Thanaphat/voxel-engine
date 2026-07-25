@@ -223,7 +223,7 @@ impl Plugin for SkyPlugin {
             .init_resource::<SkySettings>()
             .init_resource::<CloudPhase>()
             .add_systems(Startup, spawn_skydome)
-            .add_systems(Update, (follow_camera, update_observer_latitude, update_sky));
+            .add_systems(Update, (follow_camera, update_sky));
     }
 }
 
@@ -364,19 +364,3 @@ fn update_sky(
     }
 }
 
-/// โหมด Real World: ตั้งละติจูดผู้สังเกตจากตำแหน่งจริงของผู้เล่นบนโลก → ท้องฟ้าตรงกับสถานที่จริง
-/// (โหมด Noise ปล่อยตามค่า setting) — เป็นค่า local ต่อผู้เล่น ไม่ sync ข้าม MP
-fn update_observer_latitude(
-    mut settings: ResMut<crate::GameSettings>,
-    cam: Query<&Transform, With<crate::camera::FreeCamera>>,
-) {
-    if settings.terrain_source != crate::TerrainSource::RealWorld {
-        return;
-    }
-    let Ok(t) = cam.single() else { return };
-    let (lat, _lon) = crate::dem::block_to_latlon(t.translation.x as f64, t.translation.z as f64);
-    // เขียนเฉพาะตอนขยับพอสังเกต — กัน change-detection ปลุกระบบอื่นทุกเฟรม
-    if (settings.latitude_deg - lat as f32).abs() > 0.05 {
-        settings.latitude_deg = lat as f32;
-    }
-}

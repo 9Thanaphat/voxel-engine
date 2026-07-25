@@ -5,7 +5,6 @@ mod voxel;
 mod ui;
 mod network;
 mod particles;
-mod dem;
 mod electricity;
 mod lod;
 mod item;
@@ -16,8 +15,11 @@ pub mod tree;
 mod sky;
 mod astro;
 mod biome;
+mod biomegen;
 mod audio;
 mod weather;
+mod hydro;
+mod map_preview;
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RenderMode {
@@ -25,14 +27,6 @@ pub enum RenderMode {
     Full,
     /// สร้างเฉพาะ mesh ผิวโลกจาก noise ตรงๆ — ไว้ preview ตอนจูนค่า world gen
     SurfacePreview,
-}
-
-/// แหล่งภูมิประเทศ: noise เดิม หรือโลกจริงจาก DEM (1 บล็อก = 1 ม.)
-/// — serialize ได้เพราะต้อง sync ให้ client ตอน join (client generate chunk เอง)
-#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
-pub enum TerrainSource {
-    Noise,
-    RealWorld,
 }
 
 /// โหมดเล่น: Creative = palette วาง/ขุดไม่จำกัด, Survival = นับจำนวนจริง เก็บ/หัก stack
@@ -56,7 +50,6 @@ pub struct NoiseParams {
 pub struct GameSettings {
     pub render_distance: i32,
     pub render_mode: RenderMode,
-    pub terrain_source: TerrainSource,
     /// โหมดเล่น Creative/Survival (ดู [`GameMode`]) — เปลี่ยนแล้ว rebuild Hotbar
     pub game_mode: GameMode,
     pub noise: NoiseParams,
@@ -98,7 +91,6 @@ impl Default for GameSettings {
         Self {
             render_distance: 8,
             render_mode: RenderMode::Full,
-            terrain_source: TerrainSource::Noise,
             game_mode: GameMode::Creative,
             noise: NoiseParams {
                 frequency: 0.015,
@@ -165,15 +157,6 @@ fn inventory_closed(open: Res<voxel::InventoryOpen>) -> bool {
     !open.0
 }
 
-/// `--realworld`: เข้าโลก DEM ตั้งแต่เริ่ม (ใช้คู่ --host ไว้เทสอัตโนมัติ)
-fn apply_cli_world_flags(mut settings: ResMut<GameSettings>) {
-    if std::env::args().any(|a| a == "--realworld") {
-        settings.terrain_source = TerrainSource::RealWorld;
-        settings.dev_mode = true;
-        voxel::set_legacy_save_dir(true);
-    }
-}
-
 #[derive(Clone, Copy, Default, Eq, PartialEq, Debug, Hash, States)]
 pub enum GameState {
     #[default]
@@ -182,7 +165,7 @@ pub enum GameState {
     SinglePlayerMenu,
     /// ฟอร์มตั้งชื่อ/seed/mode ของ world ใหม่
     CreateWorldMenu,
-    /// ทางเข้าเดิม (Quick Start noise / Real World) สำหรับจูนค่าและเทส
+    /// ทางเข้าเดิม (Quick Start noise) สำหรับจูนค่าและเทส
     DevMenu,
     MultiplayerMenu,
     InGame,
@@ -249,25 +232,6 @@ fn install_crash_handler() {
 
 fn main() {
     install_crash_handler();
-    // โหมดโหลด DEM: `voxel-game --build-dem <lat0> <lat1> <lon0> <lon1>` แล้วจบ
-    let args: Vec<String> = std::env::args().collect();
-    if let Some(i) = args.iter().position(|a| a == "--build-dem") {
-        let lat0 = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let lat1 = args.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let lon0 = args.get(i + 3).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let lon1 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(0);
-        dem::build_dem_cli(lat0, lat1, lon0, lon1);
-        return;
-    }
-    // โหมด water mask จาก OSM: `voxel-game --build-water <lat0> <lat1> <lon0> <lon1>`
-    if let Some(i) = args.iter().position(|a| a == "--build-water") {
-        let lat0 = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let lat1 = args.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let lon0 = args.get(i + 3).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let lon1 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(0);
-        dem::build_water_cli(lat0, lat1, lon0, lon1);
-        return;
-    }
 
     // โหลดค่าตั้งค่ารวมจาก settings.json (คืน default ถ้าไม่มี) แล้ว apply ลง GameSettings
     // fov/fly เก็บใน UserPrefs resource ให้ apply_camera_prefs_system เอาไปใส่กล้องทีหลัง
@@ -275,9 +239,14 @@ fn main() {
     let mut initial_settings = GameSettings::default();
     user_prefs.apply_to_settings(&mut initial_settings);
 
+    // ชุด biome (data-driven) จาก biomes.json — worldgen อ่านผ่าน global ด้วย (single-player)
+    let biome_config = world_save::load_biome_config();
+    voxel::set_worldgen_biomes(biome_config.clone());
+
     App::new()
         .insert_resource(initial_settings)
         .insert_resource(user_prefs)
+        .insert_resource(biome_config)
         .init_resource::<RegenerateWorld>()
         .init_resource::<voxel::TargetedBlock>()
         .init_resource::<voxel::SelectedBlock>()
@@ -297,7 +266,6 @@ fn main() {
         .init_resource::<voxel::NukeJobs>()
         .init_resource::<voxel::NukeApplication>()
         .init_resource::<ui::ScreenFlash>()
-        .init_resource::<ui::TeleportUi>()
         .init_resource::<ui::ShowDebugMenu>()
         .init_resource::<ui::HudHidden>()
         .init_resource::<ui::ShowOptions>()
@@ -318,31 +286,35 @@ fn main() {
         .init_resource::<network::PositionSendTimer>()
         .init_resource::<tree::BranchNetwork>()
         .add_plugins((
-            DefaultPlugins.set(ImagePlugin {
-                default_sampler: bevy::image::ImageSamplerDescriptor {
-                    address_mode_u: bevy::image::ImageAddressMode::Repeat,
-                    address_mode_v: bevy::image::ImageAddressMode::Repeat,
-                    ..bevy::image::ImageSamplerDescriptor::nearest()
-                },
-            }).set(bevy::asset::AssetPlugin {
-                file_path: asset_root(),
-                ..Default::default()
-            }),
-            bevy::pbr::wireframe::WireframePlugin::default(),
-            bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
-            bevy::diagnostic::EntityCountDiagnosticsPlugin::default(),
-            bevy_egui::EguiPlugin::default(),
-            electricity::ElectricityPlugin,
-            // renet: plugins ทำงานเฉพาะตอนมี RenetServer/RenetClient resource
-            bevy_renet::RenetServerPlugin,
-            bevy_renet::RenetClientPlugin,
-            bevy_renet::netcode::NetcodeServerPlugin,
-            bevy_renet::netcode::NetcodeClientPlugin,
-            bevy_hanabi::HanabiPlugin,
-            item::ItemPlugin,
-            sky::SkyPlugin,
-            audio::AudioPlugin,
-            weather::WeatherPlugin,
+            (
+                DefaultPlugins.set(ImagePlugin {
+                    default_sampler: bevy::image::ImageSamplerDescriptor {
+                        address_mode_u: bevy::image::ImageAddressMode::Repeat,
+                        address_mode_v: bevy::image::ImageAddressMode::Repeat,
+                        ..bevy::image::ImageSamplerDescriptor::nearest()
+                    },
+                }).set(bevy::asset::AssetPlugin {
+                    file_path: asset_root(),
+                    ..Default::default()
+                }),
+                bevy::pbr::wireframe::WireframePlugin::default(),
+                bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
+                bevy::diagnostic::EntityCountDiagnosticsPlugin::default(),
+                bevy_egui::EguiPlugin::default(),
+            ),
+            (
+                electricity::ElectricityPlugin,
+                bevy_renet::RenetServerPlugin,
+                bevy_renet::RenetClientPlugin,
+                bevy_renet::netcode::NetcodeServerPlugin,
+                bevy_renet::netcode::NetcodeClientPlugin,
+                bevy_hanabi::HanabiPlugin,
+                item::ItemPlugin,
+                sky::SkyPlugin,
+                audio::AudioPlugin,
+                weather::WeatherPlugin,
+                map_preview::MapPreviewPlugin,
+            )
         ))
         .init_state::<GameState>()
         .add_message::<particles::BlockFx>()
@@ -413,7 +385,7 @@ fn main() {
         )
         .add_systems(
             OnEnter(GameState::InGame),
-            (reset_paused, voxel::position_player_for_terrain, world_save::load_game_system.after(voxel::position_player_for_terrain), ui::show_controls_hint),
+            (reset_paused, world_save::load_game_system, ui::show_controls_hint),
         )
         // ออกจากโลก: เซฟที่ค้าง + ล้างโลกทิ้ง ไม่งั้นค้างเป็นฉากหลังเมนูหลัก
         .add_systems(
@@ -439,7 +411,6 @@ fn main() {
                 voxel::explosion_debug_system,
                 lod::update_lod_tiles,
                 lod::hide_near_overlay,
-                dem::dem_stream_system,
                 voxel::start_icon_bake,
                 voxel::finish_icon_bake,
                 voxel::propagate_render_layers,
@@ -499,7 +470,6 @@ fn main() {
             network::player_animation_system,
             network::update_remote_held_items.after(network::player_rig_setup_system),
         ))
-        .add_systems(Startup, apply_cli_world_flags.before(network::autostart_from_args))
         .add_systems(Startup, network::autostart_from_args)
         .add_systems(
             bevy_egui::EguiPrimaryContextPass,

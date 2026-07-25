@@ -139,14 +139,6 @@ pub struct ScreenFlash {
     pub decay: f32,
 }
 
-/// ช่องกรอก lat/lon สำหรับ teleport ในโลกจริง (โหมด RealWorld) + ข้อความสถานะ
-#[derive(Resource, Default)]
-pub struct TeleportUi {
-    pub lat: String,
-    pub lon: String,
-    pub status: String,
-}
-
 // --------------------------------------------------------
 // Chat
 // --------------------------------------------------------
@@ -1802,25 +1794,7 @@ pub fn chat_input_system(
     queue.0.push_back(text);
 }
 
-/// สลับชนิดโลก: ต่างจากเดิม = ล้างโลก generate ใหม่ + ชี้โฟลเดอร์เซฟให้ถูกโลก
-pub fn select_terrain(
-    settings: &mut crate::GameSettings,
-    regenerate: &mut crate::RegenerateWorld,
-    source: crate::TerrainSource,
-) {
-    if settings.terrain_source != source {
-        settings.terrain_source = source;
-        regenerate.0 = true;
-        // ภูเขาจริง mesh หนักกว่าโลก noise หลายเท่า — เริ่มที่ระยะปลอดภัยก่อน
-        // (ปรับเพิ่มเองได้ใน settings ตามไหวของการ์ด)
-        if source == crate::TerrainSource::RealWorld && settings.render_distance > 6 {
-            settings.render_distance = 6;
-        }
-    }
-    crate::voxel::set_legacy_save_dir(source == crate::TerrainSource::RealWorld);
-}
-
-/// ทางเข้าเกมทางเดียวของทุกเมนู — รวมไว้ที่เดียวเพราะ terrain_source กับโฟลเดอร์เซฟ
+/// ทางเข้าเกมทางเดียวของทุกเมนู — รวมไว้ที่เดียวเพราะ noise กับโฟลเดอร์เซฟ
 /// ต้องตั้งคู่กันเสมอ (หลุด sync = เซฟข้ามโลกปนกัน)
 #[allow(clippy::too_many_arguments)]
 fn enter_world(
@@ -1831,21 +1805,21 @@ fn enter_world(
     save_dir: Option<std::path::PathBuf>,
     seed: u32,
     mode: crate::GameMode,
-    source: crate::TerrainSource,
     dev: bool,
 ) {
     settings.dev_mode = dev;
     settings.game_mode = mode;
     settings.noise.seed = seed;
-    settings.terrain_source = source;
+
+    // เวลาต่อโลก: เริ่ม default เสมอ — โลกเก่าจะถูก load_game_system เขียนทับจาก player.json ทีหลัง
+    // (รันบน OnEnter(InGame) ถัดจากนี้) โลกใหม่ไม่มี player.json จึงคงค่า default ไม่รับเวลาโลกก่อน
+    settings.time_of_day = 10.0;
+    settings.day_of_year = 172;
+    settings.year = 0;
 
     match save_dir {
         Some(dir) => crate::voxel::set_active_save_dir(Some(dir)),
-        None => crate::voxel::set_legacy_save_dir(source == crate::TerrainSource::RealWorld),
-    }
-    if source == crate::TerrainSource::RealWorld && settings.render_distance > 6 {
-        // ภูเขาจริง mesh หนักกว่าโลก noise หลายเท่า — เริ่มที่ระยะปลอดภัยก่อน
-        settings.render_distance = 6;
+        None => crate::voxel::set_legacy_save_dir(),
     }
 
     // สำคัญ: ล้างโลกใน memory จาก world ก่อนหน้า ไม่งั้น chunk เก่าค้างข้ามโลก
@@ -2201,7 +2175,6 @@ pub fn singleplayer_menu_system(
             Some(dir),
             meta.seed,
             meta.mode(),
-            crate::TerrainSource::Noise,
             false,
         );
     } else if let Some(i) = delete {
@@ -2310,6 +2283,13 @@ pub fn create_world_menu_system(
     if let Some((dir, meta)) = created {
         create_ui.status.clear();
         list.0.insert(0, (dir.clone(), meta.clone()));
+        // ดึงค่า gen จาก default preset (ถ้าตั้งไว้) — seed จะถูก enter_world เขียนทับด้วย meta.seed
+        // terrain คงเป็น Noise (เมนูนี้สร้างโลก generate เท่านั้น) ไม่รับ RealWorld จาก preset
+        if let Some(p) = crate::world_save::load_default_worldgen() {
+            settings.noise = p.noise;
+            settings.render_mode = p.render_mode;
+            settings.render_distance = p.render_distance;
+        }
         enter_world(
             &mut settings,
             &mut regenerate,
@@ -2318,7 +2298,6 @@ pub fn create_world_menu_system(
             Some(dir),
             meta.seed,
             meta.mode(),
-            crate::TerrainSource::Noise,
             false,
         );
     }
@@ -2352,9 +2331,7 @@ pub fn dev_menu_system(
                 ui.add_space(20.0);
                 ui.heading(bevy_egui::egui::RichText::new("DEV MODE").size(32.0).strong());
                 ui.label(
-                    bevy_egui::egui::RichText::new("saves to saves/ (noise) and saves_dem/ (real world)")
-                        .small()
-                        .weak(),
+                    bevy_egui::egui::RichText::new("saves to saves/").small().weak(),
                 );
                 ui.add_space(20.0);
 
@@ -2372,24 +2349,7 @@ pub fn dev_menu_system(
                 if ui.add_sized(btn_size, bevy_egui::egui::Button::new("Quick Start (Noise)")).clicked() {
                     enter_world(
                         &mut settings, &mut regenerate, &mut hotbar, &mut next_state,
-                        None, seed, mode, crate::TerrainSource::Noise, true,
-                    );
-                }
-                ui.add_space(10.0);
-
-                // โลกจริง 1 บล็อก = 1 ม. — ต้องมีไฟล์ assets/dem/ (สร้างด้วย --convert-dem)
-                let has_dem = crate::dem::streamer().is_some();
-                let rw_btn = ui.add_enabled(
-                    has_dem,
-                    bevy_egui::egui::Button::new("Real World (Chiang Mai)").min_size(btn_size),
-                );
-                if !has_dem {
-                    rw_btn.clone().on_disabled_hover_text("assets/dem/ not found - run --build-dem first");
-                }
-                if rw_btn.clicked() {
-                    enter_world(
-                        &mut settings, &mut regenerate, &mut hotbar, &mut next_state,
-                        None, seed, mode, crate::TerrainSource::RealWorld, true,
+                        None, seed, mode, true,
                     );
                 }
                 ui.add_space(10.0);
@@ -2472,7 +2432,7 @@ pub fn multiplayer_menu_system(
                 ui.add_space(10.0);
 
                 if ui.add_enabled(!connecting, bevy_egui::egui::Button::new("Join").min_size(btn_size)).clicked() {
-                    crate::network::start_client(&mut commands, &mut mp_ui, settings.noise, settings.terrain_source);
+                    crate::network::start_client(&mut commands, &mut mp_ui, settings.noise);
                 }
                 if !mp_ui.status.is_empty() {
                     ui.add_space(6.0);
@@ -2632,28 +2592,21 @@ pub fn update_coordinate_ui_system(
             let hh = settings.time_of_day.rem_euclid(24.0);
             let h = hh.floor() as u32;
             let m = ((hh - h as f32) * 60.0).floor() as u32;
+
+            let sampler = crate::voxel::TerrainSampler::new(settings.noise);
+            let biome_name = sampler.biome_name(pos.x as f64, pos.z as f64);
+            let actual_lat = crate::biome::climate_lat(pos.z as f64);
+
             text.0.push_str(&format!(
-                "\n{:02}:{:02} | Day {}/{} Yr {} ({}) | Lat {:.1}°",
+                "\n{:02}:{:02} | Day {}/{} Yr {} ({}) | Lat {:.1}° | Biome: {}",
                 h, m,
                 settings.day_of_year,
                 crate::astro::DAYS_PER_YEAR as u16,
                 settings.year,
                 crate::astro::season_name(settings.day_of_year),
-                settings.latitude_deg,
+                actual_lat,
+                biome_name,
             ));
-            // โลกจริง: โชว์พิกัด GPS + ความสูงจากระดับน้ำทะเลจริง (เทียบแผนที่ได้เลย)
-            if settings.terrain_source == crate::TerrainSource::RealWorld
-                && crate::dem::streamer().is_some()
-            {
-                {
-                    let (lat, lon) = crate::dem::block_to_latlon(pos.x as f64, pos.z as f64);
-                    let elev = pos.y - crate::dem::DEM_SEA_LEVEL_Y as f32;
-                    text.0.push_str(&format!(
-                        "\nGPS: {:.5}°N {:.5}°E  elev {:.0} m",
-                        lat, lon, elev
-                    ));
-                }
-            }
         }
     }
 }
@@ -2832,7 +2785,7 @@ pub fn options_menu_system(
 
             ui.heading("World");
             ui.add(
-                bevy_egui::egui::Slider::new(&mut settings.render_distance, 2..=16)
+                bevy_egui::egui::Slider::new(&mut settings.render_distance, 2..=64)
                     .text("Render Distance"),
             );
             render_distance_warning(ui, settings.render_distance);
@@ -2950,7 +2903,6 @@ fn render_distance_warning(ui: &mut bevy_egui::egui::Ui, rd: i32) {
 fn worldgen_preset_ui(
     ui: &mut bevy_egui::egui::Ui,
     settings: &mut crate::GameSettings,
-    regenerate: &mut crate::RegenerateWorld,
     name: &mut String,
     status: &mut String,
 ) -> bool {
@@ -2969,20 +2921,27 @@ fn worldgen_preset_ui(
                 }
             }
         });
+        let current_default = crate::world_save::default_worldgen_name();
         for pname in crate::world_save::list_worldgen_presets() {
+            let is_default = current_default.as_deref() == Some(pname.as_str());
             ui.horizontal(|ui| {
                 if ui.button(format!("Load  {pname}")).clicked() {
                     if let Some(p) = crate::world_save::load_worldgen_preset(&pname) {
                         settings.render_mode = p.render_mode;
                         settings.noise = p.noise;
                         settings.render_distance = p.render_distance;
-                        // สลับ terrain ผ่าน select_terrain (จัดโฟลเดอร์เซฟ + ตั้ง regenerate ให้)
-                        if p.terrain_source != settings.terrain_source {
-                            select_terrain(settings, regenerate, p.terrain_source);
-                        }
                         regen = true;
                         *name = pname.clone();
                         *status = format!("Loaded '{pname}'");
+                    }
+                }
+                // ตั้ง preset นี้เป็น default ที่โลกใหม่ (Create World) จะดึงค่าไปใช้
+                if is_default {
+                    ui.label(egui::RichText::new("⭐ default").small().color(egui::Color32::from_rgb(255, 217, 51)));
+                } else if ui.button("Set Default").on_hover_text("โลกใหม่จะใช้ค่า gen จาก preset นี้").clicked() {
+                    match crate::world_save::set_default_worldgen(&pname) {
+                        Ok(_) => *status = format!("Default = '{pname}'"),
+                        Err(e) => *status = format!("Set default failed: {e}"),
                     }
                 }
                 if ui.button("🗑").on_hover_text("delete preset").clicked() {
@@ -2998,12 +2957,122 @@ fn worldgen_preset_ui(
     regen
 }
 
+/// บล็อกที่เลือกได้เป็นผิว/ใต้ผิว biome ในเมนู dev
+const BIOME_BLOCK_CHOICES: &[crate::voxel::BlockType] = &[
+    crate::voxel::BlockType::Grass,
+    crate::voxel::BlockType::Dirt,
+    crate::voxel::BlockType::Sand,
+    crate::voxel::BlockType::Stone,
+    crate::voxel::BlockType::Snow,
+    crate::voxel::BlockType::SnowyGrass,
+];
+
+/// dropdown เลือกบล็อก (เก็บเป็น u8 id) — คืน true ถ้าเปลี่ยน
+fn block_combo(ui: &mut bevy_egui::egui::Ui, id_salt: &str, label: &str, val: &mut u8) -> bool {
+    use bevy_egui::egui;
+    let cur = crate::voxel::BlockType::from_u8(*val);
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(format!("{label}: {cur:?}"))
+        .show_ui(ui, |ui| {
+            for &bt in BIOME_BLOCK_CHOICES {
+                if ui.selectable_label(cur == bt, format!("{bt:?}")).clicked() {
+                    *val = bt as u8;
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+/// dropdown เลือกชนิดพืช — คืน true ถ้าเปลี่ยน
+fn tree_combo(ui: &mut bevy_egui::egui::Ui, id_salt: &str, val: &mut crate::biomegen::TreeKind) -> bool {
+    use bevy_egui::egui;
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(format!("tree: {}", val.label()))
+        .show_ui(ui, |ui| {
+            for k in crate::biomegen::TreeKind::ALL {
+                if ui.selectable_label(*val == k, k.label()).clicked() {
+                    *val = k;
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+/// section "Biomes" ใน Game Settings (dev) — เพิ่ม/ปรับ sub-biome ต่อเขต + ความสูงภูเขา
+/// คืน true = มีการแก้ (caller ตั้ง global + เซฟ + regen). ดู [`crate::biomegen`]
+pub fn biome_editor_ui(ui: &mut bevy_egui::egui::Ui, cfg: &mut crate::biomegen::BiomeConfig) -> bool {
+    use bevy_egui::egui;
+    use crate::biome::ClimateZone;
+    use crate::biomegen::{BiomeDef, TreeKind};
+    use crate::voxel::BlockType;
+    let mut changed = false;
+    egui::CollapsingHeader::new("Biomes").show(ui, |ui| {
+        changed |= ui
+            .add(egui::Slider::new(&mut cfg.snow_line, 20..=400).text("Snow line (blocks above sea)"))
+            .changed();
+        let mut to_delete: Option<usize> = None;
+        for zone in ClimateZone::ALL {
+            ui.separator();
+            ui.label(egui::RichText::new(zone.label()).strong().color(egui::Color32::from_rgb(255, 217, 51)));
+            for i in 0..cfg.biomes.len() {
+                if cfg.biomes[i].zone != zone {
+                    continue;
+                }
+                let b = &mut cfg.biomes[i];
+                ui.horizontal(|ui| {
+                    changed |= ui.add(egui::TextEdit::singleline(&mut b.name).desired_width(130.0)).changed();
+                    if ui.button("🗑").on_hover_text("delete").clicked() {
+                        to_delete = Some(i);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    changed |= ui.add(egui::Slider::new(&mut b.weight, 0.0..=3.0).text("weight")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut b.tree_density, 0.0..=1.0).text("trees")).changed();
+                });
+                ui.horizontal(|ui| {
+                    changed |= ui.add(egui::Slider::new(&mut b.height_offset, -20.0..=60.0).text("offset")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut b.amplitude, 0.0..=200.0).text("mountain amp")).changed();
+                });
+                ui.horizontal(|ui| {
+                    changed |= block_combo(ui, &format!("surf{i}"), "surf", &mut b.surface_block);
+                    changed |= block_combo(ui, &format!("sub{i}"), "sub", &mut b.subsurface_block);
+                    changed |= tree_combo(ui, &format!("tree{i}"), &mut b.tree);
+                });
+            }
+            if ui.button(format!("+ Add {} biome", zone.label())).clicked() {
+                cfg.biomes.push(BiomeDef {
+                    name: format!("New {}", zone.label()),
+                    zone,
+                    weight: 1.0,
+                    height_offset: 4.0,
+                    amplitude: 12.0,
+                    surface_block: BlockType::Grass as u8,
+                    subsurface_block: BlockType::Dirt as u8,
+                    tree: TreeKind::None,
+                    tree_density: 0.0,
+                });
+                changed = true;
+            }
+        }
+        if let Some(i) = to_delete {
+            cfg.biomes.remove(i);
+            changed = true;
+        }
+    });
+    changed
+}
+
 /// section "Sky / Atmosphere" ใน Game Settings (dev mode) — ปรับ live + เซฟ preset เป็นไฟล์
 fn sky_atmosphere_ui(
     ui: &mut bevy_egui::egui::Ui,
     settings: &mut crate::GameSettings,
     sky: &mut crate::sky::SkySettings,
     weather: &mut crate::weather::Weather,
+    auto_weather: &mut crate::weather::AutoWeather,
     preset_name: &mut String,
     status: &mut String,
 ) {
@@ -3012,8 +3081,8 @@ fn sky_atmosphere_ui(
         ui.add(egui::Slider::new(&mut settings.time_of_day, 0.0..=24.0).text("Time of Day (h)"));
         ui.add(egui::Slider::new(&mut settings.day_speed, 0.0..=50.0).text("Day Speed"));
         ui.add(egui::Slider::new(&mut settings.day_of_year, 0..=364).text("Day of Year (0 = spring equinox)"));
-        // Real World เขียนทับละติจูดจากตำแหน่งจริงทุกเฟรม สไลเดอร์นี้จึงมีผลเฉพาะโหมด Noise
-        ui.add(egui::Slider::new(&mut settings.latitude_deg, -66.0..=66.0).text("Latitude (°, Noise mode)"));
+        // ละติจูดผู้สังเกต (คุมเส้นทางดวงอาทิตย์/ดาว) — ค่า local ต่อผู้เล่น
+        ui.add(egui::Slider::new(&mut settings.latitude_deg, -66.0..=66.0).text("Latitude (°)"));
 
         ui.separator();
         ui.label("Weather");
@@ -3030,6 +3099,8 @@ fn sky_atmosphere_ui(
             .changed();
         if kind != weather.kind || changed_inten {
             weather.set(kind, inten);
+            // ตั้งเองผ่าน UI = ค้างอากาศไว้ชั่วคราว ไม่ให้ auto-weather เขียนทับทันที
+            auto_weather.hold_for_manual(settings);
         }
         ui.add(egui::Slider::new(&mut sky.cloudiness, 0.0..=1.0).text("cloudiness"));
         ui.add(egui::Slider::new(&mut sky.cloud_wind, 0.0..=0.05).text("cloud wind"));
@@ -3124,9 +3195,7 @@ pub fn egui_settings_system(
     mut regenerate: ResMut<crate::RegenerateWorld>,
     mut camera_query: Query<&mut crate::camera::FreeCamera>,
     mut proj_query: Query<&mut Projection, With<crate::camera::MainCamera>>,
-    mut cam_transform: Query<&mut Transform, With<crate::camera::FreeCamera>>,
     mut wireframe_config: ResMut<bevy::pbr::wireframe::WireframeConfig>,
-    mut teleport: ResMut<TeleportUi>,
     mut hotbar: ResMut<crate::voxel::Hotbar>,
     (mut server, mut client, lan_info, world, mut mp_ui): (
         Option<ResMut<bevy_renet::RenetServer>>,
@@ -3136,10 +3205,13 @@ pub fn egui_settings_system(
         ResMut<crate::network::MultiplayerUi>,
     ),
     mut confirm_clear: Local<bool>,
+    mut show_biome_editor: Local<bool>,
     // รวมเป็น tuple เดียว — Bevy จำกัด system param ที่ 16 ตัว
-    (mut sky_settings, mut weather, mut preset_name, mut sky_status, mut worldgen_name, mut worldgen_status): (
+    (mut sky_settings, mut weather, mut auto_weather, mut biome_config, mut preset_name, mut sky_status, mut worldgen_name, mut worldgen_status): (
         ResMut<crate::sky::SkySettings>,
         ResMut<crate::weather::Weather>,
+        ResMut<crate::weather::AutoWeather>,
+        ResMut<crate::biomegen::BiomeConfig>,
         Local<String>,
         Local<String>,
         Local<String>,
@@ -3208,21 +3280,9 @@ pub fn egui_settings_system(
         // ตอนเล่น multiplayer ห้ามแตะ world gen — noise ที่ไม่ตรงกัน = desync ทันที
         ui.add_enabled_ui(!networked, |ui| {
         ui.heading("World Generation");
-        ui.add(bevy_egui::egui::Slider::new(&mut settings.render_distance, 2..=16).text("Render Distance"));
+        ui.add(bevy_egui::egui::Slider::new(&mut settings.render_distance, 2..=64).text("Render Distance"));
         render_distance_warning(ui, settings.render_distance);
 
-        // สลับชนิดโลกกลางเกมได้ (ล้างโลกใหม่ + สลับโฟลเดอร์เซฟให้เอง)
-        let mut src = settings.terrain_source;
-        ui.horizontal(|ui| {
-            ui.label("Terrain:");
-            ui.radio_value(&mut src, crate::TerrainSource::Noise, "Noise");
-            ui.add_enabled_ui(crate::dem::streamer().is_some(), |ui| {
-                ui.radio_value(&mut src, crate::TerrainSource::RealWorld, "Real World");
-            });
-        });
-        if src != settings.terrain_source {
-            select_terrain(&mut settings, &mut regenerate, src);
-        }
 
         let mut regen = false;
 
@@ -3238,10 +3298,7 @@ pub fn egui_settings_system(
                 .logarithmic(true)
                 .text("Noise Frequency"),
         ).drag_stopped();
-        regen |= ui.add(
-            bevy_egui::egui::Slider::new(&mut settings.noise.amplitude, 5.0..=150.0)
-                .text("Noise Amplitude"),
-        ).drag_stopped();
+        // หมายเหตุ: ความสูงภูเขามาจาก amplitude ต่อ biome (panel Biomes) แล้ว — noise.amplitude เลิกใช้
         regen |= ui.add(
             bevy_egui::egui::Slider::new(&mut settings.noise.octaves, 1..=8)
                 .text("Noise Octaves"),
@@ -3279,47 +3336,28 @@ pub fn egui_settings_system(
         });
 
         ui.separator();
-        regen |= worldgen_preset_ui(ui, &mut settings, &mut regenerate, &mut worldgen_name, &mut worldgen_status);
+        regen |= worldgen_preset_ui(ui, &mut settings, &mut worldgen_name, &mut worldgen_status);
+
+        ui.separator();
+        ui.toggle_value(&mut *show_biome_editor, "Open Biome Editor...");
 
         if regen && !networked {
             regenerate.0 = true;
         }
         }); // add_enabled_ui(!networked)
 
-        // Teleport ด้วยพิกัดจริง — เฉพาะโลกจริง (มีไฟล์ dem) ก๊อป lat/lon จาก
-        // Google Maps มาวางแล้วไปโผล่ที่นั่นในเกมได้เลย
-        if settings.terrain_source == crate::TerrainSource::RealWorld {
-            if let Some(dem) = crate::dem::streamer() {
-                ui.separator();
-                ui.heading("Teleport (GPS)");
-                ui.horizontal(|ui| {
-                    ui.label("Lat:");
-                    ui.add(bevy_egui::egui::TextEdit::singleline(&mut teleport.lat).desired_width(90.0));
-                    ui.label("Lon:");
-                    ui.add(bevy_egui::egui::TextEdit::singleline(&mut teleport.lon).desired_width(90.0));
+        if *show_biome_editor && !networked {
+            bevy_egui::egui::Window::new("Biome Editor")
+                .open(&mut *show_biome_editor)
+                .show(ctx, |ui| {
+                    bevy_egui::egui::ScrollArea::vertical().show(ui, |ui| {
+                        if biome_editor_ui(ui, &mut biome_config) {
+                            crate::voxel::set_worldgen_biomes((*biome_config).clone());
+                            crate::world_save::save_biome_config(&biome_config);
+                            regenerate.0 = true;
+                        }
+                    });
                 });
-                if ui.button("Go").clicked() {
-                    match (teleport.lat.trim().parse::<f64>(), teleport.lon.trim().parse::<f64>()) {
-                        (Ok(lat), Ok(lon)) if dem.has_tile_at(lat, lon) => {
-                            let (bx, bz) = crate::dem::latlon_to_block(lat, lon);
-                            // โหลด tile ปลายทาง blocking ก่อน จะได้ความสูงถูก (ไม่ใช่ทะเล)
-                            dem.load_blocking_at(bx, bz);
-                            let h = crate::dem::DEM_SEA_LEVEL_Y as f32 + dem.elevation_at_block(bx, bz);
-                            if let Some(mut t) = cam_transform.iter_mut().next() {
-                                t.translation = Vec3::new(bx as f32, h + 20.0, bz as f32);
-                            }
-                            teleport.status = format!("moved to {:.4}, {:.4} (surface {:.0} m)", lat, lon, h);
-                        }
-                        (Ok(lat), Ok(lon)) => {
-                            teleport.status = format!("{:.4}, {:.4} is outside this tile", lat, lon);
-                        }
-                        _ => teleport.status = "enter lat/lon as numbers (e.g. 18.5885, 98.4867)".into(),
-                    }
-                }
-                if !teleport.status.is_empty() {
-                    ui.label(teleport.status.clone());
-                }
-            }
         }
 
         ui.separator();
@@ -3339,7 +3377,7 @@ pub fn egui_settings_system(
 
         ui.separator();
 
-        sky_atmosphere_ui(ui, &mut settings, &mut sky_settings, &mut weather, &mut preset_name, &mut sky_status);
+        sky_atmosphere_ui(ui, &mut settings, &mut sky_settings, &mut weather, &mut auto_weather, &mut preset_name, &mut sky_status);
 
         ui.separator();
 

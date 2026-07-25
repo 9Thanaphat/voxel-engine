@@ -37,6 +37,7 @@ pub struct CommandWorld<'w, 's> {
     pub incoming: ResMut<'w, crate::network::IncomingNetEdits>,
     pub camera: Query<'w, 's, &'static mut Transform, With<crate::camera::FreeCamera>>,
     pub weather: ResMut<'w, crate::weather::Weather>,
+    pub auto_weather: ResMut<'w, crate::weather::AutoWeather>,
 }
 
 pub fn run_commands(
@@ -139,27 +140,7 @@ fn cmd_tp(args: &[&str], chat: &mut crate::ui::ChatState, world: &mut CommandWor
                 None => chat.push_error("usage: /tp <x> <y> <z> (numbers)"),
             }
         }
-        2 => {
-            let (Ok(lat), Ok(lon)) = (args[0].parse::<f64>(), args[1].parse::<f64>()) else {
-                chat.push_error("usage: /tp <lat> <lon> (numbers)");
-                return;
-            };
-            let Some(dem) = crate::dem::streamer() else {
-                chat.push_error("GPS teleport needs the real-world map");
-                return;
-            };
-            if !dem.has_tile_at(lat, lon) {
-                chat.push_error(format!("{lat:.4}, {lon:.4} is outside the loaded tiles"));
-                return;
-            }
-            let (bx, bz) = crate::dem::latlon_to_block(lat, lon);
-            // โหลด tile ปลายทางแบบ blocking ก่อน ไม่งั้นได้ความสูงระดับทะเล
-            dem.load_blocking_at(bx, bz);
-            let h = crate::dem::DEM_SEA_LEVEL_Y as f32 + dem.elevation_at_block(bx, bz);
-            transform.translation = Vec3::new(bx as f32, h + 20.0, bz as f32);
-            chat.push_system(format!("Teleported to {lat:.4}, {lon:.4} (surface {h:.0} m)"));
-        }
-        _ => chat.push_error("usage: /tp <x> <y> <z>  or  /tp <lat> <lon>"),
+        _ => chat.push_error("usage: /tp <x> <y> <z>"),
     }
 }
 
@@ -342,6 +323,8 @@ fn cmd_weather(
         .unwrap_or(0.8)
         .clamp(0.0, 1.0);
     world.weather.set(kind, intensity);
+    // ค้างอากาศแมนนวลไว้ ~1 วันเกม แล้ว auto-weather ค่อยกลับมา re-roll ต่อ
+    world.auto_weather.hold_for_manual(&world.settings);
     // broadcast ให้ client (host-authoritative เหมือน /time)
     if let Some(server) = server {
         let target = world.weather.target;

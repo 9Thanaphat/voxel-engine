@@ -1,0 +1,115 @@
+{
+  "biomes": [
+    {
+      "name": "Desert",
+      "zone": "Hot",
+      "weight": 1.0,
+      "height_offset": 3.0,
+      "amplitude": 6.0,
+      "surface_block": 7,
+      "subsurface_block": 7,
+      "tree": "None",
+      "tree_density": 0.0
+    },
+    {
+      "name": "Savanna",
+      "zone": "Hot",
+      "weight": 1.0,
+      "height_offset": 4.0,
+      "amplitude": 8.0,
+      "surface_block": 2,
+      "subsurface_block": 1,
+      "tree": "Broadleaf",
+      "tree_density": 0.15
+    },
+    {
+      "name": "Tropical Forest",
+      "zone": "Hot",
+      "weight": 1.0,
+      "height_offset": 5.0,
+      "amplitude": 14.0,
+      "surface_block": 2,
+      "subsurface_block": 1,
+      "tree": "Broadleaf",
+      "tree_density": 0.7
+    },
+    {
+      "name": "Plains",
+      "zone": "Warm",
+      "weight": 1.2,
+      "height_offset": 4.0,
+      "amplitude": 6.0,
+      "surface_block": 2,
+      "subsurface_block": 1,
+      "tree": "Broadleaf",
+      "tree_density": 0.1
+    },
+    {
+      "name": "Temperate Forest",
+      "zone": "Warm",
+      "weight": 1.0,
+      "height_offset": 5.0,
+      "amplitude": 16.0,
+      "surface_block": 2,
+      "subsurface_block": 1,
+      "tree": "Broadleaf",
+      "tree_density": 0.6
+    },
+    {
+      "name": "Mountains",
+      "zone": "Warm",
+      "weight": 0.6,
+      "height_offset": 10.0,
+      "amplitude": 22.0,
+      "surface_block": 2,
+      "subsurface_block": 3,
+      "tree": "Broadleaf",
+      "tree_density": 0.2
+    },
+    {
+      "name": "Taiga",
+      "zone": "Cool",
+      "weight": 1.0,
+      "height_offset": 4.0,
+      "amplitude": 10.0,
+      "surface_block": 36,
+      "subsurface_block": 1,
+      "tree": "Spruce",
+      "tree_density": 0.5
+    },
+    {
+      "name": "Conifer Mountains",
+      "zone": "Cool",
+      "weight": 0.7,
+      "height_offset": 10.0,
+      "amplitude": 22.0,
+      "surface_block": 36,
+      "subsurface_block": 3,
+      "tree": "Spruce",
+      "tree_density": 0.3
+    },
+    {
+      "name": "Tundra",
+      "zone": "Cold",
+      "weight": 1.0,
+      "height_offset": 3.0,
+      "amplitude": 6.0,
+      "surface_block": 37,
+      "subsurface_block": 1,
+      "tree": "None",
+      "tree_density": 0.0
+    },
+    {
+      "name": "Snowy Mountains",
+      "zone": "Cold",
+      "weight": 0.7,
+      "height_offset": 12.0,
+      "amplitude": 24.0,
+      "surface_block": 37,
+      "subsurface_block": 3,
+      "tree": "None",
+      "tree_density": 0.0
+    }
+  ],
+  "snow_line": 92
+}

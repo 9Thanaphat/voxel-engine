@@ -486,31 +486,55 @@ pub fn facing_variant(block: BlockType, face_id: usize, facing: u8) -> u8 {
 /// overlay ด้านข้างที่ใช้ได้จริง (มีไฟล์บน disk) ต่อบล็อก
 static SIDE_OVERLAYS: OnceLock<Vec<Vec<&'static str>>> = OnceLock::new();
 
-/// noise + แหล่งภูมิประเทศของโลกที่กำลังเล่น — mesher อ่านเพื่อย้อมสีหญ้า/ใบตาม biome
-/// (แนวเดียวกับ DEM streamer/ACTIVE_SAVE_DIR — เลี่ยงร้อยสาย noise ผ่าน remesh caller ทั้งหมด)
-static WORLDGEN_CLIMATE: std::sync::RwLock<Option<(crate::NoiseParams, crate::TerrainSource)>> =
+/// noise ของโลกที่กำลังเล่น — mesher อ่านเพื่อย้อมสีหญ้า/ใบตาม biome
+/// (แนวเดียวกับ ACTIVE_SAVE_DIR — เลี่ยงร้อยสาย noise ผ่าน remesh caller ทั้งหมด)
+static WORLDGEN_CLIMATE: std::sync::RwLock<Option<crate::NoiseParams>> =
     std::sync::RwLock::new(None);
 
 /// ตั้ง climate ของโลกปัจจุบัน (เรียกตอน generate chunk — โลกเดียวค่าคงที่ เขียนซ้ำไม่เป็นไร)
-pub fn set_worldgen_climate(noise: crate::NoiseParams, source: crate::TerrainSource) {
+pub fn set_worldgen_climate(noise: crate::NoiseParams) {
     if let Ok(mut g) = WORLDGEN_CLIMATE.write() {
-        *g = Some((noise, source));
+        *g = Some(noise);
     }
 }
 
+/// ชุด biome ของโลกที่กำลัง gen — worldgen (height/surface/trees) อ่านจากที่นี่ (แนวเดียว
+/// WORLDGEN_CLIMATE) เพราะ gen ทำในงาน async ที่เข้าถึง resource ไม่ได้. host/client ตั้งค่านี้
+/// ให้ตรงกันก่อน regen → terrain ตรงกัน
+static WORLDGEN_BIOMES: std::sync::RwLock<Option<Arc<crate::biomegen::BiomeConfig>>> =
+    std::sync::RwLock::new(None);
+
+/// ตั้งชุด biome ของโลกปัจจุบัน (เรียกตอนเข้าโลก/รับ config จาก host)
+pub fn set_worldgen_biomes(cfg: crate::biomegen::BiomeConfig) {
+    if let Ok(mut g) = WORLDGEN_BIOMES.write() {
+        *g = Some(Arc::new(cfg));
+    }
+}
+
+/// ชุด biome ปัจจุบัน (default ถ้ายังไม่ตั้ง) — TerrainSampler หยิบตอน new()
+pub fn worldgen_biomes() -> Arc<crate::biomegen::BiomeConfig> {
+    WORLDGEN_BIOMES
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(|| Arc::new(crate::biomegen::BiomeConfig::default()))
+}
+
+pub static CURRENT_DAY_OF_YEAR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(172);
+
 /// ตัวคูณสีหญ้า/ใบตาม biome ที่กลาง chunk — biome เปลี่ยนช้า (~330 บล็อก) คงที่ต่อ chunk พอ
 fn foliage_tint_for_chunk(chunk_pos: IVec2) -> [f32; 3] {
-    let Some((noise, source)) = WORLDGEN_CLIMATE.read().ok().and_then(|g| *g) else {
+    let Some(noise) = WORLDGEN_CLIMATE.read().ok().and_then(|g| *g) else {
         return crate::biome::foliage_color(0.2, 0.3); // เขียวเขตอบอุ่น กัน grayscale เป็นขาว
     };
     let wx = chunk_pos.x as f64 * CHUNK_WIDTH as f64 + 8.0;
     let wz = chunk_pos.y as f64 * CHUNK_WIDTH as f64 + 8.0;
     let sampler = TerrainSampler::new(noise);
-    let temp = if source == crate::TerrainSource::RealWorld {
-        crate::biome::temp_from_latitude(crate::dem::block_to_latlon(wx, wz).0)
-    } else {
-        sampler.temperature_raw(wx, wz)
-    };
+
+    // สีใบไม้เปลี่ยนตามละติจูด+ฤดู (เห็นความต่างของฤดูกาลชัดเจน)
+    let day_of_year = CURRENT_DAY_OF_YEAR.load(std::sync::atomic::Ordering::Relaxed) as f32;
+    let lat = crate::biome::climate_lat(wz);
+    let temp = crate::biome::dynamic_temp(lat, day_of_year);
     crate::biome::foliage_color(temp, sampler.humidity_raw(wx, wz))
 }
 
@@ -525,11 +549,13 @@ fn side_overlay_pick(block: BlockType, face_id: usize, wx: i32, wy: i32, wz: i32
 }
 
 pub const CHUNK_WIDTH: usize = 16;
-/// 3072 = เผื่อภูมิประเทศจริง 1 บล็อก = 1 ม. (ดอยอินทนนท์ 2,565 ม. + ทะเล + ฟ้า)
-/// — section storage ทำให้คอลัมน์สูงแบกได้ (ฟ้า/หินตันเก็บ 1 byte ต่อ 16 ชั้น)
-pub const CHUNK_HEIGHT: usize = 3072;
+/// 512 = โลก noise ทั่วไป (ทะเล y96 + ภูเขา + ฟ้า) — section storage เก็บฟ้า/หินตัน 1 byte/16 ชั้น
+pub const CHUNK_HEIGHT: usize = 512;
 pub const CHUNK_VOLUME: usize = CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_WIDTH;
-pub const SEA_LEVEL: usize = 200;
+pub const SEA_LEVEL: usize = 96;
+/// เจาะถ้ำเฉพาะแถบใต้ผิวลึกไม่เกินนี้ — is_cave (Perlin 3D) เป็นต้นทุนหลักของ gen
+/// ลึกกว่านี้เป็นหินตันล้วน (ไม่มีใครเห็น) จึงข้ามการเช็คเพื่อความเร็ว
+pub const CAVE_DEPTH: i32 = 64;
 
 // --------------------------------------------------------
 // Section storage — คอลัมน์ซอยเป็นชั้นละ 16 (แนว Minecraft):
@@ -2062,11 +2088,60 @@ fn generate_chiseled_mesh_into(
 /// noise ทุกชั้นของ world gen — โหมด Full กับ Surface Preview ใช้ตัวเดียวกัน
 /// เพื่อให้ terrain ที่เห็นตรงกันเป๊ะ
 pub struct TerrainSampler {
-    fbm: Fbm<Perlin>,
+    pub fbm: Fbm<Perlin>,
     temperature: Perlin,
     cave: Perlin,
     humidity: Perlin,
+    pub region: Perlin,
+    /// domain warp (บิดพิกัดก่อน sample) → ชายฝั่ง/รอยต่อเป็นธรรมชาติ ไม่เป็นก้อนกลม
+    warp_x: Perlin,
+    warp_z: Perlin,
+    /// ทวีป/มหาสมุทรสเกลใหญ่ (low-freq)
+    continent: Perlin,
+    /// สนามความเป็นภูเขา (คุมว่าเทือกเขาอยู่แถบไหน)
+    mountain: Perlin,
+    /// ridged fbm สำหรับสันเขาแหลม
+    ridge: Fbm<Perlin>,
+    pub biomes: Arc<crate::biomegen::BiomeConfig>,
     params: crate::NoiseParams,
+}
+
+// ── ค่าจูนรูปทรง terrain (โครง; ยอด/ทะเลปรับได้ตรงนี้) ──
+/// ระยะบิดพิกัด (บล็อก) + ความถี่ของ domain warp
+const WARP_AMP: f64 = 45.0;
+const WARP_FREQ: f64 = 0.004;
+/// ความถี่ทวีป (ยิ่งต่ำ ทวีป/ทะเลยิ่งใหญ่) — ต่ำ = แผ่นดินใหญ่เป็นผืน ไม่แตกเป็นเกาะ
+const CONT_FREQ: f64 = 0.00030;
+/// ความถี่สนามภูเขา + ความถี่สันเขา
+const MOUNT_FIELD_FREQ: f64 = 0.0013;
+const RIDGE_FREQ: f64 = 0.0035;
+/// ความสูงสูงสุดที่เทือกเขาเพิ่มได้ (บล็อก) — ใช้ช่วงแนวตั้ง 512 ให้คุ้ม
+const MOUNT_AMP: f64 = 155.0;
+#[inline]
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t.clamp(0.0, 1.0)
+}
+
+/// map continentalness (−1..1) → offset ความสูง (บล็อก): ทะเลลึก → ที่ราบสูง.
+/// ชายฝั่งแคบ+ชัน แล้วยกแผ่นดินขึ้น +22 → พื้นโผล่พ้นน้ำเป็นผืนตัน ไม่จมเป็นหย่อมเวลาโดน detail
+#[inline]
+fn continent_offset(c: f64) -> f64 {
+    if c < -0.25 {
+        lerp(-55.0, -10.0, (c + 1.0) / 0.75) // มหาสมุทร: ลึก → ไหล่ทวีป
+    } else if c < 0.0 {
+        lerp(-10.0, 22.0, (c + 0.25) / 0.25) // ชายฝั่งแคบ: ข้าม 0 เร็ว โผล่พ้นน้ำชัด
+    } else {
+        lerp(22.0, 75.0, c) // แผ่นดิน → ที่ราบสูง (พื้นตัน)
+    }
+}
+
+/// biome ที่ column เดียว — Copy (ไม่มี String) เก็บใน array ต่อ chunk ได้เบา
+#[derive(Clone, Copy)]
+pub struct ColumnBiome {
+    pub surface: BlockType,
+    pub subsurface: BlockType,
+    pub tree: crate::biomegen::TreeKind,
+    pub tree_density: f32,
 }
 
 impl TerrainSampler {
@@ -2077,115 +2152,213 @@ impl TerrainSampler {
             temperature: Perlin::new(params.seed.wrapping_add(1)),
             cave: Perlin::new(params.seed.wrapping_add(2)),
             humidity: Perlin::new(params.seed.wrapping_add(3)),
+            region: Perlin::new(params.seed.wrapping_add(4)),
+            warp_x: Perlin::new(params.seed.wrapping_add(5)),
+            warp_z: Perlin::new(params.seed.wrapping_add(6)),
+            continent: Perlin::new(params.seed.wrapping_add(7)),
+            mountain: Perlin::new(params.seed.wrapping_add(8)),
+            ridge: Fbm::<Perlin>::new(params.seed.wrapping_add(9)).set_octaves(4),
+            biomes: worldgen_biomes(),
             params,
         }
     }
 
-    /// อุณหภูมิดิบ (−1..1) noise ความถี่ต่ำ = ผืน biome ใหญ่ (ใช้ทั้งจำแนก biome + ย้อมสีหญ้า)
+    /// อุณหภูมิดิบ (−1..1) — ละติจูดภูมิอากาศ (แกน Z) + noise เฉพาะถิ่นเล็กน้อย. นิ่งตามฤดู
+    /// (worldgen ต้อง deterministic) — ใช้จำแนกเขต biome
     pub fn temperature_raw(&self, wx: f64, wz: f64) -> f64 {
-        self.temperature.get([wx * 0.003, wz * 0.003])
+        let base_temp = crate::biome::temp_from_latitude(crate::biome::climate_lat(wz));
+        let noise = self.temperature.get([wx * 0.003, wz * 0.003]) * 0.15;
+        (base_temp + noise).clamp(-1.0, 1.0)
     }
 
-    /// ความชื้นดิบ (−1..1) — ความถี่ต่างจาก temp เล็กน้อยไม่ให้ลายซ้อนกัน
+    /// ความชื้นดิบ (−1..1) — noise เฉพาะถิ่น ผสมกับแถบละติจูด (Hadley). ใช้ย้อมสีหญ้า/ใบ
     pub fn humidity_raw(&self, wx: f64, wz: f64) -> f64 {
-        self.humidity.get([wx * 0.0025, wz * 0.0025])
+        let noise = self.humidity.get([wx * 0.0025, wz * 0.0025]);
+        let band = crate::biome::humidity_band(crate::biome::climate_lat(wz));
+        (noise * 0.5 + band * 0.5).clamp(-1.0, 1.0)
     }
 
-    /// จำแนก biome ที่ตำแหน่งนี้ — temp_override ใช้ตอน Real World (อุณหภูมิจากละติจูดจริง
-    /// แทน noise เพราะเชียงใหม่ไม่ควรสุ่มเป็นทะเลทราย); height−sea_level = เมตรเหนือระดับน้ำ
-    pub fn biome_at(
-        &self,
-        wx: f64,
-        wz: f64,
-        height: i32,
-        sea_level: i32,
-        temp_override: Option<f64>,
-    ) -> crate::biome::Biome {
-        let temp = temp_override.unwrap_or_else(|| self.temperature_raw(wx, wz));
-        let hum = self.humidity_raw(wx, wz);
-        crate::biome::classify(temp, hum, height - sea_level)
+    /// บิดพิกัด (domain warp) ก่อน sample terrain/biome — ให้ชายฝั่ง/รอยต่อคดโค้งเป็นธรรมชาติ
+    #[inline]
+    fn warp(&self, wx: f64, wz: f64) -> (f64, f64) {
+        let n = [wx * WARP_FREQ, wz * WARP_FREQ];
+        (wx + WARP_AMP * self.warp_x.get(n), wz + WARP_AMP * self.warp_z.get(n))
     }
 
+    /// offset ความสูงจากทวีป (บล็อก) ที่พิกัด warped แล้ว
+    #[inline]
+    fn continent_off(&self, px: f64, pz: f64) -> f64 {
+        continent_offset(self.continent.get([px * CONT_FREQ, pz * CONT_FREQ]))
+    }
+
+    /// ความเป็นภูเขา 0..1 (ก่อนคูณ land factor)
+    #[inline]
+    fn mount_field(&self, px: f64, pz: f64) -> f64 {
+        let raw = self.mountain.get([px * MOUNT_FIELD_FREQ, pz * MOUNT_FIELD_FREQ]);
+        ((raw - 0.15) / 0.5).clamp(0.0, 1.0)
+    }
+
+    /// สันเขาแหลม 0..1 (ridged)
+    #[inline]
+    fn ridged(&self, px: f64, pz: f64) -> f64 {
+        let r = self.ridge.get([px * RIDGE_FREQ, pz * RIDGE_FREQ]);
+        let v = 1.0 - r.abs();
+        v * v
+    }
+
+    /// ความสูงสำหรับ hydrology (แบ็คโบน + ภูเขา, ไม่มี fbm ละเอียด) — hydro.rs ใช้คำนวณโครงข่ายแม่น้ำ
+    pub fn hydro_height(&self, wx: f64, wz: f64) -> f64 {
+        let (px, pz) = self.warp(wx, wz);
+        let cont = self.continent_off(px, pz);
+        let (off, _amp) = crate::biomegen::terrain_at(
+            &self.biomes,
+            &self.region,
+            |x, z| self.temperature_raw(x, z),
+            px,
+            pz,
+        );
+        let base = SEA_LEVEL as f64 + cont + off as f64;
+        let land = ((cont + 8.0) / 28.0).clamp(0.0, 1.0);
+        base + self.mount_field(px, pz) * land * self.ridged(px, pz) * MOUNT_AMP
+    }
+
+    /// sub-biome ที่ column นี้ (hard pick) — คุมพื้นผิว/พืช. beach/snow คิดตอนเติมบล็อก
+    pub fn column_biome(&self, wx: f64, wz: f64) -> ColumnBiome {
+        let (px, pz) = self.warp(wx, wz);
+        let zone = crate::biome::zone_of(self.temperature_raw(px, pz));
+        match crate::biomegen::select(&self.biomes, zone, &self.region, px, pz) {
+            Some(b) => ColumnBiome {
+                surface: b.surface(),
+                subsurface: b.subsurface(),
+                tree: b.tree,
+                tree_density: b.tree_density,
+            },
+            None => ColumnBiome {
+                surface: BlockType::Grass,
+                subsurface: BlockType::Dirt,
+                tree: crate::biomegen::TreeKind::None,
+                tree_density: 0.0,
+            },
+        }
+    }
+
+    pub fn biome_name(&self, wx: f64, wz: f64) -> String {
+        let (px, pz) = self.warp(wx, wz);
+        let zone = crate::biome::zone_of(self.temperature_raw(px, pz));
+        match crate::biomegen::select(&self.biomes, zone, &self.region, px, pz) {
+            Some(b) => b.name.clone(),
+            None => format!("{:?}", zone),
+        }
+    }
+
+    /// ระดับ (บล็อกเหนือ sea) ที่ผิวเริ่มคลุมหิมะ (ยอดเขา) — จาก config
+    pub fn snow_line(&self) -> i32 {
+        self.biomes.snow_line
+    }
+
+    /// ความสูงผิว — หลายชั้น: domain warp → ทวีป(low-freq) + เนิน biome(fbm) + เทือกเขา ridged + carve แม่น้ำ
     pub fn height(&self, wx: f64, wz: f64) -> i32 {
-        let n = self.fbm.get([wx * self.params.frequency, wz * self.params.frequency]);
-        (SEA_LEVEL as f64 + n * self.params.amplitude).clamp(3.0, (CHUNK_HEIGHT - 1) as f64) as i32
+        self.column(wx, wz).0
     }
 
-    /// biome นี้เป็นทะเลทรายไหม (ประมาณระดับพื้นราบ ไม่คิดความสูง) — ใช้ระบายสี LOD ระยะไกล
-    pub fn is_desert(&self, wx: f64, wz: f64) -> bool {
-        crate::biome::classify(self.temperature_raw(wx, wz), self.humidity_raw(wx, wz), 0)
-            == crate::biome::Biome::Desert
+    /// (ความสูงผิว, ระดับผิวน้ำ) ของคอลัมน์ — คำนวณ base ครั้งเดียว, carve แม่น้ำที่นี่
+    pub fn column(&self, wx: f64, wz: f64) -> (i32, i32) {
+        let (h, water) = self.column_raw(wx, wz);
+        (h.clamp(3.0, (CHUNK_HEIGHT - 1) as f64) as i32, water)
+    }
+
+    fn column_raw(&self, wx: f64, wz: f64) -> (f64, i32) {
+        let (px, pz) = self.warp(wx, wz);
+        let cont = self.continent_off(px, pz);
+        let (off, amp) = crate::biomegen::terrain_at(
+            &self.biomes,
+            &self.region,
+            |x, z| self.temperature_raw(x, z),
+            px,
+            pz,
+        );
+        let base = SEA_LEVEL as f64 + cont + off as f64; // แบ็คโบน (= base_core)
+        let detail = amp as f64 * self.fbm.get([px * self.params.frequency, pz * self.params.frequency]);
+        // ภูเขาโผล่เฉพาะบนแผ่นดิน (ไม่งอกกลางมหาสมุทร)
+        let land = ((cont + 8.0) / 28.0).clamp(0.0, 1.0);
+        let mount_f = self.mount_field(px, pz);
+        let mut h = base + detail + mount_f * land * self.ridged(px, pz) * MOUNT_AMP;
+
+        // แม่น้ำ: โครงข่ายจริงจาก hydro (flow accumulation) — carve **ลงเท่านั้น** (แอ่ง=ทะเลสาบลึก)
+        let mut water = SEA_LEVEL as i32;
+        if let Some(r) = crate::hydro::river_at(wx, wz) {
+            let bed = (r.surface - r.depth) as f64;
+            let target = lerp(h, bed, r.mask as f64); // ตลิ่งลาดตาม mask
+            h = h.min(target); // ยกพื้นไม่ได้ (กันถมทะเลสาบ)
+            water = water.max(r.surface.floor() as i32);
+        }
+        (h, water)
+    }
+
+    /// ทิศ+ความเร็วการไหลของแม่น้ำ (สำหรับ water wheel) — จากโครงข่าย hydro จริง; None ถ้าไม่ใช่แม่น้ำ
+    pub fn river_flow(&self, wx: f64, wz: f64) -> Option<(Vec2, f32)> {
+        crate::hydro::river_at(wx, wz).map(|r| (r.flow, r.speed))
+    }
+
+    /// ผิวเป็นทรายไหม (ทะเลทราย/ชายหาด) — ใช้ระบายสี LOD ระยะไกล
+    pub fn surface_is_sand(&self, wx: f64, wz: f64) -> bool {
+        self.column_biome(wx, wz).surface == BlockType::Sand
     }
 
     pub fn is_cave(&self, wx: f64, y: i32, wz: f64) -> bool {
         self.cave.get([wx * 0.06, y as f64 * 0.06, wz * 0.06]) > 0.45
     }
-
 }
 
-/// บล็อกผิวตาม biome + ความสูง — ชายหาดใกล้น้ำเป็นทราย, Alpine สูงมากคลุมหิมะเหนือหินโล่ง
-pub fn biome_surface_block(biome: crate::biome::Biome, height: i32, sea_level: i32) -> BlockType {
-    use crate::biome::Biome::*;
+/// บล็อกผิวจริงตาม biome + ความสูง — ชายหาดใกล้น้ำเป็นทราย, ผิวเหนือ snow_line คลุมหิมะ (ยอดเขา)
+pub fn surface_block_for(col: ColumnBiome, height: i32, sea_level: i32, snow_line: i32) -> BlockType {
     if height <= sea_level + 1 {
         return BlockType::Sand; // ชายหาด/ก้นน้ำตื้น ทุก biome
     }
-    match biome {
-        Desert => BlockType::Sand,
-        Taiga => BlockType::SnowyGrass,
-        Tundra => BlockType::Snow,
-        // ยอด Alpine (สูงมาก) หิมะคลุม, ต่ำกว่านั้นหินโล่ง
-        Alpine => if height - sea_level >= 2300 { BlockType::Snow } else { BlockType::Stone },
-        Savanna | Plains | TropicalForest | TemperateForest => BlockType::Grass,
+    if height - sea_level >= snow_line {
+        return BlockType::Snow; // ยอดเขาเหนือแนวหิมะ (ทุกเขต)
     }
+    col.surface
 }
 
 /// คืนบล็อกของ chunk + โครงกิ่งของต้นไม้ที่ปลูกไว้ (deterministic จากพิกัด chunk)
 fn generate_chunk_blocks(
     chunk_pos: IVec2,
     noise: crate::NoiseParams,
-    source: crate::TerrainSource,
 ) -> (ChunkBlocks, Vec<crate::tree::BranchRecord>) {
     let sampler = TerrainSampler::new(noise);
     // บันทึก climate ของโลกให้ mesher ใช้ย้อมสีหญ้า/ใบตาม biome (โลกเดียวค่าคงที่)
-    set_worldgen_climate(noise, source);
+    set_worldgen_climate(noise);
+    // ตั้ง seed ให้โครงข่ายแม่น้ำ (hydro) — cache ต่อ tile, ล้างถ้า seed เปลี่ยน
+    crate::hydro::configure(noise);
     // เริ่มเป็นอากาศ uniform ทั้งคอลัมน์ — เขียนเฉพาะที่มีของ ฟ้าไม่เคยถูก
     // materialize; compact() ท้ายฟังก์ชันยุบใต้ดิน/น้ำที่บังเอิญล้วนกลับเป็น 1 byte
     let mut blocks = ChunkBlocks::new_uniform(BlockType::Air);
 
     let base_x = chunk_pos.x as f64 * CHUNK_WIDTH as f64;
     let base_z = chunk_pos.y as f64 * CHUNK_WIDTH as f64;
-
-    // โลกจริง: ความสูงจาก DEM (พิกัดบล็อก = เมตร), ทะเลจริงอยู่ y = DEM_SEA_LEVEL_Y
-    // (ไม่มีไฟล์ dem → โลกอากาศล้วน; UI กัน RealWorld ไว้แล้วถ้าไฟล์ไม่มี)
-    let dem_data = (source == crate::TerrainSource::RealWorld)
-        .then(crate::dem::streamer)
-        .flatten();
-    let sea_level: i32 = if dem_data.is_some() {
-        crate::dem::DEM_SEA_LEVEL_Y
-    } else {
-        SEA_LEVEL as i32
-    };
+    let sea_level: i32 = SEA_LEVEL as i32;
 
     let mut heights = [[0i32; CHUNK_WIDTH]; CHUNK_WIDTH];
-    let mut biomes = [[crate::biome::Biome::Plains; CHUNK_WIDTH]; CHUNK_WIDTH];
+    let def_col = ColumnBiome {
+        surface: BlockType::Grass,
+        subsurface: BlockType::Dirt,
+        tree: crate::biomegen::TreeKind::None,
+        tree_density: 0.0,
+    };
+    let mut biomes = [[def_col; CHUNK_WIDTH]; CHUNK_WIDTH];
+    // ระดับผิวน้ำต่อคอลัมน์ (sea ปกติ, ยกสูงเมื่อเป็นแม่น้ำบนที่สูง)
+    let mut water_levels = [[sea_level; CHUNK_WIDTH]; CHUNK_WIDTH];
+    let snow_line = sampler.snow_line();
 
     for z in 0..CHUNK_WIDTH {
         for x in 0..CHUNK_WIDTH {
             let wx = base_x + x as f64;
             let wz = base_z + z as f64;
-            heights[z][x] = match dem_data {
-                Some(d) => (crate::dem::DEM_SEA_LEVEL_Y as f32 + d.elevation_at_block(wx, wz))
-                    .round()
-                    .clamp(3.0, (CHUNK_HEIGHT - 16) as f32) as i32,
-                None => sampler.height(wx, wz),
-            };
-            // Real World: อุณหภูมิฐานจากละติจูดจริง (เชียงใหม่ = เขตร้อน ไม่สุ่มเป็นทะเลทราย)
-            // + ความสูงจริง → ยอดดอยเย็นเป็น alpine/หิมะเอง. Noise: อุณหภูมิจาก noise field
-            let temp_override = dem_data.map(|_| {
-                let (lat, _) = crate::dem::block_to_latlon(wx, wz);
-                crate::biome::temp_from_latitude(lat)
-            });
-            biomes[z][x] = sampler.biome_at(wx, wz, heights[z][x], sea_level, temp_override);
+            let (h, wl) = sampler.column(wx, wz);
+            heights[z][x] = h;
+            water_levels[z][x] = wl;
+            biomes[z][x] = sampler.column_biome(wx, wz);
         }
     }
 
@@ -2194,35 +2367,35 @@ fn generate_chunk_blocks(
             let wx = base_x + x as f64;
             let wz = base_z + z as f64;
             let h = heights[z][x];
-            let biome = biomes[z][x];
-            let surface = biome_surface_block(biome, h, sea_level);
-            // ใต้ผิวเป็นทรายเฉพาะทะเลทราย (biome อื่นเป็นดิน)
-            let sub_sand = biome == crate::biome::Biome::Desert;
-            // แม่น้ำ/ผืนน้ำจาก OSM mask (โลกจริง) — คอลัมน์นี้เป็นน้ำไหม
-            let is_river = dem_data.is_some_and(|d| d.is_water_at_block(wx, wz));
+            let col = biomes[z][x];
+            let water = water_levels[z][x];
+            // ก้นน้ำ (ทะเล/แม่น้ำ) = ทราย ไม่ใช่หญ้าใต้น้ำ; นอกนั้นตาม biome (ชายหาด/หิมะยอดเขา)
+            let surface = if h < water {
+                BlockType::Sand
+            } else {
+                surface_block_for(col, h, sea_level, snow_line)
+            };
+            let subsurface = col.subsurface;
 
             for y in 0..CHUNK_HEIGHT {
                 let yi = y as i32;
-                let block = if is_river && yi <= h && yi > h - 3 {
-                    BlockType::Water // แม่น้ำ: น้ำ 3 บล็อกบนสุด (ท้องน้ำ = หินข้างล่าง)
-                } else if yi < h - 3 {
+                let block = if yi < h - 3 {
                     BlockType::Stone
                 } else if yi < h {
-                    if sub_sand { BlockType::Sand } else { BlockType::Dirt }
+                    subsurface
                 } else if yi == h {
                     surface
-                } else if yi <= sea_level {
+                } else if yi <= water {
                     BlockType::Water
                 } else {
                     break; // เหนือนี้เป็นอากาศทั้งหมด
                 };
 
-                // ถ้ำ: เจาะเฉพาะแถบใต้ผิว 4..200 บล็อก — ภูเขาโลกจริงหนาเป็นพัน
-                // เมตร ถ้าเจาะทั้งก้อน ผนังถ้ำที่มองไม่เห็นจะกิน VRAM เป็น GB
-                // (โหมด noise ภูเขาบางกว่า 200 อยู่แล้ว พฤติกรรมแทบไม่เปลี่ยน)
+                // ถ้ำ: เจาะเฉพาะแถบใต้ผิวตื้นๆ (CAVE_DEPTH บล็อก) — is_cave เป็น Perlin 3 มิติ
+                // ต้นทุนหลักของ gen; เจาะลึกกว่านี้ไม่มีใครเห็น แต่กิน CPU/VRAM มหาศาล
                 if block.is_solid()
                     && yi < h - 4
-                    && yi > (h - 200).max(2)
+                    && yi > (h - CAVE_DEPTH).max(2)
                     && sampler.is_cave(wx, yi, wz)
                 {
                     continue;
@@ -2248,28 +2421,29 @@ fn generate_chunk_blocks(
     // จุดปลูกอยู่ในเขต 4..=11 เพื่อให้กิ่งที่แตกออกด้านข้างยังไม่ล้ำออกนอก chunk
     // (topology ของ chunk ต้องจบในตัวเอง — ดู chunk_records/merge_records)
     let mut branches: Vec<crate::tree::BranchRecord> = Vec::new();
-    let tree_count = (next() % 3) as usize;
+    // จำนวนต้นที่ "ลอง" ต่อ chunk — ค่าจริงกรองด้วย tree_density ของ biome อีกที
+    let tree_count = (next() % 4) as usize;
     for _ in 0..tree_count {
         let tx = 4 + (next() % 8) as i32;
         let tz = 4 + (next() % 8) as i32;
         let h = heights[tz as usize][tx as usize];
-        let biome = biomes[tz as usize][tx as usize];
+        let col = biomes[tz as usize][tx as usize];
         let params = &TREE_PRESETS[ACTIVE_TREE_PRESET].1;
         // เผื่อความสูงลำต้นเต็มที่ + พุ่มยอด ให้ต้นสูงๆ (เช่น pine) ไม่ถูกตัดยอด
         let headroom = params.trunk_len.1 + params.limb_len.1 + 4;
-        use crate::biome::Biome::*;
-        // biome ที่ไม่มีต้นไม้ (ทะเลทราย/ทุนดรา/ยอดเขา) หรือใต้น้ำ/ชนเพดาน = ข้าม
-        let treeless = matches!(biome, Desert | Tundra | Alpine);
-        // ทุ่ง/สะวันนา = ต้นไม้บาง (ทอยข้ามครึ่งหนึ่ง)
-        let too_sparse = matches!(biome, Plains | Savanna) && next() % 2 == 0;
-        if treeless || too_sparse
-            || h <= sea_level + 1
+        // ทอยตาม tree_density (0 = ไม่มีเลย, 1 = แน่นสุด) + ผิวเหนือ snow_line/ใต้น้ำ = ข้าม
+        let roll = (next() % 1000) as f32 / 1000.0;
+        let surface = surface_block_for(col, h, sea_level, snow_line);
+        if col.tree == crate::biomegen::TreeKind::None
+            || roll >= col.tree_density
+            || surface == BlockType::Snow
+            || h <= water_levels[tz as usize][tx as usize] + 1 // ใต้น้ำ/ในแม่น้ำ = ไม่ปลูก
             || h + headroom >= CHUNK_HEIGHT as i32
         {
             continue;
         }
-        if biome == Taiga {
-            // ไบโอมหนาว → ต้นสนคิวบ์ (ไม่เข้า BranchNetwork)
+        if col.tree == crate::biomegen::TreeKind::Spruce {
+            // ต้นสนคิวบ์ (ไม่เข้า BranchNetwork)
             grow_spruce(&mut blocks, IVec3::new(tx, h + 1, tz), &mut next);
         } else {
             grow_tree(&mut blocks, &mut branches, IVec3::new(tx, h + 1, tz), params, &mut next);
@@ -2815,10 +2989,9 @@ pub fn set_active_save_dir(path: Option<std::path::PathBuf>) {
     }
 }
 
-/// เส้นทาง dev mode: โลก noise ใช้ `saves/` โลกจริง (DEM) ใช้ `saves_dem/` แบบเดิม
-pub fn set_legacy_save_dir(is_dem: bool) {
-    let dir = if is_dem { "saves_dem" } else { "saves" };
-    set_active_save_dir(Some(project_root().join(dir)));
+/// เส้นทาง dev mode (Quick Start): ใช้โฟลเดอร์ `saves/` ที่ root
+pub fn set_legacy_save_dir() {
+    set_active_save_dir(Some(project_root().join("saves")));
 }
 
 /// โฟลเดอร์เซฟของโลกที่กำลังเล่น
@@ -3092,7 +3265,6 @@ impl Default for ChunkGenerator {
 pub fn spawn_block_generation_task(
     chunk_pos: IVec2,
     noise: crate::NoiseParams,
-    source: crate::TerrainSource,
     version: u32,
     sender: Sender<ChunkBlockData>,
     use_disk_save: bool,
@@ -3115,7 +3287,7 @@ pub fn spawn_block_generation_task(
                 let trees = use_disk_save.then(|| load_chunk_tree(chunk_pos)).unwrap_or_default();
                 (blocks, trees)
             }
-            None => generate_chunk_blocks(chunk_pos, noise, source),
+            None => generate_chunk_blocks(chunk_pos, noise),
         };
         let _ = sender.send(ChunkBlockData {
             chunk_pos,
@@ -3194,9 +3366,9 @@ pub fn spawn_surface_preview_task(
             for x in 0..CHUNK_WIDTH as i32 {
                 let h = height_at(x, z);
                 // preview เป็นเครื่องมือจูน noise — ใช้ทะเล noise เสมอ + biome จาก noise
-                let biome = sampler.biome_at(base_x + x as f64, base_z + z as f64, h, SEA_LEVEL as i32, None);
-                let top = biome_surface_block(biome, h, SEA_LEVEL as i32);
-                let side = if biome == crate::biome::Biome::Desert { BlockType::Sand } else { BlockType::Dirt };
+                let col = sampler.column_biome(base_x + x as f64, base_z + z as f64);
+                let top = surface_block_for(col, h, SEA_LEVEL as i32, sampler.snow_line());
+                let side = col.subsurface;
 
                 // หน้าบนของบล็อกผิว (บล็อก y = h กินพื้นที่ถึง y = h + 1)
                 push_face(&mut solid, 0, x as f32, z as f32, h as f32, (h + 1) as f32, shaded(top, 0));
@@ -3471,6 +3643,7 @@ pub fn advance_time_system(
         let dpy = crate::astro::DAYS_PER_YEAR as i64;
         settings.year = (settings.year as i64 + total.div_euclid(dpy)).max(0) as u32;
         settings.day_of_year = total.rem_euclid(dpy) as u16;
+        CURRENT_DAY_OF_YEAR.store(settings.day_of_year as u32, std::sync::atomic::Ordering::Relaxed);
     }
     settings.time_of_day = raw.rem_euclid(24.0);
 }
@@ -4020,22 +4193,6 @@ pub fn world_generation_system(
             continue;
         }
 
-        // โลกจริง: อย่า generate chunk จนกว่า DEM tile ที่ครอบมันจะโหลดเสร็จ
-        // (ไม่งั้นได้ chunk ทะเลผิดๆ cache ค้าง) — ยังไม่พร้อม = ขอโหลด+ข้ามเฟรมนี้
-        // (client ไม่ gen เอง รับจาก host — ข้าม guard)
-        if settings.terrain_source == crate::TerrainSource::RealWorld
-            && client_sync.is_none()
-            && !world.chunks.contains_key(&chunk_pos)
-        {
-            if let Some(dem) = crate::dem::streamer() {
-                let bx0 = (cx * CHUNK_WIDTH as i32) as f64;
-                let bz0 = (cz * CHUNK_WIDTH as i32) as f64;
-                if !dem.ensure_ready(bx0, bz0, bx0 + CHUNK_WIDTH as f64, bz0 + CHUNK_WIDTH as f64) {
-                    continue; // tile ยังโหลดอยู่ — ลองใหม่เฟรมหน้า
-                }
-            }
-        }
-
         // Phase 1: Block Generation
         if block_budget > 0
             && !world.chunks.contains_key(&chunk_pos)
@@ -4057,7 +4214,7 @@ pub fn world_generation_system(
                 });
             } else {
                 spawn_block_generation_task(
-                    chunk_pos, settings.noise, settings.terrain_source, generator.version, sender,
+                    chunk_pos, settings.noise, generator.version, sender,
                     client_sync.is_none(),
                 );
             }
@@ -6884,44 +7041,6 @@ pub fn nuke_apply_system(
     });
 }
 
-/// เข้าโลกจริงครั้งแรก (โลกว่างหรือกำลังจะ regenerate) — วางผู้เล่นกลาง tile
-/// เหนือผิวจริง; client multiplayer ไม่ยุ่ง (host ส่ง spawn_pos มาใน Welcome แล้ว)
-pub fn position_player_for_terrain(
-    settings: Res<crate::GameSettings>,
-    regen: Res<crate::RegenerateWorld>,
-    world: Res<VoxelWorld>,
-    client: Option<Res<bevy_renet::RenetClient>>,
-    mut camera: Query<(&mut Transform, &mut crate::camera::FreeCamera)>,
-) {
-    if settings.terrain_source != crate::TerrainSource::RealWorld || client.is_some() {
-        return;
-    }
-    if !regen.0 && !world.chunks.is_empty() {
-        return; // กลับเข้าโลกเดิมที่ยังอยู่ใน memory — อยู่ที่เดิมต่อ
-    }
-    let Some(d) = crate::dem::streamer() else { return };
-    // spawn ที่เชียงใหม่ (ดอยสุเทพ ~18.79N 98.98E) ถ้ามี tile นั้น; ไม่งั้น fallback
-    // ไป tile แรกที่มี — deterministic ไม่สุ่มจุดทุกครั้งแบบ center_block เดิม
-    let (cx, cz) = if d.has_tile_at(18.79, 98.98) {
-        crate::dem::latlon_to_block(18.79, 98.98)
-    } else {
-        d.center_block()
-    };
-    // โหลด tile ตรงจุด spawn แบบ blocking ก่อน ไม่งั้น elevation คืน 0 (ทะเล)
-    // เพราะ tile ยังโหลด async ไม่ทัน → ผู้เล่นโผล่ต่ำกว่าภูเขาจริง
-    d.load_blocking_at(cx, cz);
-    let h = crate::dem::DEM_SEA_LEVEL_Y as f32 + d.elevation_at_block(cx, cz);
-    if let Some((mut t, mut cam)) = camera.iter_mut().next() {
-        t.translation = Vec3::new(cx as f32, h + 20.0, cz as f32);
-        // รีเซ็ตมุมมองเป็นระดับสายตา — เดิมสืบทอด pitch ก้มจาก setup_camera
-        // (จูนไว้ให้โลก noise มองลงเห็นพื้นตอนเริ่ม) ทำให้โผล่มาก้มมองพื้นเกือบดิ่ง
-        cam.yaw = 0.0;
-        cam.pitch = 0.0;
-        t.rotation = Quat::from_axis_angle(Vec3::Y, cam.yaw) * Quat::from_axis_angle(Vec3::X, cam.pitch);
-        info!("spawn โลกจริง: บล็อก ({:.0}, {:.0}) ผิวสูง {:.0} ม.", cx, cz, h);
-    }
-}
-
 /// มองเห็นกันไหม (ไม่มีบล็อกทึบขวาง) — ใช้คำนวณแสงจ้าเข้าตาตอนระเบิด
 /// เดินแบบ sampling ทีละครึ่งบล็อกพอ (เรียกครั้งเดียวต่อการระเบิด ไม่ต้อง DDA เป๊ะ)
 pub fn line_of_sight(world: &VoxelWorld, from: Vec3, to: Vec3) -> bool {
@@ -7509,6 +7628,13 @@ fn queue_remesh(pos: IVec3, remesh_queue: &mut std::collections::HashSet<IVec2>)
 /// น้ำที่เคยหลับเพราะปลายทางยังไม่โหลด (set_block ล้มเหลว) จะได้ไหลต่อ
 /// ปลุกเฉพาะคู่ที่ไหลข้ามได้จริง: น้ำเจออากาศ หรือน้ำต่างระดับ ≥2
 /// (ตะเข็บจาก generation ล้วนๆ เสมอกันพอดี เลยไม่ปลุกทะเลทั้งผืนโดยไม่จำเป็น)
+/// คอลัมน์นี้เป็นแม่น้ำ gen ไหม — น้ำแม่น้ำเป็น scenery นิ่งถาวร fluid sim ไม่แตะ (ไม่งั้นไหลลงทะเลจนแห้ง
+/// เพราะ finite ไม่มี source). ตรวจจาก hydro network ตรง ๆ (ไม่ต้องมี block type แยก)
+#[inline]
+pub fn is_river_column(x: i32, z: i32) -> bool {
+    crate::hydro::river_at(x as f64 + 0.5, z as f64 + 0.5).is_some()
+}
+
 pub fn wake_seam_water(world: &VoxelWorld, chunk_pos: IVec2, active_fluids: &mut ActiveFluids) {
     let Some(chunk) = world.chunks.get(&chunk_pos) else { return };
     let w = CHUNK_WIDTH;
@@ -7539,13 +7665,19 @@ pub fn wake_seam_water(world: &VoxelWorld, chunk_pos: IVec2, active_fluids: &mut
                 let b = neighbor.blocks.get(blx, y, blz);
                 let (av, bv) = (get_water_vol(a), get_water_vol(b));
 
-                // ฝั่งเราไหลไปหาเขาได้ไหม
+                // ฝั่งเราไหลไปหาเขาได้ไหม (เว้นน้ำแม่น้ำ = นิ่งถาวร)
                 if a.is_water() && (b == BlockType::Air || (b.is_water() && bv + 1 < av)) {
-                    active_fluids.0.insert(IVec3::new(base_x + alx as i32, y as i32, base_z + alz as i32));
+                    let (wx, wz) = (base_x + alx as i32, base_z + alz as i32);
+                    if !is_river_column(wx, wz) {
+                        active_fluids.0.insert(IVec3::new(wx, y as i32, wz));
+                    }
                 }
                 // ฝั่งเขาไหลมาหาเราได้ไหม
                 if b.is_water() && (a == BlockType::Air || (a.is_water() && av + 1 < bv)) {
-                    active_fluids.0.insert(IVec3::new(n_base_x + blx as i32, y as i32, n_base_z + blz as i32));
+                    let (wx, wz) = (n_base_x + blx as i32, n_base_z + blz as i32);
+                    if !is_river_column(wx, wz) {
+                        active_fluids.0.insert(IVec3::new(wx, y as i32, wz));
+                    }
                 }
             }
         }
@@ -7718,6 +7850,10 @@ pub fn fluid_simulation_system(
     for pos in current_active.into_iter() {
         // cell สมาชิกสระ: ข้าม cellular ทั้งหมด — สระจัดการผ่านบัญชีรวมเอง
         if pools.member_of(pos).is_some() {
+            continue;
+        }
+        // น้ำแม่น้ำ gen = นิ่งถาวร ไม่ simulate (ปล่อยให้ไหลจะแห้งเพราะ finite ไม่มี source)
+        if is_river_column(pos.x, pos.z) {
             continue;
         }
         let block = world.get_block(pos.x, pos.y, pos.z);
@@ -8531,7 +8667,7 @@ svg{ background:var(--panel); border:1px solid var(--rule); border-radius:3px;
         for cx in 0..12 {
             for cz in 0..12 {
                 let (blocks, records) =
-                    generate_chunk_blocks(IVec2::new(cx, cz), noise, crate::TerrainSource::Noise);
+                    generate_chunk_blocks(IVec2::new(cx, cz), noise);
                 if records.is_empty() {
                     continue;
                 }
@@ -8795,33 +8931,27 @@ svg{ background:var(--panel); border:1px solid var(--rule); border-radius:3px;
         }
     }
 
-    /// worldgen (noise) ต้องได้ biome หลากหลายเมื่อกวาดพื้นที่กว้าง + พื้นตรงกับ biome
+    /// worldgen ต้องได้เขตอุณหภูมิ + ผิว biome หลากหลายเมื่อกวาดพื้นที่กว้าง (เหนือ-ใต้ข้ามเขต)
     #[test]
     fn worldgen_produces_varied_biomes() {
-        use crate::biome::Biome;
         let noise = crate::NoiseParams { frequency: 0.01, amplitude: 40.0, octaves: 4, seed: 4242 };
         let sampler = TerrainSampler::new(noise);
-        let mut seen: std::collections::HashSet<Biome> = Default::default();
+        let mut zones: std::collections::HashSet<crate::biome::ClimateZone> = Default::default();
+        let mut surfaces: std::collections::HashSet<BlockType> = Default::default();
         for cx in 0..48i32 {
-            for cz in 0..48i32 {
-                // กระจายไกลให้ข้ามผืน biome (noise ความถี่ต่ำ ~330 บล็อก)
+            for cz in 0..64i32 {
                 let wx = (cx * 90) as f64;
-                let wz = (cz * 90) as f64;
+                let wz = (cz * 300) as f64; // ก้าวใหญ่แกน Z ให้ข้ามหลายเขตอุณหภูมิ
                 let h = sampler.height(wx, wz);
-                let b = sampler.biome_at(wx, wz, h, SEA_LEVEL as i32, None);
-                seen.insert(b);
-                let s = biome_surface_block(b, h, SEA_LEVEL as i32);
-                // พื้นต้องเป็นบล็อกจริง (ไม่ใช่ Air) + ตรงตาม biome หลัก
-                assert_ne!(s, BlockType::Air);
-                match b {
-                    Biome::Desert if h > SEA_LEVEL as i32 + 1 => assert_eq!(s, BlockType::Sand),
-                    Biome::Tundra if h > SEA_LEVEL as i32 + 1 => assert_eq!(s, BlockType::Snow),
-                    Biome::Taiga if h > SEA_LEVEL as i32 + 1 => assert_eq!(s, BlockType::SnowyGrass),
-                    _ => {}
-                }
+                zones.insert(crate::biome::zone_of(sampler.temperature_raw(wx, wz)));
+                let col = sampler.column_biome(wx, wz);
+                let s = surface_block_for(col, h, SEA_LEVEL as i32, sampler.snow_line());
+                assert_ne!(s, BlockType::Air, "พื้นต้องเป็นบล็อกจริง");
+                surfaces.insert(s);
             }
         }
-        assert!(seen.len() >= 3, "ควรได้ biome หลากหลาย (>=3) ได้ {}: {:?}", seen.len(), seen);
+        assert!(zones.len() >= 3, "ควรเจอเขตอุณหภูมิหลากหลาย (>=3) ได้ {}: {:?}", zones.len(), zones);
+        assert!(surfaces.len() >= 3, "ควรเจอผิวหลากหลาย (>=3): {:?}", surfaces);
     }
 
     /// record ต่อ chunk ต้อง round-trip ได้ครบ ทั้ง thickness และลิงก์ parent/children

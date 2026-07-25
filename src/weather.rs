@@ -49,15 +49,71 @@ enum Precip {
     Snow,
 }
 
+/// สถานะระบบเลือกอากาศอัตโนมัติ (host/single เท่านั้น) — re-roll นานๆ ครั้งตามภูมิอากาศ
+/// ณ ตำแหน่งผู้เล่น. `/weather` แมนนวลใช้เลื่อน `next_roll_day` เพื่อค้างอากาศไว้ชั่วคราว
+#[derive(Resource, Default)]
+pub struct AutoWeather {
+    /// วันเกมสัมบูรณ์ที่จะสุ่มอากาศใหม่ครั้งถัดไป (ดู [`absolute_game_day`])
+    pub next_roll_day: f64,
+    /// xorshift state (seed ตอน init จากเวลา)
+    pub rng: u64,
+    /// init เฟรมแรกแล้วหรือยัง
+    pub started: bool,
+}
+
+impl AutoWeather {
+    /// เลื่อนนัด re-roll ออกไปเมื่อผู้เล่นตั้งอากาศเอง (`/weather`/UI) — ค้างอากาศแมนนวลไว้ชั่วคราว
+    /// แล้วปล่อยให้ auto กลับมาทำงานเอง
+    pub fn hold_for_manual(&mut self, settings: &crate::GameSettings) {
+        self.next_roll_day = absolute_game_day(settings) + MANUAL_HOLD_DAYS;
+    }
+}
+
+/// ช่วงเวลาระหว่างเปลี่ยนอากาศ (วันเกม) — "นานๆ เปลี่ยนที" อากาศคงที่เป็นวันๆ
+const MIN_INTERVAL_DAYS: f64 = 1.0;
+const MAX_INTERVAL_DAYS: f64 = 3.0;
+/// `/weather` แมนนวลค้างอากาศไว้กี่วันเกมก่อน auto กลับมาทำงาน
+const MANUAL_HOLD_DAYS: f64 = 1.0;
+/// อุณหภูมิ (หลัง lapse) ต่ำกว่านี้ = หิมะ ไม่งั้นฝน — ศูนย์สูตร dynamic_temp≈0.7 จึงไม่มีทางหิมะ
+const SNOW_TEMP: f64 = -0.15;
+
+/// วันเกมสัมบูรณ์ (โมโนโทนิก) จาก settings — ใช้เทียบ timer ของ auto-weather
+pub fn absolute_game_day(s: &crate::GameSettings) -> f64 {
+    s.year as f64 * crate::astro::DAYS_PER_YEAR as f64
+        + s.day_of_year as f64
+        + s.time_of_day as f64 / 24.0
+}
+
+/// xorshift64 — คืน u64 ถัดไป (state ต้องไม่เป็น 0)
+fn next_u64(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
+
+/// สุ่ม 0.0..1.0
+fn rand01(state: &mut u64) -> f64 {
+    (next_u64(state) >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// สุ่มช่วงเวลาถึง re-roll ครั้งถัดไป (วันเกม)
+fn rand_interval(state: &mut u64) -> f64 {
+    MIN_INTERVAL_DAYS + rand01(state) * (MAX_INTERVAL_DAYS - MIN_INTERVAL_DAYS)
+}
+
 pub struct WeatherPlugin;
 
 impl Plugin for WeatherPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Weather>()
+            .init_resource::<AutoWeather>()
             .add_systems(Startup, setup_precip)
             .add_systems(
                 Update,
-                (fade_weather, follow_precip, drive_precip, weather_fog_system),
+                (fade_weather, follow_precip, drive_precip, weather_fog_system, auto_weather_system),
             );
     }
 }
@@ -198,4 +254,71 @@ fn weather_fog_system(
         let c = base.lerp(grey, oc * 0.7);
         fog.color = Color::srgb(c.x, c.y, c.z);
     }
+}
+
+/// สุ่มอากาศจากภูมิอากาศ ณ ตำแหน่ง: โอกาสตกอิงความชื้น (แห้ง→แทบไม่ตก),
+/// หนาว/บนภูเขา (temp หลัง lapse ต่ำ) → หิมะ ไม่งั้นฝน
+fn roll_weather(temp: f64, humidity: f64, alt_above_sea: f64, rng: &mut u64) -> (WeatherKind, f32) {
+    // ชื้น (humidity สูง) = โอกาสตกสูง; ทะเลทราย humidity ต่ำ → ~0
+    let p_precip = ((humidity + 0.35) * 0.7).clamp(0.02, 0.85);
+    if rand01(rng) > p_precip {
+        return (WeatherKind::Clear, 0.0);
+    }
+    let t = crate::biome::lapse_adjust(temp, alt_above_sea.max(0.0) as i32);
+    let intensity = (0.35 + rand01(rng) * 0.6) as f32;
+    if t < SNOW_TEMP {
+        (WeatherKind::Snow, intensity)
+    } else {
+        (WeatherKind::Rain, intensity)
+    }
+}
+
+/// เลือกอากาศอัตโนมัติ (host/single) — re-roll นานๆ ครั้งตามภูมิอากาศที่ตำแหน่งผู้เล่น
+/// แล้ว broadcast ให้ client (host-authoritative เหมือน time). client รับผ่าน network จึงไม่รันเอง
+fn auto_weather_system(
+    time: Res<Time>,
+    settings: Res<crate::GameSettings>,
+    mut weather: ResMut<Weather>,
+    mut auto: ResMut<AutoWeather>,
+    net_client: Option<Res<bevy_renet::RenetClient>>,
+    server: Option<ResMut<bevy_renet::RenetServer>>,
+    cam: Query<&GlobalTransform, With<crate::camera::MainCamera>>,
+) {
+    if net_client.is_some() {
+        return; // client รับอากาศจาก host
+    }
+    let now = absolute_game_day(&settings);
+    if !auto.started {
+        // seed rng จากเวลาเดินเครื่อง (ให้ไม่ซ้ำทุกรอบเกม) แล้วตั้งนัด re-roll แรก
+        auto.rng = (time.elapsed().as_nanos() as u64) | 1;
+        auto.next_roll_day = now + rand_interval(&mut auto.rng);
+        auto.started = true;
+        return;
+    }
+    if now < auto.next_roll_day {
+        return;
+    }
+    let Ok(cam_tf) = cam.single() else { return }; // ยังไม่มีกล้อง/โลก — รอ
+    let p = cam_tf.translation();
+    let (wx, wz) = (p.x as f64, p.z as f64);
+
+    // ภูมิอากาศ ณ ตำแหน่ง — temp อิงละติจูด+ฤดู (dynamic_temp), humidity จาก sampler (มี band แล้ว)
+    let lat = crate::biome::climate_lat(wz);
+    let temp = crate::biome::dynamic_temp(lat, settings.day_of_year as f32);
+    let sampler = crate::voxel::TerrainSampler::new(settings.noise);
+    let humidity = sampler.humidity_raw(wx, wz);
+    let alt = p.y as f64 - crate::voxel::SEA_LEVEL as f64;
+
+    let (kind, intensity) = roll_weather(temp, humidity, alt, &mut auto.rng);
+    weather.set(kind, intensity);
+    if let Some(mut server) = server {
+        server.broadcast_message(
+            bevy_renet::renet::DefaultChannel::ReliableOrdered,
+            crate::network::encode(&crate::network::ServerMessage::Weather {
+                kind,
+                intensity: weather.target,
+            }),
+        );
+    }
+    auto.next_roll_day = now + rand_interval(&mut auto.rng);
 }

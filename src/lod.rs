@@ -34,66 +34,43 @@ const UPDATE_PERIOD: f32 = 0.5;
 
 /// สเปกแหล่งความสูง — Copy ได้ ส่งเข้า task แล้วค่อยประกอบของจริงข้างใน
 #[derive(Clone, Copy, PartialEq)]
-pub enum HeightSourceSpec {
-    Noise(crate::NoiseParams),
-    Dem,
+pub struct HeightSourceSpec {
+    pub noise: crate::NoiseParams,
 }
 
 impl HeightSourceSpec {
     fn from_settings(settings: &crate::GameSettings) -> Self {
-        match settings.terrain_source {
-            crate::TerrainSource::Noise => Self::Noise(settings.noise),
-            crate::TerrainSource::RealWorld => Self::Dem,
-        }
+        Self { noise: settings.noise }
     }
 }
 
-/// แหล่งความสูงจริงที่ใช้ใน task (โหมดไหนก็หน้าตาเดียวกันต่อ mesher)
-enum HeightSource {
-    Noise(TerrainSampler),
-    Dem(&'static crate::dem::DemStreamer),
+/// แหล่งความสูงจริงที่ใช้ใน task
+struct HeightSource {
+    sampler: TerrainSampler,
 }
 
 impl HeightSource {
     fn build(spec: HeightSourceSpec) -> Option<Self> {
-        match spec {
-            HeightSourceSpec::Noise(params) => Some(Self::Noise(TerrainSampler::new(params))),
-            HeightSourceSpec::Dem => crate::dem::streamer().map(Self::Dem),
-        }
+        Some(Self { sampler: TerrainSampler::new(spec.noise) })
     }
 
     /// ความสูงผิว (หน่วย y บล็อก)
     fn height(&self, wx: f64, wz: f64) -> f32 {
-        match self {
-            Self::Noise(s) => s.height(wx, wz) as f32,
-            Self::Dem(d) => {
-                crate::dem::DEM_SEA_LEVEL_Y as f32 + d.elevation_at_block(wx, wz)
-            }
-        }
+        self.sampler.height(wx, wz) as f32
     }
 
     fn sea_level(&self) -> f32 {
-        match self {
-            Self::Noise(_) => SEA_LEVEL as f32,
-            Self::Dem(_) => crate::dem::DEM_SEA_LEVEL_Y as f32,
-        }
+        SEA_LEVEL as f32
     }
 
-    /// cell นี้เป็นแถบทราย (ติดทะเล/desert) ไหม — ตัดสินว่าผิว+ด้านข้างใช้ palette
-    /// ทราย หรือ หญ้า/ดิน ตามกติกา worldgen (voxel.rs TerrainSampler::surface_block)
+    /// cell นี้เป็นแถบทราย (ติดทะเล/desert) ไหม — ตัดสินว่าผิว+ด้านข้างใช้ palette ทราย หรือ หญ้า
     fn is_sandy(&self, wx: f64, wz: f64, h: f32) -> bool {
-        match self {
-            Self::Noise(s) => h <= SEA_LEVEL as f32 + 1.0 || s.is_desert(wx, wz),
-            Self::Dem(_) => h <= crate::dem::DEM_SEA_LEVEL_Y as f32 + 1.0,
-        }
+        h <= SEA_LEVEL as f32 + 1.0 || self.sampler.surface_is_sand(wx, wz)
     }
 
-    /// cell นี้เป็นน้ำ OSM (แม่น้ำ/ทะเลสาบ) ไหม — ให้ทะเลสาบ/แม่น้ำใหญ่เห็นในระยะไกล
-    fn is_water(&self, wx: f64, wz: f64) -> bool {
-        match self {
-            Self::Noise(_) => false,
-            Self::Dem(d) => d.is_water_at_block(wx, wz),
-        }
+    /// cell นี้เป็นน้ำไหม (โลก noise ไม่มี OSM river — เสมอ false)
+    fn is_water(&self, _wx: f64, _wz: f64) -> bool {
+        false
     }
 
     /// สีหน้าบนของ "บล็อกหยาบ": น้ำ (OSM) → สีน้ำ, ไม่งั้นหญ้า/ทราย ให้ตรง palette
@@ -734,13 +711,6 @@ pub fn update_lod_tiles(
         }
     }
 
-    // โลกจริง: อย่า build LOD tile จนกว่า DEM tile ที่ครอบมันจะพร้อม — ไม่งั้น
-    // LOD ที่ build ตอน tile ยังโหลดจะเป็นทะเลค้างถาวร (ไม่ rebuild เมื่อ tile มา)
-    // ตรงนี้ ensure_ready จะ request โหลดให้ด้วย แล้วค่อย build เฟรมถัดๆ ไป
-    let dem = (settings.terrain_source == crate::TerrainSource::RealWorld)
-        .then(crate::dem::streamer)
-        .flatten();
-
     // spawn task ที่ขาด (จำกัดงานคงค้าง)
     for key in desired {
         if lod.tiles.contains_key(&key)
@@ -750,14 +720,6 @@ pub fn update_lod_tiles(
             continue;
         }
         let (ring, coord) = key;
-        if let Some(dem) = dem {
-            let (_cell, tile_size, _) = LOD_RINGS[ring];
-            let (ox, oz) = ((coord.x * tile_size) as f64, (coord.y * tile_size) as f64);
-            let ts = tile_size as f64;
-            if !dem.ensure_ready(ox, oz, ox + ts, oz + ts) {
-                continue; // DEM tile ยังไม่พร้อม — ข้ามไปก่อน (request แล้ว)
-            }
-        }
         lod.pending.insert(key);
         let sender = lod.sender.lock().unwrap().clone();
         let version = lod.version;
