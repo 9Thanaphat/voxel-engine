@@ -25,6 +25,7 @@ const HELP: &[&str] = &[
     "/daynight <speed> - day-night cycle speed (1 = normal, 0 = frozen, host only)",
     "/weather <clear|rain|snow> [intensity] - set weather (host only)",
     "/seed - show the world seed",
+    "/chunkborders - toggle chunk boundary grid (debug, this client only)",
 ];
 
 /// ทุกอย่างที่คำสั่งอาจต้องแตะ — รวมเป็น SystemParam ก้อนเดียวไม่ให้ signature บาน
@@ -111,6 +112,12 @@ fn dispatch(
         "daynight" => cmd_daynight(&args, chat, world, is_client),
         "weather" => cmd_weather(&args, chat, world, server, is_client),
         "setblock" => cmd_setblock(&args, chat, world, is_client),
+        "chunkborders" => {
+            // debug local — สลับกริดขอบเขต chunk (ดู voxel::chunk_border_gizmo_system)
+            world.settings.show_chunk_borders = !world.settings.show_chunk_borders;
+            let state = if world.settings.show_chunk_borders { "on" } else { "off" };
+            chat.push_system(format!("Chunk borders {state}"));
+        }
         other => chat.push_error(format!("unknown command '{other}' - try /help")),
     }
 }

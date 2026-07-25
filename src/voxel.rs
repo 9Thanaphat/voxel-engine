@@ -168,9 +168,9 @@ pub const BLOCK_DEFS: [BlockDef; 40] = [
         overlay_side: &[] },
     BlockDef { name: "Grass", color: [0.2, 0.6, 0.2, 1.0], solid: true, transparent: false, emission: None, hardness: 1.2,
         tex_top: &["textures/grass_top.png"],
-        tex_side: &["textures/grass_side.png"],
+        // หน้าข้างเป็นดินล้วน — สีเขียวมาจาก grass_side_overlay (กระโปรงหญ้าเต็มด้าน ย้อมตาม biome)
+        tex_side: &["textures/dirt.png"],
         tex_bottom: &["textures/dirt.png"],
-        // พู่หญ้าห้อยเอียงจากขอบบน
         overlay_side: &["textures/grass_side_overlay.png"] },
     BlockDef { name: "Stone", color: [0.5, 0.5, 0.5, 1.0], solid: true, transparent: false, emission: None, hardness: 6.0,
         tex_top: &["textures/stone.png"], tex_side: &["textures/stone.png"], tex_bottom: &["textures/stone.png"],
@@ -320,6 +320,12 @@ pub fn block_hardness(block: BlockType) -> f32 {
 
 pub fn lamp_emission(block: BlockType) -> Option<Color> {
     block_def(block).emission.map(|c| Color::srgb(c[0], c[1], c[2]))
+}
+
+/// ไฟ "dynamic" = ควบคุมได้ด้วยระบบไฟฟ้า (เปิด/ปิด/หรี่/เปลี่ยนสีในอนาคต) → ใช้ PointLight จริง
+/// (เปลี่ยนสด ไม่ต้อง remesh). ไฟ static (คบไฟ/glowstone/โคมสี/campfire) ใช้ baked overlay อย่างเดียว
+pub fn is_dynamic_emitter(block: BlockType) -> bool {
+    matches!(block, BlockType::SmartLamp | BlockType::SmartLampOn)
 }
 
 /// กล่อง collision จริงของบล็อก (มุมล่าง, มุมบน ภายในช่อง 1x1x1 ของตัวเอง) — ค่าเริ่มต้นคือ
@@ -479,6 +485,34 @@ pub fn facing_variant(block: BlockType, face_id: usize, facing: u8) -> u8 {
 
 /// overlay ด้านข้างที่ใช้ได้จริง (มีไฟล์บน disk) ต่อบล็อก
 static SIDE_OVERLAYS: OnceLock<Vec<Vec<&'static str>>> = OnceLock::new();
+
+/// noise + แหล่งภูมิประเทศของโลกที่กำลังเล่น — mesher อ่านเพื่อย้อมสีหญ้า/ใบตาม biome
+/// (แนวเดียวกับ DEM streamer/ACTIVE_SAVE_DIR — เลี่ยงร้อยสาย noise ผ่าน remesh caller ทั้งหมด)
+static WORLDGEN_CLIMATE: std::sync::RwLock<Option<(crate::NoiseParams, crate::TerrainSource)>> =
+    std::sync::RwLock::new(None);
+
+/// ตั้ง climate ของโลกปัจจุบัน (เรียกตอน generate chunk — โลกเดียวค่าคงที่ เขียนซ้ำไม่เป็นไร)
+pub fn set_worldgen_climate(noise: crate::NoiseParams, source: crate::TerrainSource) {
+    if let Ok(mut g) = WORLDGEN_CLIMATE.write() {
+        *g = Some((noise, source));
+    }
+}
+
+/// ตัวคูณสีหญ้า/ใบตาม biome ที่กลาง chunk — biome เปลี่ยนช้า (~330 บล็อก) คงที่ต่อ chunk พอ
+fn foliage_tint_for_chunk(chunk_pos: IVec2) -> [f32; 3] {
+    let Some((noise, source)) = WORLDGEN_CLIMATE.read().ok().and_then(|g| *g) else {
+        return crate::biome::foliage_color(0.2, 0.3); // เขียวเขตอบอุ่น กัน grayscale เป็นขาว
+    };
+    let wx = chunk_pos.x as f64 * CHUNK_WIDTH as f64 + 8.0;
+    let wz = chunk_pos.y as f64 * CHUNK_WIDTH as f64 + 8.0;
+    let sampler = TerrainSampler::new(noise);
+    let temp = if source == crate::TerrainSource::RealWorld {
+        crate::biome::temp_from_latitude(crate::dem::block_to_latlon(wx, wz).0)
+    } else {
+        sampler.temperature_raw(wx, wz)
+    };
+    crate::biome::foliage_color(temp, sampler.humidity_raw(wx, wz))
+}
 
 /// เลือก sprite พู่ของหน้าด้านข้างนี้ (สุ่มลายตามพิกัด+ทิศ, deterministic)
 fn side_overlay_pick(block: BlockType, face_id: usize, wx: i32, wy: i32, wz: i32) -> Option<&'static str> {
@@ -1250,6 +1284,9 @@ pub fn create_mesh_from_blocks(
     let world_base_x = chunk_pos.x * CHUNK_WIDTH as i32;
     let world_base_z = chunk_pos.y * CHUNK_WIDTH as i32;
 
+    // สีหญ้า/ใบตาม biome (คูณเข้า vertex color ของหญ้าบน/พู่หญ้า/ใบผลัดใบ) — แบบ Minecraft
+    let foliage = foliage_tint_for_chunk(chunk_pos);
+
     // อ่านบล็อกด้วยพิกัด local ที่ทะลุขอบ chunk ได้ (รวมแนวทแยง)
     let sample = |x: i32, y: i32, z: i32| -> BlockType {
         if y < 0 || y >= CHUNK_HEIGHT as i32 {
@@ -1483,9 +1520,12 @@ pub fn create_mesh_from_blocks(
                                 }
                                 verts[i] = v;
                             }
-                            // normal ชี้ขึ้น — รับแสงเหมือนพื้นหญ้าด้านบน
+                            // สีเขียวตาม biome × แสงของช่องอากาศที่หน้านี้หันหา
+                            // (กันหญ้าเรืองเขียวในถ้ำ/เงา — เทียบเท่าที่หน้าดินได้รับ)
+                            let lb = block_tint(c[0] + norm[0], c[1] + norm[1], c[2] + norm[2])[0];
+                            let ov = [foliage[0] * lb, foliage[1] * lb, foliage[2] * lb, 1.0];
                             texture_buf(&mut set.deco, overlay)
-                                .push_quad(verts, [0., 1., 0.], [[1.0; 4]; 4], uvs, false);
+                                .push_quad(verts, [0., 1., 0.], [ov; 4], uvs, false);
                         }
                     }
 
@@ -1534,6 +1574,8 @@ pub fn create_mesh_from_blocks(
                         let mut uvs = [[0f32; 2]; 4];
                         let (vx, vy, vz) = (c[0], c[1], c[2]);
                         let is_w = block.is_water();
+                        // หน้าหญ้าบนย้อมสีตาม biome (แบบ Minecraft) — path AO ไล่เฉด
+                        let fol = if block == BlockType::Grass && face_id == 0 { foliage } else { [1.0; 3] };
                         // ผิวน้ำเรียบแบบ Terraria: กดความสูง "รายมุม vertex" —
                         // แต่ละมุมเฉลี่ยระดับน้ำจาก column 2x2 ที่ล้อมมุมนั้นเอง
                         // มุมที่บล็อกข้างกันแชร์กันได้ค่าเดียวกัน (ผ่าน cache)
@@ -1561,7 +1603,7 @@ pub fn create_mesh_from_blocks(
                             // น้ำลึกสีเข้มกว่า (corner_depth = 0 สำหรับบล็อกอื่น)
                             let tint = 1.0 - WATER_DEPTH_DARKEN * corner_depth[i];
                             let a = if is_w { WATER_ALPHA } else { base[3] };
-                            cols[i] = [base[0] * br * tint, base[1] * br * tint, base[2] * br * tint, a];
+                            cols[i] = [base[0] * br * tint * fol[0], base[1] * br * tint * fol[1], base[2] * br * tint * fol[2], a];
                             uvs[i] = face_uv(verts[i]);
                         }
                         let flip = (ao[0] as u32 + ao[2] as u32) < (ao[1] as u32 + ao[3] as u32);
@@ -1616,7 +1658,9 @@ pub fn create_mesh_from_blocks(
                     };
                     let base = if tex.is_some() { [1.0, 1.0, 1.0, 1.0] } else { block_color(block) };
                     let br = FACE_SHADE[face_id] * AO_CURVE[ao_level as usize] * sky_curve(light_level);
-                    let col = [base[0] * br, base[1] * br, base[2] * br, base[3]];
+                    // หน้าหญ้าบน (face 0) ย้อมสีตาม biome แบบ Minecraft (หน้าอื่น/บล็อกอื่นไม่แตะ)
+                    let fol = if block == BlockType::Grass && face_id == 0 { foliage } else { [1.0; 3] };
+                    let col = [base[0] * br * fol[0], base[1] * br * fol[1], base[2] * br * fol[2], base[3]];
 
                     let mut verts = [[0f32; 3]; 4];
                     let mut uvs = [[0f32; 2]; 4];
@@ -1661,7 +1705,8 @@ pub fn create_mesh_from_blocks(
 
         blocks.for_each_matching(|b| b == BlockType::TallGrass, |xi, yi, zi, _| {
             let (x, y, z) = (xi as f32, yi as f32, zi as f32);
-            let tint = block_tint(xi as i32, yi as i32, zi as i32);
+            let t = block_tint(xi as i32, yi as i32, zi as i32);
+            let tint = [t[0] * foliage[0], t[1] * foliage[1], t[2] * foliage[2], t[3]];
 
             for quad in CROSS_QUADS {
                 let mut verts = [[0f32; 3]; 4];
@@ -1678,6 +1723,8 @@ pub fn create_mesh_from_blocks(
     // พุ่มจึงฟูรอบทิศแทนที่จะเป็นก้อนเหลี่ยม
     for leaf in [BlockType::Leaves, BlockType::SpruceLeaves] {
         let Some(sprite) = face_texture(leaf, 2, 0) else { continue };
+        // ใบผลัดใบ (Leaves) ย้อมสีตาม biome; ใบสน (SpruceLeaves) เขียวคงที่ทุกโซน
+        let leaf_fol = if leaf == BlockType::Leaves { foliage } else { [1.0; 3] };
         blocks.for_each_matching(|b| b == leaf, |xi, yi, zi, _| {
             // ใบที่ถูกใบ/บล็อกทึบล้อมครบหกด้านมองไม่เห็นอยู่แล้ว — ข้ามไปเลย
             // (พุ่มหนาๆ ประหยัด quad ได้เยอะโดยหน้าตาไม่เปลี่ยน)
@@ -1689,7 +1736,8 @@ pub fn create_mesh_from_blocks(
             if hidden {
                 return;
             }
-            let tint = block_tint(cx, cy, cz);
+            let t = block_tint(cx, cy, cz);
+            let tint = [t[0] * leaf_fol[0], t[1] * leaf_fol[1], t[2] * leaf_fol[2], t[3]];
             generate_leaf_mesh_into(&mut set, sprite, xi as f32, yi as f32, zi as f32, tint);
         });
     }
@@ -2017,6 +2065,7 @@ pub struct TerrainSampler {
     fbm: Fbm<Perlin>,
     temperature: Perlin,
     cave: Perlin,
+    humidity: Perlin,
     params: crate::NoiseParams,
 }
 
@@ -2027,8 +2076,34 @@ impl TerrainSampler {
             fbm: Fbm::<Perlin>::new(params.seed).set_octaves(params.octaves as usize),
             temperature: Perlin::new(params.seed.wrapping_add(1)),
             cave: Perlin::new(params.seed.wrapping_add(2)),
+            humidity: Perlin::new(params.seed.wrapping_add(3)),
             params,
         }
+    }
+
+    /// อุณหภูมิดิบ (−1..1) noise ความถี่ต่ำ = ผืน biome ใหญ่ (ใช้ทั้งจำแนก biome + ย้อมสีหญ้า)
+    pub fn temperature_raw(&self, wx: f64, wz: f64) -> f64 {
+        self.temperature.get([wx * 0.003, wz * 0.003])
+    }
+
+    /// ความชื้นดิบ (−1..1) — ความถี่ต่างจาก temp เล็กน้อยไม่ให้ลายซ้อนกัน
+    pub fn humidity_raw(&self, wx: f64, wz: f64) -> f64 {
+        self.humidity.get([wx * 0.0025, wz * 0.0025])
+    }
+
+    /// จำแนก biome ที่ตำแหน่งนี้ — temp_override ใช้ตอน Real World (อุณหภูมิจากละติจูดจริง
+    /// แทน noise เพราะเชียงใหม่ไม่ควรสุ่มเป็นทะเลทราย); height−sea_level = เมตรเหนือระดับน้ำ
+    pub fn biome_at(
+        &self,
+        wx: f64,
+        wz: f64,
+        height: i32,
+        sea_level: i32,
+        temp_override: Option<f64>,
+    ) -> crate::biome::Biome {
+        let temp = temp_override.unwrap_or_else(|| self.temperature_raw(wx, wz));
+        let hum = self.humidity_raw(wx, wz);
+        crate::biome::classify(temp, hum, height - sea_level)
     }
 
     pub fn height(&self, wx: f64, wz: f64) -> i32 {
@@ -2036,36 +2111,33 @@ impl TerrainSampler {
         (SEA_LEVEL as f64 + n * self.params.amplitude).clamp(3.0, (CHUNK_HEIGHT - 1) as f64) as i32
     }
 
-    /// biome ทะเลทราย (noise อุณหภูมิความถี่ต่ำ = ผืนใหญ่)
+    /// biome นี้เป็นทะเลทรายไหม (ประมาณระดับพื้นราบ ไม่คิดความสูง) — ใช้ระบายสี LOD ระยะไกล
     pub fn is_desert(&self, wx: f64, wz: f64) -> bool {
-        self.temperature.get([wx * 0.003, wz * 0.003]) > 0.5
-    }
-
-    /// biome หนาว (แถบอุณหภูมิต่ำ) — แยกจาก desert คนละปลายสเกล ไม่ทับกัน
-    pub fn is_snow(&self, wx: f64, wz: f64) -> bool {
-        self.temperature.get([wx * 0.003, wz * 0.003]) < -0.35
+        crate::biome::classify(self.temperature_raw(wx, wz), self.humidity_raw(wx, wz), 0)
+            == crate::biome::Biome::Desert
     }
 
     pub fn is_cave(&self, wx: f64, y: i32, wz: f64) -> bool {
         self.cave.get([wx * 0.06, y as f64 * 0.06, wz * 0.06]) > 0.45
     }
 
-    pub fn surface_block(&self, height: i32, desert: bool, snow: bool, sea_level: i32) -> BlockType {
-        if height >= SNOW_LINE {
-            BlockType::Snow // คลุมยอดเขา/หินโผล่ทุกไบโอม
-        } else if desert || height <= sea_level + 1 {
-            BlockType::Sand
-        } else if snow {
-            BlockType::SnowyGrass
-        } else {
-            BlockType::Grass
-        }
-    }
 }
 
-/// เส้นหิมะ — ผิวที่สูงกว่านี้คลุมหิมะเสมอ (amplitude โลก noise ~40 เหนือ SEA_LEVEL 200
-/// → ยอดสูงสุด ~236 เส้นนี้เลยได้เฉพาะยอดเขาสูงสุด) ปรับได้ที่นี่ที่เดียว
-pub const SNOW_LINE: i32 = SEA_LEVEL as i32 + 28;
+/// บล็อกผิวตาม biome + ความสูง — ชายหาดใกล้น้ำเป็นทราย, Alpine สูงมากคลุมหิมะเหนือหินโล่ง
+pub fn biome_surface_block(biome: crate::biome::Biome, height: i32, sea_level: i32) -> BlockType {
+    use crate::biome::Biome::*;
+    if height <= sea_level + 1 {
+        return BlockType::Sand; // ชายหาด/ก้นน้ำตื้น ทุก biome
+    }
+    match biome {
+        Desert => BlockType::Sand,
+        Taiga => BlockType::SnowyGrass,
+        Tundra => BlockType::Snow,
+        // ยอด Alpine (สูงมาก) หิมะคลุม, ต่ำกว่านั้นหินโล่ง
+        Alpine => if height - sea_level >= 2300 { BlockType::Snow } else { BlockType::Stone },
+        Savanna | Plains | TropicalForest | TemperateForest => BlockType::Grass,
+    }
+}
 
 /// คืนบล็อกของ chunk + โครงกิ่งของต้นไม้ที่ปลูกไว้ (deterministic จากพิกัด chunk)
 fn generate_chunk_blocks(
@@ -2074,6 +2146,8 @@ fn generate_chunk_blocks(
     source: crate::TerrainSource,
 ) -> (ChunkBlocks, Vec<crate::tree::BranchRecord>) {
     let sampler = TerrainSampler::new(noise);
+    // บันทึก climate ของโลกให้ mesher ใช้ย้อมสีหญ้า/ใบตาม biome (โลกเดียวค่าคงที่)
+    set_worldgen_climate(noise, source);
     // เริ่มเป็นอากาศ uniform ทั้งคอลัมน์ — เขียนเฉพาะที่มีของ ฟ้าไม่เคยถูก
     // materialize; compact() ท้ายฟังก์ชันยุบใต้ดิน/น้ำที่บังเอิญล้วนกลับเป็น 1 byte
     let mut blocks = ChunkBlocks::new_uniform(BlockType::Air);
@@ -2093,8 +2167,7 @@ fn generate_chunk_blocks(
     };
 
     let mut heights = [[0i32; CHUNK_WIDTH]; CHUNK_WIDTH];
-    let mut desert = [[false; CHUNK_WIDTH]; CHUNK_WIDTH];
-    let mut snow = [[false; CHUNK_WIDTH]; CHUNK_WIDTH];
+    let mut biomes = [[crate::biome::Biome::Plains; CHUNK_WIDTH]; CHUNK_WIDTH];
 
     for z in 0..CHUNK_WIDTH {
         for x in 0..CHUNK_WIDTH {
@@ -2106,9 +2179,13 @@ fn generate_chunk_blocks(
                     .clamp(3.0, (CHUNK_HEIGHT - 16) as f32) as i32,
                 None => sampler.height(wx, wz),
             };
-            // โลกจริงไม่มี biome จาก noise (เชียงใหม่ไม่มีทะเลทราย/หิมะ)
-            desert[z][x] = dem_data.is_none() && sampler.is_desert(wx, wz);
-            snow[z][x] = dem_data.is_none() && sampler.is_snow(wx, wz);
+            // Real World: อุณหภูมิฐานจากละติจูดจริง (เชียงใหม่ = เขตร้อน ไม่สุ่มเป็นทะเลทราย)
+            // + ความสูงจริง → ยอดดอยเย็นเป็น alpine/หิมะเอง. Noise: อุณหภูมิจาก noise field
+            let temp_override = dem_data.map(|_| {
+                let (lat, _) = crate::dem::block_to_latlon(wx, wz);
+                crate::biome::temp_from_latitude(lat)
+            });
+            biomes[z][x] = sampler.biome_at(wx, wz, heights[z][x], sea_level, temp_override);
         }
     }
 
@@ -2117,9 +2194,10 @@ fn generate_chunk_blocks(
             let wx = base_x + x as f64;
             let wz = base_z + z as f64;
             let h = heights[z][x];
-            let is_desert = desert[z][x];
-            let is_snow = snow[z][x];
-            let surface = sampler.surface_block(h, is_desert, is_snow, sea_level);
+            let biome = biomes[z][x];
+            let surface = biome_surface_block(biome, h, sea_level);
+            // ใต้ผิวเป็นทรายเฉพาะทะเลทราย (biome อื่นเป็นดิน)
+            let sub_sand = biome == crate::biome::Biome::Desert;
             // แม่น้ำ/ผืนน้ำจาก OSM mask (โลกจริง) — คอลัมน์นี้เป็นน้ำไหม
             let is_river = dem_data.is_some_and(|d| d.is_water_at_block(wx, wz));
 
@@ -2130,7 +2208,7 @@ fn generate_chunk_blocks(
                 } else if yi < h - 3 {
                     BlockType::Stone
                 } else if yi < h {
-                    if is_desert { BlockType::Sand } else { BlockType::Dirt }
+                    if sub_sand { BlockType::Sand } else { BlockType::Dirt }
                 } else if yi == h {
                     surface
                 } else if yi <= sea_level {
@@ -2175,18 +2253,22 @@ fn generate_chunk_blocks(
         let tx = 4 + (next() % 8) as i32;
         let tz = 4 + (next() % 8) as i32;
         let h = heights[tz as usize][tx as usize];
+        let biome = biomes[tz as usize][tx as usize];
         let params = &TREE_PRESETS[ACTIVE_TREE_PRESET].1;
         // เผื่อความสูงลำต้นเต็มที่ + พุ่มยอด ให้ต้นสูงๆ (เช่น pine) ไม่ถูกตัดยอด
         let headroom = params.trunk_len.1 + params.limb_len.1 + 4;
-        // ไม่ปลูกบนทราย/ใต้น้ำ/ยอดหิมะ (surface เป็น Snow cap แล้ว)
-        if desert[tz as usize][tx as usize]
+        use crate::biome::Biome::*;
+        // biome ที่ไม่มีต้นไม้ (ทะเลทราย/ทุนดรา/ยอดเขา) หรือใต้น้ำ/ชนเพดาน = ข้าม
+        let treeless = matches!(biome, Desert | Tundra | Alpine);
+        // ทุ่ง/สะวันนา = ต้นไม้บาง (ทอยข้ามครึ่งหนึ่ง)
+        let too_sparse = matches!(biome, Plains | Savanna) && next() % 2 == 0;
+        if treeless || too_sparse
             || h <= sea_level + 1
-            || h >= SNOW_LINE
             || h + headroom >= CHUNK_HEIGHT as i32
         {
             continue;
         }
-        if snow[tz as usize][tx as usize] {
+        if biome == Taiga {
             // ไบโอมหนาว → ต้นสนคิวบ์ (ไม่เข้า BranchNetwork)
             grow_spruce(&mut blocks, IVec3::new(tx, h + 1, tz), &mut next);
         } else {
@@ -2194,13 +2276,13 @@ fn generate_chunk_blocks(
         }
     }
 
-    // หญ้าสูง: โปรยบนผิวหญ้า (ไม่ขึ้นในทะเลทราย/ใต้น้ำ)
+    // หญ้าสูง: โปรยบนผิวหญ้า (เช็ค == Grass ด้านล่างกันไม่ให้ขึ้นบนทราย/หิมะอยู่แล้ว)
     let tuft_count = (next() % 14) as usize;
     for _ in 0..tuft_count {
         let gx = (next() % CHUNK_WIDTH as u64) as usize;
         let gz = (next() % CHUNK_WIDTH as u64) as usize;
         let h = heights[gz][gx];
-        if desert[gz][gx] || h <= sea_level + 1 || h + 1 >= CHUNK_HEIGHT as i32 {
+        if h <= sea_level + 1 || h + 1 >= CHUNK_HEIGHT as i32 {
             continue;
         }
         if blocks.get(gx, h as usize, gz) == BlockType::Grass
@@ -3111,11 +3193,10 @@ pub fn spawn_surface_preview_task(
         for z in 0..CHUNK_WIDTH as i32 {
             for x in 0..CHUNK_WIDTH as i32 {
                 let h = height_at(x, z);
-                let is_desert = sampler.is_desert(base_x + x as f64, base_z + z as f64);
-                let is_snow = sampler.is_snow(base_x + x as f64, base_z + z as f64);
-                // preview เป็นเครื่องมือจูน noise — ใช้ทะเล noise เสมอ
-                let top = sampler.surface_block(h, is_desert, is_snow, SEA_LEVEL as i32);
-                let side = if is_desert { BlockType::Sand } else { BlockType::Dirt };
+                // preview เป็นเครื่องมือจูน noise — ใช้ทะเล noise เสมอ + biome จาก noise
+                let biome = sampler.biome_at(base_x + x as f64, base_z + z as f64, h, SEA_LEVEL as i32, None);
+                let top = biome_surface_block(biome, h, SEA_LEVEL as i32);
+                let side = if biome == crate::biome::Biome::Desert { BlockType::Sand } else { BlockType::Dirt };
 
                 // หน้าบนของบล็อกผิว (บล็อก y = h กินพื้นที่ถึง y = h + 1)
                 push_face(&mut solid, 0, x as f32, z as f32, h as f32, (h + 1) as f32, shaded(top, 0));
@@ -4200,36 +4281,29 @@ pub fn refresh_chunk_lamp_lights(
     let base_z = (chunk_pos.y * CHUNK_WIDTH as i32) as f32;
 
     let mut lights = Vec::new();
-    chunk.blocks.for_each_matching(|b| lamp_emission(b).is_some(), |x, y, z, block| {
-        let Some(color) = lamp_emission(block) else { return };
-
-        let y_offset = if block == BlockType::SmartLamp || block == BlockType::SmartLampOn {
-            0.625 // ปรับตำแหน่ง PointLight ให้ตรงกับตำแหน่งหลอดไฟใน model
-        } else {
-            0.5
-        };
-
-        let entity = commands.spawn((
-            PointLight {
-                color,
-                intensity: 100_000.0,
-                range: 14.0,
-                shadow_maps_enabled: false,
-                ..default()
-            },
-            Transform::from_xyz(
-                base_x + x as f32 + 0.5,
-                y as f32 + y_offset,
-                base_z + z as f32 + 0.5,
-            ),
-        )).id();
-        // Campfire ต้องได้ particle ไฟ ไม่ใช่ sparkle ทั่วไปของ lamp สี — แท็กไว้ให้
-        // attach_campfire_flames จับแทน attach_lamp_sparkles (ดู particles.rs)
-        if block == BlockType::Campfire {
-            commands.entity(entity).insert(crate::particles::CampfireFlameSource);
-        }
-        lights.push(entity);
-    });
+    // spawn PointLight จริง **เฉพาะไฟ dynamic** (SmartLamp/ไฟฟ้า) — ไฟ static ใช้ baked overlay
+    // อย่างเดียว (คบไฟ/glowstone/campfire เป็นร้อยดวงเลยไม่ทำ clustering เต็ม/กระพริบอีก)
+    chunk.blocks.for_each_matching(
+        |b| lamp_emission(b).is_some() && is_dynamic_emitter(b),
+        |x, y, z, block| {
+            let Some(color) = lamp_emission(block) else { return };
+            let entity = commands.spawn((
+                PointLight {
+                    color,
+                    intensity: 100_000.0,
+                    range: 14.0,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::from_xyz(
+                    base_x + x as f32 + 0.5,
+                    y as f32 + 0.625, // ตรงกับหลอดไฟใน model ของ SmartLamp
+                    base_z + z as f32 + 0.5,
+                ),
+            )).id();
+            lights.push(entity);
+        },
+    );
     if !lights.is_empty() {
         world.lamp_lights.insert(chunk_pos, lights);
     }
@@ -4287,6 +4361,10 @@ pub fn refresh_chunk_campfire_models(
                     base_z + z as f32 + 0.5,
                 ).with_rotation(Quat::from_rotation_y(rotation)),
             )).id();
+            // เปลวไฟ campfire เกาะโมเดล (ไม่พึ่ง PointLight แล้ว — campfire เป็นไฟ static)
+            if block == BlockType::Campfire {
+                commands.entity(entity).insert(crate::particles::CampfireFlameSource);
+            }
             models.push(entity);
         }
     );
@@ -6887,6 +6965,55 @@ pub fn explosion_debug_system(
     }
 }
 
+/// debug: วาดกริดขอบเขต chunk รอบตัวผู้เล่น (สลับด้วย /chunkborders) —
+/// เส้นตั้งที่จุดตัดกริด (chunk ปัจจุบัน = เหลือง, รอบข้าง = ฟ้า) + ฝากริดบน/ล่าง
+pub fn chunk_border_gizmo_system(
+    settings: Res<crate::GameSettings>,
+    camera_query: Query<&Transform, With<crate::camera::FreeCamera>>,
+    mut gizmos: Gizmos,
+) {
+    if !settings.show_chunk_borders {
+        return;
+    }
+    let Some(t) = camera_query.iter().next() else { return };
+    let p = t.translation;
+    let w = CHUNK_WIDTH as f32;
+    let cx = (p.x / w).floor() as i32;
+    let cz = (p.z / w).floor() as i32;
+    let r = 2; // รัศมี chunk รอบตัว
+    let y_lo = (p.y - 48.0).max(0.0);
+    let y_hi = (p.y + 48.0).min(CHUNK_HEIGHT as f32);
+    let cur = Color::srgb(1.0, 0.9, 0.2); // chunk ที่ยืนอยู่ = เหลือง
+    let grid = Color::srgba(0.3, 0.75, 1.0, 0.6); // รอบข้าง = ฟ้า
+
+    // เส้นตั้งที่จุดตัดของกริด chunk
+    for gx in (cx - r)..=(cx + r + 1) {
+        for gz in (cz - r)..=(cz + r + 1) {
+            let x = gx as f32 * w;
+            let z = gz as f32 * w;
+            let is_current_corner = (gx == cx || gx == cx + 1) && (gz == cz || gz == cz + 1);
+            let c = if is_current_corner { cur } else { grid };
+            gizmos.line(Vec3::new(x, y_lo, z), Vec3::new(x, y_hi, z), c);
+        }
+    }
+
+    // ฝากริดแนวนอนบน/ล่าง ให้เห็นเป็นช่อง chunk ชัด
+    let x_min = (cx - r) as f32 * w;
+    let x_max = (cx + r + 1) as f32 * w;
+    let z_min = (cz - r) as f32 * w;
+    let z_max = (cz + r + 1) as f32 * w;
+    for &y in &[y_lo, y_hi] {
+        for gx in (cx - r)..=(cx + r + 1) {
+            let x = gx as f32 * w;
+            gizmos.line(Vec3::new(x, y, z_min), Vec3::new(x, y, z_max), grid);
+        }
+        for gz in (cz - r)..=(cz + r + 1) {
+            let z = gz as f32 * w;
+            gizmos.line(Vec3::new(x_min, y, z), Vec3::new(x_max, y, z), grid);
+        }
+    }
+}
+
 // --------------------------------------------------------
 // Ephemeral pools — สระชั่วคราวสำหรับระบาย/เกลี่ยน้ำผืนใหญ่
 // เกิดเฉพาะตอนน้ำผืนใหญ่กำลังขยับ ใช้บัญชีปริมาตรรวม + เลขระดับผิวตัวเดียว
@@ -8666,6 +8793,35 @@ svg{ background:var(--panel); border:1px solid var(--rule); border-radius:3px;
             }
             assert_eq!(roots, 1, "seed {seed}: ต้องมี root เดียว");
         }
+    }
+
+    /// worldgen (noise) ต้องได้ biome หลากหลายเมื่อกวาดพื้นที่กว้าง + พื้นตรงกับ biome
+    #[test]
+    fn worldgen_produces_varied_biomes() {
+        use crate::biome::Biome;
+        let noise = crate::NoiseParams { frequency: 0.01, amplitude: 40.0, octaves: 4, seed: 4242 };
+        let sampler = TerrainSampler::new(noise);
+        let mut seen: std::collections::HashSet<Biome> = Default::default();
+        for cx in 0..48i32 {
+            for cz in 0..48i32 {
+                // กระจายไกลให้ข้ามผืน biome (noise ความถี่ต่ำ ~330 บล็อก)
+                let wx = (cx * 90) as f64;
+                let wz = (cz * 90) as f64;
+                let h = sampler.height(wx, wz);
+                let b = sampler.biome_at(wx, wz, h, SEA_LEVEL as i32, None);
+                seen.insert(b);
+                let s = biome_surface_block(b, h, SEA_LEVEL as i32);
+                // พื้นต้องเป็นบล็อกจริง (ไม่ใช่ Air) + ตรงตาม biome หลัก
+                assert_ne!(s, BlockType::Air);
+                match b {
+                    Biome::Desert if h > SEA_LEVEL as i32 + 1 => assert_eq!(s, BlockType::Sand),
+                    Biome::Tundra if h > SEA_LEVEL as i32 + 1 => assert_eq!(s, BlockType::Snow),
+                    Biome::Taiga if h > SEA_LEVEL as i32 + 1 => assert_eq!(s, BlockType::SnowyGrass),
+                    _ => {}
+                }
+            }
+        }
+        assert!(seen.len() >= 3, "ควรได้ biome หลากหลาย (>=3) ได้ {}: {:?}", seen.len(), seen);
     }
 
     /// record ต่อ chunk ต้อง round-trip ได้ครบ ทั้ง thickness และลิงก์ parent/children

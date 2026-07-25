@@ -15,6 +15,7 @@ pub mod light;
 pub mod tree;
 mod sky;
 mod astro;
+mod biome;
 mod audio;
 mod weather;
 
@@ -78,6 +79,8 @@ pub struct GameSettings {
     pub tnt_fuse_seconds: f32,
     /// debug: วาดเส้น ray ของระเบิดค้างไว้ให้ดู
     pub show_tnt_rays: bool,
+    /// debug: วาดกริดขอบเขต chunk รอบตัวผู้เล่น (สลับด้วย /chunkborders) — local ไม่ sync
+    pub show_chunk_borders: bool,
     /// ขนาด nuke หน่วย "บล็อก TNT เทียบเท่า" — รัศมี ∝ yield^⅓ ตามสูตรจริง
     pub nuke_yield: f32,
     pub nuke_fuse_seconds: f32,
@@ -112,6 +115,7 @@ impl Default for GameSettings {
             tnt_power: 10.0,
             tnt_fuse_seconds: 2.0,
             show_tnt_rays: false,
+            show_chunk_borders: false,
             nuke_yield: 500.0,
             nuke_fuse_seconds: 5.0,
             lod_enabled: true,
@@ -449,6 +453,7 @@ fn main() {
                     voxel::advance_time_system.before(voxel::update_sun_system),
                     // ใส่ FOV/fly speed ที่จำไว้ (settings.json) ให้กล้องครั้งแรกที่พร้อม
                     world_save::apply_camera_prefs_system,
+                    voxel::chunk_border_gizmo_system,
                 ),
             ).run_if(in_state(GameState::InGame)),
         )

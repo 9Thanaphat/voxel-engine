@@ -973,15 +973,17 @@ pub fn attach_lamp_sparkles(
     }
 }
 
-/// เกาะ particle ไฟให้ PointLight ของ Campfire โดยเฉพาะ (คู่กับ attach_lamp_sparkles ด้านบน)
+/// เกาะ particle ไฟให้ **โมเดล Campfire** ที่เพิ่ง spawn (แท็ก CampfireFlameSource ใน
+/// refresh_chunk_campfire_models) — campfire เป็นไฟ static ไม่มี PointLight แล้ว
 pub fn attach_campfire_flames(
     mut commands: Commands,
     assets: Res<ParticleAssets>,
-    query: Query<Entity, (Added<PointLight>, With<CampfireFlameSource>)>,
+    query: Query<Entity, Added<CampfireFlameSource>>,
 ) {
     for entity in &query {
+        // โมเดลอยู่ที่ฐานบล็อก — ยกเปลวขึ้นให้อยู่ตรงกองไฟ (เดิมเกาะ PointLight ที่ y+0.5)
         let child = commands
-            .spawn((ParticleEffect::new(assets.flame.clone()), Transform::default()))
+            .spawn((ParticleEffect::new(assets.flame.clone()), Transform::from_xyz(0.0, 0.4, 0.0)))
             .id();
         commands.entity(entity).add_child(child);
     }
