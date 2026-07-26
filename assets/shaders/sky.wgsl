@@ -252,31 +252,101 @@ fn fragment(in: VSOut) -> @location(0) vec4<f32> {
 
     // ---- เมฆ: layer บนสุด (บังดวงอาทิตย์/ดาวได้) ----
     let cloudiness = sky.cloud_ctrl.x;
-    if (cloudiness > 0.001 && dir.y > 0.02) {
-        // project ทิศลงระนาบเมฆ (ยิ่งใกล้ขอบฟ้ายิ่งยืด) + เลื่อนตามลม
-        let p = dir.xz / dir.y;
-        // t = เฟสเมฆสะสมจากฝั่ง Rust (∝ cloud_wind × day_speed) — เดินตามรอบวัน
-        // ไม่ใช่นาฬิกาจริง เร่ง/หยุดเวลาเมฆจึงเร็ว/หยุดตาม และต่อเนื่องแม้เปลี่ยนความเร็ว
-        let t = sky.cloud_ctrl.y;
-        let uv = p * 0.35 + vec2<f32>(t, t * 0.35);
-        // domain warp: บิด uv ด้วย noise ความถี่ต่ำที่เลื่อนตามเวลา → เมฆม้วนวน ไม่ไถลตรงเป๊ะ
-        let warp = fbm(vec3<f32>(uv * 0.5, t * 2.0));
-        let uvw = uv + vec2<f32>(warp, warp) * 0.12;
-        // z ของ noise เลื่อนตามเวลา → ก้อนเมฆค่อยๆ ก่อตัว/สลาย แทนที่จะไถลเป็นแผ่นแข็ง
-        let d = fbm(vec3<f32>(uvw, t * 6.0));
-        // coverage: cloudiness ดัน threshold ให้เมฆคลุมมากขึ้น
-        let cover = smoothstep(1.0 - cloudiness * 0.9 - 0.05, 1.0 - cloudiness * 0.9 + 0.20, d);
-        let horizon_fade = smoothstep(0.02, 0.22, dir.y);
-        let a = cover * horizon_fade;
-        // สีเมฆ: รับแสงดวงอาทิตย์ (ด้านที่หันหาดวงสว่างกว่า), กลางคืนเทาเข้ม, overcast เทาลง
-        let lit = clamp(dot(dir, sun_dir) * 0.5 + 0.5, 0.0, 1.0);
-        let day_amt = 1.0 - night;
-        var cloud_col = mix(vec3<f32>(0.55, 0.57, 0.63), vec3<f32>(1.0, 0.98, 0.95), lit)
-            * (0.30 + 0.70 * day_amt);
-        // แต้มสีดวงอาทิตย์ตอนเช้า/เย็นให้ขอบเมฆอมส้ม
-        cloud_col += sky.sun_color.rgb * (0.04 * lit * day_amt);
-        cloud_col = mix(cloud_col, vec3<f32>(0.30, 0.31, 0.36), sky.cloud_ctrl.z);
-        col = mix(col, cloud_col, a);
+    if (cloudiness > 0.001) {
+        let t_time = sky.cloud_ctrl.y;
+        
+        // World Space Volumetric Raymarching Settings
+        let cloud_min_y = 500.0; // World height where clouds start
+        let cloud_max_y = 540.0; // World height where clouds end
+        let cam_y = view.world_position.y;
+        
+        // Safe division for ray intersection
+        let dir_y = sign(dir.y) * max(abs(dir.y), 0.0001);
+        var t1 = (cloud_min_y - cam_y) / dir_y;
+        var t2 = (cloud_max_y - cam_y) / dir_y;
+        
+        var d_min = min(t1, t2);
+        var d_max = max(t1, t2);
+        
+        let max_render_dist = 1500.0;
+        
+        // If the ray hits the cloud layer in front of the camera
+        if (d_max > 0.0 && d_min < max_render_dist) {
+            d_min = max(d_min, 0.0);
+            d_max = min(d_max, max_render_dist);
+            
+            let steps = 24; // Good balance for volumetric quality
+            let step_size = (d_max - d_min) / f32(steps);
+            
+            var transmittance = 1.0;
+            var scattered_light = vec3<f32>(0.0);
+            
+            let day_amt = 1.0 - night;
+            let sun_cos = dot(dir, sun_dir);
+            let lit_factor = clamp(sun_cos * 0.5 + 0.5, 0.0, 1.0);
+            
+            // Base colors for lighting and shadows
+            let base_col = mix(vec3<f32>(0.55, 0.57, 0.63), vec3<f32>(1.0, 0.98, 0.95), lit_factor) * (0.30 + 0.70 * day_amt);
+            let sun_highlight = sky.sun_color.rgb * (0.12 * clamp(sun_cos, 0.0, 1.0) * day_amt);
+            let shadow_col = mix(vec3<f32>(0.30, 0.32, 0.38), vec3<f32>(0.20, 0.22, 0.25), sky.cloud_ctrl.z);
+            
+            var current_d = d_min;
+            for (var i = 0; i < steps; i = i + 1) {
+                let p = view.world_position + dir * current_d;
+                let p_scaled = p * 0.004; // Scale world units down to noise space
+                
+                // Coordinate with wind scroll
+                let p_scroll = p_scaled * 0.35 + vec3<f32>(t_time * 0.5, 0.0, t_time * 0.5);
+                
+                // Domain warp to make clouds organic and swirly
+                let warp = fbm(p_scroll * 0.5 + t_time * 0.2);
+                let p_warped = p_scroll + vec3<f32>(warp) * 0.15;
+                
+                // 3D noise sample
+                let noise_val = fbm(p_warped + vec3<f32>(0.0, 0.0, t_time * 0.5));
+                
+                // Cloud profile: round at bottom, wispy at top
+                let h_frac = (p.y - cloud_min_y) / (cloud_max_y - cloud_min_y);
+                let height_shape = smoothstep(0.0, 0.15, h_frac) * smoothstep(1.0, 0.6, h_frac);
+                
+                let threshold = 1.0 - cloudiness * 0.9;
+                let density = smoothstep(threshold - 0.1, threshold + 0.2, noise_val) * height_shape;
+                
+                if (density > 0.01) {
+                    // Cheap self-shadowing by sampling slightly offset towards sun
+                    let shadow_p = p_warped + sun_dir * 0.15;
+                    let shadow_noise = fbm(shadow_p);
+                    let shadow_density = smoothstep(threshold - 0.1, threshold + 0.2, shadow_noise) * height_shape;
+                    
+                    // High shadow density = less light transmission
+                    let light_trans = exp(-shadow_density * 4.0);
+                    
+                    // Color at this ray step
+                    let step_col = mix(shadow_col, base_col + sun_highlight, light_trans);
+                    
+                    // Absorption (Beer's Law) - tuned for world step size
+                    let dt = density * step_size * 0.06; 
+                    let step_transmittance = exp(-dt);
+                    
+                    // Accumulate scattered light and opacity
+                    scattered_light += step_col * (1.0 - step_transmittance) * transmittance;
+                    transmittance *= step_transmittance;
+                    
+                    if (transmittance < 0.01) {
+                        break; // Fully opaque, early exit
+                    }
+                }
+                current_d += step_size;
+            }
+            
+            // Smoothly fade out clouds at long distances to blend with the sky
+            let distance_fade = 1.0 - smoothstep(1000.0, max_render_dist, d_min);
+            let alpha = (1.0 - transmittance) * distance_fade;
+            
+            // Safe division to prevent NaNs when transmittance is near 1.0
+            let final_cloud_col = scattered_light / max(1.0 - transmittance, 0.0001);
+            col = mix(col, final_cloud_col, alpha);
+        }
     }
 
     return vec4<f32>(col, 1.0);

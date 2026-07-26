@@ -21,3 +21,11 @@ saves_dem/
 # ค่าตั้งค่ารวมต่อเครื่อง (สร้างตอนเล่น) — ไม่ commit
 /settings.json
 /crash_log.txt
+
+# Temp files
+/search_active.txt
+/temp_orig.rs
+/test_log.txt
+
+# Benchmark logs
+/benchmark_results_*.json

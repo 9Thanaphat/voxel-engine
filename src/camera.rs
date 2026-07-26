@@ -323,6 +323,8 @@ pub fn setup_camera(
         transform,
     )).id();
 
+    let default_fog = FogState::default();
+
     let camera = commands.spawn((
         MainCamera,
         Camera3d::default(),
@@ -335,10 +337,10 @@ pub fn setup_camera(
         }),
         // หมอกระยะไกล: เนียนรอยต่อ LOD + ให้ภูเขาไกลจางแบบ of จริง
         bevy::pbr::DistanceFog {
-            color: Color::srgba(0.72, 0.80, 0.90, 1.0),
+            color: Color::Srgba(default_fog.target_color),
             falloff: bevy::pbr::FogFalloff::Linear {
-                start: 4_000.0,
-                end: 35_000.0,
+                start: default_fog.target_start,
+                end: default_fog.target_end,
             },
             ..default()
         },
@@ -359,4 +361,58 @@ pub fn setup_camera(
     commands.entity(player).add_child(camera);
     // First person — ไม่ต้อง spawn model ให้ local player
     // (model จะใช้กับ remote player เท่านั้น ผ่าน network::spawn_remote_player)
+}
+
+#[derive(Resource)]
+pub struct FogState {
+    pub target_color: Srgba,
+    pub target_start: f32,
+    pub target_end: f32,
+    pub auto_distance: bool,
+}
+
+impl Default for FogState {
+    fn default() -> Self {
+        Self {
+            target_color: Srgba::new(0.72, 0.80, 0.90, 1.0),
+            target_start: 4_000.0,
+            target_end: 35_000.0,
+            auto_distance: true,
+        }
+    }
+}
+
+pub fn fog_transition_system(
+    mut fog_query: Query<&mut bevy::pbr::DistanceFog, With<MainCamera>>,
+    fog_state: Res<FogState>,
+    settings: Res<crate::GameSettings>,
+    time: Res<Time>,
+) {
+    let Ok(mut fog) = fog_query.single_mut() else { return; };
+    let dt = time.delta_secs() * 2.0; // Transition speed
+    
+    // Interpolate color manually since mixing variants directly is tedious
+    let target = LinearRgba::from(fog_state.target_color);
+    let mut current = LinearRgba::from(fog.color);
+    current.red += (target.red - current.red) * dt;
+    current.green += (target.green - current.green) * dt;
+    current.blue += (target.blue - current.blue) * dt;
+    fog.color = Color::from(current);
+    
+    let (mut t_start, mut t_end) = (fog_state.target_start, fog_state.target_end);
+    if fog_state.auto_distance {
+        t_end = settings.render_distance as f32 * crate::voxel::CHUNK_WIDTH as f32;
+        t_start = t_end * 0.75;
+    }
+    
+    // Interpolate falloff
+    if let bevy::pbr::FogFalloff::Linear { ref mut start, ref mut end } = fog.falloff {
+        *start += (t_start - *start) * dt;
+        *end += (t_end - *end) * dt;
+    } else {
+        fog.falloff = bevy::pbr::FogFalloff::Linear {
+            start: t_start,
+            end: t_end,
+        };
+    }
 }

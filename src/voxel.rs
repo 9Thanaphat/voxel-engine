@@ -65,6 +65,8 @@ pub enum BlockType {
     SpruceLog = 38,
     /// ใบสน — วาดเป็น sprite ดาว 3 แกนเหมือน Leaves
     SpruceLeaves = 39,
+    CopperOre = 40,
+    IronOre = 41,
 }
 
 impl BlockType {
@@ -109,6 +111,8 @@ impl BlockType {
             37 => BlockType::Snow,
             38 => BlockType::SpruceLog,
             39 => BlockType::SpruceLeaves,
+            40 => BlockType::CopperOre,
+            41 => BlockType::IronOre,
             _ => BlockType::Air,
         }
     }
@@ -160,7 +164,7 @@ pub struct BlockDef {
     pub overlay_side: &'static [&'static str],
 }
 
-pub const BLOCK_DEFS: [BlockDef; 40] = [
+pub const BLOCK_DEFS: [BlockDef; 42] = [
     BlockDef { name: "Air", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None, hardness: 0.0,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
     BlockDef { name: "Dirt", color: [0.4, 0.2, 0.0, 1.0], solid: true, transparent: false, emission: None, hardness: 1.0,
@@ -278,6 +282,12 @@ pub const BLOCK_DEFS: [BlockDef; 40] = [
     BlockDef { name: "Spruce Leaves", color: [0.1, 0.35, 0.2, 1.0], solid: true, transparent: true, emission: None, hardness: 0.3,
         tex_top: &["textures/spruce_leaves.png"], tex_side: &["textures/spruce_leaves.png"],
         tex_bottom: &["textures/spruce_leaves.png"], overlay_side: &[] },
+    BlockDef { name: "Copper Ore", color: [0.6, 0.4, 0.3, 1.0], solid: true, transparent: false, emission: None, hardness: 6.0,
+        tex_top: &["textures/copper_ore.png"], tex_side: &["textures/copper_ore.png"], tex_bottom: &["textures/copper_ore.png"],
+        overlay_side: &[] },
+    BlockDef { name: "Iron Ore", color: [0.7, 0.6, 0.5, 1.0], solid: true, transparent: false, emission: None, hardness: 6.0,
+        tex_top: &["textures/iron_ore.png"], tex_side: &["textures/iron_ore.png"], tex_bottom: &["textures/iron_ore.png"],
+        overlay_side: &[] },
 ];
 
 pub fn block_def(block: BlockType) -> &'static BlockDef {
@@ -385,7 +395,8 @@ pub fn block_dig_class(block: BlockType) -> crate::item::DigClass {
         BlockType::Stone | BlockType::IronBlock | BlockType::Furnace
         | BlockType::Glowstone | BlockType::LampRed | BlockType::LampGreen | BlockType::LampBlue
         | BlockType::SmartLamp | BlockType::SmartLampOn
-        | BlockType::SwitchOff | BlockType::SwitchOn => DigClass::Pick,
+        | BlockType::SwitchOff | BlockType::SwitchOn 
+        | BlockType::CopperOre | BlockType::IronOre => DigClass::Pick,
         BlockType::Wood | BlockType::Chest | BlockType::Tnt | BlockType::Nuke
         | BlockType::Campfire | BlockType::Branch | BlockType::SpruceLog => DigClass::Axe,
         BlockType::Dirt | BlockType::Grass | BlockType::Sand
@@ -409,7 +420,7 @@ pub fn block_dig_time(block: BlockType) -> f32 {
         | BlockType::SwitchOff | BlockType::SwitchOn => 1.5,
         BlockType::Wood | BlockType::Chest | BlockType::Branch | BlockType::SpruceLog => 3.0,
         BlockType::Furnace => 3.5,
-        BlockType::Stone => 5.0,
+        BlockType::Stone | BlockType::CopperOre | BlockType::IronOre => 5.0,
         BlockType::IronBlock => 7.5,
         _ => 1.0,
     }
@@ -1237,56 +1248,69 @@ const WATER_DEPTH_RANGE: i32 = 8;
 /// - กดผิว: เฉลี่ยระดับน้ำจาก column 2x2 รอบมุม; column ที่เป็น "อากาศ" ร่วม
 ///   เฉลี่ยด้วยค่าจมสุด → ผิวลาดลงจูบพื้นตรงตลิ่ง/ขอบผา; solid ไม่ร่วมเฉลี่ย
 ///   → น้ำชนกำแพง/เขื่อนคงระดับ ไม่บุ๋ม
-/// - ความลึก: เฉลี่ยจำนวนชั้นน้ำต่อเนื่องใต้มุม (ไว้ไล่สีน้ำลึกให้เข้ม)
+fn get_water_surface(
+    sample: &impl Fn(i32, i32, i32) -> BlockType,
+    cx: i32,
+    cz: i32,
+    base_y: i32,
+) -> Option<f32> {
+    for y in (base_y - 2..=base_y + 2).rev() {
+        let b = sample(cx, y, cz);
+        if b.is_water() {
+            let drop = match b {
+                BlockType::Water7 => 0.125,
+                BlockType::Water6 => 0.25,
+                BlockType::Water5 => 0.375,
+                BlockType::Water4 => 0.50,
+                BlockType::Water3 => 0.625,
+                BlockType::Water2 => 0.75,
+                BlockType::Water1 => 0.875,
+                _ => WATER_SURFACE_DROP,
+            };
+            let drop = if sample(cx, y + 1, cz).is_water() { 0.0 } else { drop };
+            return Some(y as f32 + 1.0 - drop);
+        }
+    }
+    None
+}
+
 fn water_corner_info(
     sample: &impl Fn(i32, i32, i32) -> BlockType,
     cx: i32,
     vy: i32,
     cz: i32,
 ) -> (f32, f32) {
-    // มีน้ำชั้นบนติดมุม = จมใต้ผิว: เต็มความสูง + มืดสุด
-    for dx in -1..=0 {
-        for dz in -1..=0 {
-            if sample(cx + dx, vy + 1, cz + dz).is_water() {
-                return (0.0, 1.0);
-            }
-        }
-    }
-    let mut drop_sum = 0.0;
-    let mut depth_sum = 0.0;
+    let mut sum_y = 0.0;
     let mut cnt = 0;
+    let mut depth_sum = 0.0;
+    let mut depth_cnt = 0;
+
     for dx in -1..=0 {
         for dz in -1..=0 {
+            if let Some(sy) = get_water_surface(sample, cx + dx, cz + dz, vy) {
+                sum_y += sy;
+                cnt += 1;
+            }
+            
+            // Depth calculation
             let b = sample(cx + dx, vy, cz + dz);
             if b.is_water() {
-                drop_sum += match b {
-                    BlockType::Water7 => 0.125,
-                    BlockType::Water6 => 0.25,
-                    BlockType::Water5 => 0.375,
-                    BlockType::Water4 => 0.50,
-                    BlockType::Water3 => 0.625,
-                    BlockType::Water2 => 0.75,
-                    BlockType::Water1 => 0.875,
-                    // น้ำเต็ม (source) — ผิวต่ำกว่าขอบบล็อกนิดเดียวแบบ Minecraft
-                    _ => WATER_SURFACE_DROP,
-                };
                 let mut d = 0i32;
                 while d < WATER_DEPTH_RANGE && sample(cx + dx, vy - d, cz + dz).is_water() {
                     d += 1;
                 }
                 depth_sum += d as f32;
-                cnt += 1;
-            } else if b == BlockType::Air {
-                drop_sum += 1.0;
-                cnt += 1;
+                depth_cnt += 1;
             }
         }
     }
+
     if cnt > 0 {
-        (
-            drop_sum / cnt as f32,
-            (depth_sum / cnt as f32 / WATER_DEPTH_RANGE as f32).min(1.0),
-        )
+        let avg_y = sum_y / cnt as f32;
+        let corner_y = avg_y.max(vy as f32);
+        let drop = (vy as f32 + 1.0) - corner_y;
+        let depth = if depth_cnt > 0 { (depth_sum / depth_cnt as f32 / WATER_DEPTH_RANGE as f32).min(1.0) } else { 0.0 };
+        (drop, depth)
     } else {
         (0.0, 0.0)
     }
@@ -1521,6 +1545,14 @@ pub fn create_mesh_from_blocks(
                     if block.is_water() && n.is_water() {
                         continue;
                     }
+                    if block.is_water() {
+                        // Cull internal side faces when adjacent to a downward ramp
+                        if a != 1 && n == BlockType::Air {
+                            if sample(c[0] + norm[0], c[1] - 1, c[2] + norm[2]).is_water() {
+                                continue;
+                            }
+                        }
+                    }
 
                     // พู่ห้อยเอียง: ขอบบนแนบสันบล็อก ชายล่างยื่นออกตาม normal
                     // (เฉพาะหน้าด้านข้างของบล็อกที่มี overlay เช่นหญ้า)
@@ -1621,6 +1653,21 @@ pub fn create_mesh_from_blocks(
                                 corner_depth[i] = dep;
                             }
                         }
+                        let (flow_vec, speed) = if is_w {
+                            crate::hydro::river_at((world_base_x + vx) as f64 + 0.5, (world_base_z + vz) as f64 + 0.5)
+                                .map(|r| (r.flow, r.speed))
+                                .unwrap_or((Vec2::ZERO, 0.0))
+                        } else {
+                            (Vec2::ZERO, 0.0)
+                        };
+                        let mut water_flow_uv = [flow_vec.x * speed, flow_vec.y * speed];
+                        if is_w && face_id == 0 {
+                            let slope_x = (corner_drop[1] + corner_drop[2] - corner_drop[0] - corner_drop[3]) * 0.5;
+                            let slope_z = (corner_drop[0] + corner_drop[1] - corner_drop[2] - corner_drop[3]) * 0.5;
+                            water_flow_uv[0] += slope_x * 2.0;
+                            water_flow_uv[1] += slope_z * 2.0;
+                        }
+
                         for i in 0..4 {
                             let p = CUBE_POSITIONS[face_id][i];
                             verts[i] = [p[0] + vx as f32, p[1] + vy as f32, p[2] + vz as f32];
@@ -1630,7 +1677,7 @@ pub fn create_mesh_from_blocks(
                             let tint = 1.0 - WATER_DEPTH_DARKEN * corner_depth[i];
                             let a = if is_w { WATER_ALPHA } else { base[3] };
                             cols[i] = [base[0] * br * tint * fol[0], base[1] * br * tint * fol[1], base[2] * br * tint * fol[2], a];
-                            uvs[i] = face_uv(verts[i]);
+                            uvs[i] = if is_w { water_flow_uv } else { face_uv(verts[i]) };
                         }
                         let flip = (ao[0] as u32 + ao[2] as u32) < (ao[1] as u32 + ao[3] as u32);
                         let buf = if is_w {
@@ -2091,6 +2138,8 @@ pub struct TerrainSampler {
     pub fbm: Fbm<Perlin>,
     temperature: Perlin,
     cave: Perlin,
+    copper_ore: Perlin,
+    iron_ore: Perlin,
     humidity: Perlin,
     pub region: Perlin,
     /// domain warp (บิดพิกัดก่อน sample) → ชายฝั่ง/รอยต่อเป็นธรรมชาติ ไม่เป็นก้อนกลม
@@ -2151,6 +2200,8 @@ impl TerrainSampler {
             fbm: Fbm::<Perlin>::new(params.seed).set_octaves(params.octaves as usize),
             temperature: Perlin::new(params.seed.wrapping_add(1)),
             cave: Perlin::new(params.seed.wrapping_add(2)),
+            copper_ore: Perlin::new(params.seed.wrapping_add(20)),
+            iron_ore: Perlin::new(params.seed.wrapping_add(21)),
             humidity: Perlin::new(params.seed.wrapping_add(3)),
             region: Perlin::new(params.seed.wrapping_add(4)),
             warp_x: Perlin::new(params.seed.wrapping_add(5)),
@@ -2284,13 +2335,41 @@ impl TerrainSampler {
         let mount_f = self.mount_field(px, pz);
         let mut h = base + detail + mount_f * land * self.ridged(px, pz) * MOUNT_AMP;
 
-        // แม่น้ำ: โครงข่ายจริงจาก hydro (flow accumulation) — carve **ลงเท่านั้น** (แอ่ง=ทะเลสาบลึก)
+        // แม่น้ำ: โครงข่ายจริงจาก hydro (flow accumulation) — carve หุบเขาก่อน แล้วค่อย carve แม่น้ำ
         let mut water = SEA_LEVEL as i32;
         if let Some(r) = crate::hydro::river_at(wx, wz) {
-            let bed = (r.surface - r.depth) as f64;
-            let target = lerp(h, bed, r.mask as f64); // ตลิ่งลาดตาม mask
-            h = h.min(target); // ยกพื้นไม่ได้ (กันถมทะเลสาบ)
-            water = water.max(r.surface.floor() as i32);
+            let local_surface = r.surface as f64;
+            let bed = local_surface - r.depth as f64;
+            
+            // 1. สร้างหุบเขา (Valley) เพื่อปรับระดับดินเดิม (h) ให้เข้าหาระดับผิวน้ำ (local_surface) อย่างนุ่มนวล
+            // ป้องกันปัญหาน้ำลอยอยู่กลางอากาศ (Aqueduct) ถ้าระดับดินเดิมต่ำกว่าน้ำ (ยกเว้นอยู่ในทะเลอยู่แล้ว)
+            let v = r.valley_mask as f64;
+            // Map v from [0, 0.55] to [0, 1] to ensure banks are raised *before* the river edge
+            let v_raise = (v / 0.55).clamp(0.0, 1.0);
+            let v_smooth_raise = v_raise * v_raise * (3.0 - 2.0 * v_raise);
+            let v_smooth_dig = v * v * (3.0 - 2.0 * v); // Smoothstep curve
+            
+            let valley_h = if h < local_surface {
+                // Raise terrain to prevent flying rivers, BUT only if it's not already in the sea basin
+                if h < SEA_LEVEL as f64 && local_surface <= SEA_LEVEL as f64 + 1.0 {
+                    // Do not raise sea floor, just let it be
+                    h
+                } else {
+                    lerp(h, local_surface, v_smooth_raise)
+                }
+            } else {
+                lerp(h, local_surface, v_smooth_dig)
+            };
+            
+            // 2. ขุดร่องแม่น้ำ (Channel) ลงไปหาระดับก้นแม่น้ำ (bed)
+            let channel_h = lerp(valley_h, bed, r.mask as f64);
+            
+            h = channel_h; // ใช้ค่าที่ปรับแล้ว (อาจจะสูงขึ้นหรือต่ำลงจาก h เดิม)
+            
+            // เติมน้ำเฉพาะจุดที่เป็นแม่น้ำจริงๆ (mask > 0)
+            if r.mask > 0.0 {
+                water = water.max(r.surface.floor() as i32);
+            }
         }
         (h, water)
     }
@@ -2307,6 +2386,14 @@ impl TerrainSampler {
 
     pub fn is_cave(&self, wx: f64, y: i32, wz: f64) -> bool {
         self.cave.get([wx * 0.06, y as f64 * 0.06, wz * 0.06]) > 0.45
+    }
+    
+    pub fn is_copper_ore(&self, wx: f64, y: i32, wz: f64) -> bool {
+        y > -20 && y < 80 && self.copper_ore.get([wx * 0.2, y as f64 * 0.2, wz * 0.2]) > 0.5
+    }
+
+    pub fn is_iron_ore(&self, wx: f64, y: i32, wz: f64) -> bool {
+        y < 40 && self.iron_ore.get([wx * 0.2, y as f64 * 0.2, wz * 0.2]) > 0.5
     }
 }
 
@@ -2369,6 +2456,7 @@ fn generate_chunk_blocks(
             let h = heights[z][x];
             let col = biomes[z][x];
             let water = water_levels[z][x];
+            
             // ก้นน้ำ (ทะเล/แม่น้ำ) = ทราย ไม่ใช่หญ้าใต้น้ำ; นอกนั้นตาม biome (ชายหาด/หิมะยอดเขา)
             let surface = if h < water {
                 BlockType::Sand
@@ -2380,7 +2468,13 @@ fn generate_chunk_blocks(
             for y in 0..CHUNK_HEIGHT {
                 let yi = y as i32;
                 let block = if yi < h - 3 {
-                    BlockType::Stone
+                    if sampler.is_iron_ore(wx, yi, wz) {
+                        BlockType::IronOre
+                    } else if sampler.is_copper_ore(wx, yi, wz) {
+                        BlockType::CopperOre
+                    } else {
+                        BlockType::Stone
+                    }
                 } else if yi < h {
                     subsurface
                 } else if yi == h {
@@ -2622,6 +2716,7 @@ fn pick_range(range: (i32, i32), next: &mut impl FnMut() -> u64) -> i32 {
     }
     lo + (next() % (hi - lo + 1) as u64) as i32
 }
+
 
 /// เดินกิ่งหนึ่งเส้นจาก `from` ไปทาง `dir` ยาว `len` ก้าว แล้วแตกกิ่งลูกต่อ
 /// (`from` ต้องมี record อยู่แล้ว — ผู้เรียกเป็นคนวางบล็อกแรก)
@@ -2866,7 +2961,7 @@ pub fn create_water_mesh(
         };
         let (la, lu, lv) = (axis_len[a], axis_len[ua], axis_len[va]);
 
-        let face_uv = move |p: [f32; 3]| -> [f32; 2] {
+        let _face_uv = move |p: [f32; 3]| -> [f32; 2] {
             match a {
                 1 => [p[0], p[2]],
                 0 => [p[2], -p[1]],
@@ -2909,6 +3004,13 @@ pub fn create_water_mesh(
                     if n.is_water() {
                         continue;
                     }
+                    
+                    // Cull internal side faces when adjacent to a downward ramp
+                    if a != 1 && n == BlockType::Air {
+                        if sample(c[0] + norm[0], c[1] - 1, c[2] + norm[2]).is_water() {
+                            continue;
+                        }
+                    }
 
                     // ตรงกับ branch วาดเดี่ยวของ mesher เต็ม (น้ำ: ao คงที่ [3;4])
                     let variant = texture_variant(
@@ -2940,6 +3042,16 @@ pub fn create_water_mesh(
                     let mut verts = [[0f32; 3]; 4];
                     let mut cols = [[0f32; 4]; 4];
                     let mut uvs = [[0f32; 2]; 4];
+                    let (flow_vec, speed) = crate::hydro::river_at((world_base_x + vx) as f64 + 0.5, (world_base_z + vz) as f64 + 0.5)
+                        .map(|r| (r.flow, r.speed))
+                        .unwrap_or((Vec2::ZERO, 0.0));
+                    let mut water_flow_uv = [flow_vec.x * speed, flow_vec.y * speed];
+                    if face_id == 0 {
+                        let slope_x = (corner_drop[1] + corner_drop[2] - corner_drop[0] - corner_drop[3]) * 0.5;
+                        let slope_z = (corner_drop[0] + corner_drop[1] - corner_drop[2] - corner_drop[3]) * 0.5;
+                        water_flow_uv[0] += slope_x * 2.0;
+                        water_flow_uv[1] += slope_z * 2.0;
+                    }
                     for i in 0..4 {
                         let p = CUBE_POSITIONS[face_id][i];
                         verts[i] = [p[0] + vx as f32, p[1] + vy as f32, p[2] + vz as f32];
@@ -2948,7 +3060,7 @@ pub fn create_water_mesh(
                         let tint = 1.0 - WATER_DEPTH_DARKEN * corner_depth[i];
                         // create_water_mesh วาดเฉพาะน้ำ → alpha ที่ vertex เสมอ (ดู WATER_ALPHA)
                         cols[i] = [base[0] * br * tint, base[1] * br * tint, base[2] * br * tint, WATER_ALPHA];
-                        uvs[i] = face_uv(verts[i]);
+                        uvs[i] = water_flow_uv;
                     }
                     let flip = (ao[0] as u32 + ao[2] as u32) < (ao[1] as u32 + ao[3] as u32);
                     buf.push_quad(verts, CUBE_NORMALS[face_id], cols, uvs, flip);
@@ -3423,8 +3535,30 @@ pub struct ChunkMaterial(pub Handle<StandardMaterial>);
 #[derive(Resource)]
 pub struct BlockLightMaterial(pub Handle<StandardMaterial>);
 
+#[derive(Asset, TypePath, bevy::render::render_resource::AsBindGroup, Debug, Clone, Default)]
+pub struct CustomWaterMaterial {
+    #[uniform(0)]
+    pub uniforms: WaterUniforms,
+}
+
+#[derive(bevy::render::render_resource::ShaderType, Debug, Clone, Default)]
+pub struct WaterUniforms {
+    pub color: LinearRgba,
+    pub sun_dir: Vec3,
+    pub _padding: f32, // Padding required by WGSL for 16-byte alignment
+}
+
+impl bevy::pbr::Material for CustomWaterMaterial {
+    fn fragment_shader() -> bevy::shader::ShaderRef {
+        "shaders/water.wgsl".into()
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+}
+
 #[derive(Resource)]
-pub struct WaterMaterial(pub Handle<StandardMaterial>);
+pub struct WaterMaterial(pub Handle<CustomWaterMaterial>);
 
 /// material แบบ emissive ของบล็อกเรืองแสงแต่ละสี
 #[derive(Resource)]
@@ -3444,6 +3578,7 @@ pub struct DecoMaterials(pub HashMap<&'static str, Handle<StandardMaterial>>);
 pub fn setup_voxel(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut custom_water_materials: ResMut<Assets<CustomWaterMaterial>>,
     asset_server: Res<AssetServer>,
 ) {
     // สร้างตาราง texture ต่อ (บล็อก, หน้า) — เอาเฉพาะไฟล์ที่มีจริงบน disk
@@ -3507,15 +3642,13 @@ pub fn setup_voxel(
     });
     commands.insert_resource(BlockLightMaterial(block_light_material));
 
-    // สีน้ำมาจาก vertex color — material เป็นสีขาวโปร่งใสคูณทับ
-    let water_material = materials.add(StandardMaterial {
-        // alpha จริงมาจาก vertex color (WATER_ALPHA) เพราะ unlit+vertex-colored ใช้ alpha
-        // ของ vertex — ตั้ง base_color alpha 1.0 ไว้ ไม่งั้นเข้าใจผิดว่าคุมความโปร่งที่นี่
-        base_color: Color::WHITE,
-        alpha_mode: AlphaMode::Blend,
-        unlit: true,
-        perceptual_roughness: 0.15,
-        ..default()
+    // สีน้ำมาจาก vertex color — material เป็น custom material ที่เลื่อนคลื่น
+    let water_material = custom_water_materials.add(CustomWaterMaterial {
+        uniforms: WaterUniforms {
+            color: LinearRgba::WHITE,
+            sun_dir: Vec3::Y,
+            _padding: 0.0,
+        }
     });
     commands.insert_resource(WaterMaterial(water_material));
 
@@ -3679,6 +3812,7 @@ pub fn update_sun_system(
     mut fog_query: Query<&mut bevy::pbr::DistanceFog>,
     mut clear_color: ResMut<ClearColor>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut custom_water_materials: ResMut<Assets<CustomWaterMaterial>>,
     chunk_mat: Option<Res<ChunkMaterial>>,
     block_mats: Option<Res<BlockMaterials>>,
     deco_mats: Option<Res<DecoMaterials>>,
@@ -3711,7 +3845,6 @@ pub fn update_sun_system(
     let mut handles: Vec<&Handle<StandardMaterial>> = Vec::new();
     if let Some(m) = chunk_mat.as_ref() { handles.push(&m.0); }
     if let Some(m) = glass_mat.as_ref() { handles.push(&m.0); }
-    if let Some(m) = water_mat.as_ref() { handles.push(&m.0); }
     if let Some(m) = block_mats.as_ref() { handles.extend(m.0.values()); }
     if let Some(m) = deco_mats.as_ref() { handles.extend(m.0.values()); }
     // ภูเขาระยะไกล (LOD) ต้องมืดตามด้วย ไม่งั้นกลางคืนขอบฟ้าสว่างค้างเป็นแถบ
@@ -3719,6 +3852,19 @@ pub fn update_sun_system(
     for handle in handles {
         if let Some(mut mat) = materials.get_mut(handle) {
             mat.base_color = tint;
+        }
+    }
+
+    let sun_dir = crate::astro::sun_direction(
+        settings.time_of_day,
+        settings.day_of_year as f32,
+        settings.latitude_deg.to_radians(),
+    );
+
+    if let Some(m) = water_mat.as_ref() {
+        if let Some(mut mat) = custom_water_materials.get_mut(&m.0) {
+            mat.uniforms.color = tint.into();
+            mat.uniforms.sun_dir = sun_dir;
         }
     }
 
@@ -4082,7 +4228,7 @@ pub fn light_neighborhood(world: &VoxelWorld, chunk_pos: IVec2) -> Option<LightN
 /// จำนวน chunk ที่ยอมคำนวณแสงใหม่ต่อเฟรม — ต้องสูงพอจะไล่ทันตอนโหลดโลกครั้งแรก
 /// (chunk ใหม่แต่ละก้อนตีธง dirty ใส่เพื่อนบ้านอีก 8 ตัว ถ้าไล่ไม่ทันจะไม่มี chunk ไหน
 /// ผ่านเงื่อนไข mesh ได้เลย — เคยตั้งไว้ 2 แล้วเจอจอฟ้าเห็น mesh แค่ chunk เดียว)
-const RELIGHT_BUDGET: usize = 32;
+const RELIGHT_BUDGET: usize = 12;
 
 /// คำนวณ sky light ใหม่ให้ chunk ที่ dirty แล้วสั่ง remesh ตัวที่มี mesh อยู่แล้ว
 /// (chunk ที่ยังไม่เคยมี mesh ไม่ต้องสั่ง — ระบบ generate จะ mesh ให้เองเมื่อแสงพร้อม)
@@ -4384,12 +4530,12 @@ fn update_textured_entities(
 
 /// อัปเดต mesh entity เดี่ยวของ chunk (น้ำ/กระจก/ของประดับ):
 /// buffer ว่าง = ลบ entity, มีอยู่แล้ว = เขียนทับ asset เดิม, ยังไม่มี = สร้างใหม่
-fn update_single_mesh_entity(
+fn update_single_mesh_entity<M: bevy::pbr::Material>(
     commands: &mut Commands,
     map: &mut HashMap<IVec2, Entity>,
     meshes: &mut Assets<Mesh>,
     mesh_query: &Query<&Mesh3d>,
-    material: &Handle<StandardMaterial>,
+    material: &Handle<M>,
     chunk_pos: IVec2,
     buf: MeshBuf,
     transform: Transform,
@@ -4568,7 +4714,7 @@ pub fn process_generated_chunks_system(
         let receiver = generator.receiver_blocks.lock().unwrap();
         while let Ok(block_data) = receiver.try_recv() {
             received_blocks.push(block_data);
-            if received_blocks.len() >= 4 { break; }
+            if received_blocks.len() >= 2 { break; }
         }
     }
 
@@ -4664,7 +4810,7 @@ pub fn process_generated_chunks_system(
         let receiver = generator.receiver_meshes.lock().unwrap();
         while let Ok(mesh_data) = receiver.try_recv() {
             received_meshes.push(mesh_data);
-            if received_meshes.len() >= 4 { break; }
+            if received_meshes.len() >= 1 { break; }
         }
     }
 
@@ -4778,6 +4924,9 @@ pub fn chunk_unloading_system(
             .copied()
             .filter(|&pos| is_out_of_range(pos) && !world.chunks.contains_key(&pos))
     );
+    
+    // Throttle unloading to 2 chunks per frame to prevent massive frame time spikes
+    to_unload.truncate(2);
 
     for pos in to_unload {
         // chunk มีสระทับอยู่ — เลื่อน unload ออกไปก่อน ให้สระ flush สถานะ
@@ -5012,24 +5161,7 @@ impl Hotbar {
     /// เริ่มด้วย palette เต็ม hotbar (จำนวนจริง = 1 stack) — โหมด Creative
     /// วางบล็อกไม่ลด count (build อิสระ) แต่ทิ้ง Q / เก็บ ปรับจำนวนได้จนหมด/เต็ม
     pub fn creative() -> Self {
-        use crate::item::{Item, ToolType};
-        const DEFAULTS: [Item; HOTBAR_SLOTS] = [
-            Item::Tool(ToolType::Chisel),
-            Item::Tool(ToolType::CopperWire),
-            Item::Block(BlockType::Dirt),
-            Item::Block(BlockType::Stone),
-            Item::Block(BlockType::Wood),
-            Item::Block(BlockType::Leaves),
-            Item::Block(BlockType::Glass),
-            Item::Block(BlockType::SmartLamp),
-            Item::Block(BlockType::SwitchOff),
-        ];
-        // ช่องเก็บของเริ่มว่าง — Creative หยิบเพิ่มจาก palette ในหน้าต่าง E ได้ตลอด
-        let mut slots = [None; TOTAL_SLOTS];
-        for (slot, item) in slots.iter_mut().zip(DEFAULTS) {
-            *slot = Some(ItemStack { item, count: Some(max_stack(item)) });
-        }
-        Self { slots, selected: 0 }
+        Self::survival_empty()
     }
 
     /// ช่องว่างทั้งหมด — โหมด Survival (เก็บของเอง)
@@ -5063,12 +5195,14 @@ pub struct OpenContainerState {
 pub struct OpenContainer(pub Option<OpenContainerState>);
 
 /// ไอเทมทั้งหมดที่เลือกวางได้ (รายการในหน้าต่างกด E)
-pub const PLACEABLE_ITEMS: [crate::item::Item; 31] = [
+pub const PLACEABLE_ITEMS: [crate::item::Item; 35] = [
     crate::item::Item::Tool(crate::item::ToolType::Chisel),
     crate::item::Item::Tool(crate::item::ToolType::CopperWire),
     crate::item::Item::Tool(crate::item::ToolType::Pickaxe),
     crate::item::Item::Tool(crate::item::ToolType::Axe),
     crate::item::Item::Tool(crate::item::ToolType::Shovel),
+    crate::item::Item::Material(crate::item::MaterialType::Copper),
+    crate::item::Item::Material(crate::item::MaterialType::Iron),
     crate::item::Item::Block(BlockType::Dirt), crate::item::Item::Block(BlockType::Grass),
     crate::item::Item::Block(BlockType::Stone), crate::item::Item::Block(BlockType::Wood),
     crate::item::Item::Block(BlockType::Leaves), crate::item::Item::Block(BlockType::Sand),
@@ -5082,6 +5216,7 @@ pub const PLACEABLE_ITEMS: [crate::item::Item; 31] = [
     crate::item::Item::Block(BlockType::Campfire), crate::item::Item::Block(BlockType::Branch),
     crate::item::Item::Block(BlockType::SnowyGrass), crate::item::Item::Block(BlockType::Snow),
     crate::item::Item::Block(BlockType::SpruceLog), crate::item::Item::Block(BlockType::SpruceLeaves),
+    crate::item::Item::Block(BlockType::CopperOre), crate::item::Item::Block(BlockType::IronOre),
 ];
 
 /// texture ที่ใช้เป็น icon บนช่อง hotbar — เอาหน้าข้างก่อน (grass เห็นเป็น
@@ -6220,8 +6355,13 @@ pub fn block_interaction_system(
             let drops_item = !block_requires_tool(hit.block)
                 || held_tool.is_some_and(|t| t.dig_class() == block_dig_class(hit.block));
             if survival && drops_item {
+                let dropped_item = match hit.block {
+                    BlockType::CopperOre => crate::item::Item::Material(crate::item::MaterialType::Copper),
+                    BlockType::IronOre => crate::item::Item::Material(crate::item::MaterialType::Iron),
+                    _ => crate::item::Item::Block(hit.block),
+                };
                 spawn_events.write(crate::item::SpawnDroppedItemEvent {
-                    item: crate::item::Item::Block(hit.block),
+                    item: dropped_item,
                     pos: hit.pos.as_vec3() + Vec3::new(0.5, 0.5, 0.5),
                     velocity: Vec3::new(
                         (fastrand::f32() - 0.5) * 4.0,
@@ -7129,6 +7269,88 @@ pub fn chunk_border_gizmo_system(
         for gz in (cz - r)..=(cz + r + 1) {
             let z = gz as f32 * w;
             gizmos.line(Vec3::new(x_min, y, z), Vec3::new(x_max, y, z), grid);
+        }
+    }
+}
+
+/// debug: วาดลูกศร 3D แสดงทิศทางและความเร็วการไหลของน้ำรอบตัวผู้เล่น (สลับด้วย /waterflow)
+pub fn water_flow_gizmo_system(
+    settings: Res<crate::GameSettings>,
+    camera_query: Query<&Transform, With<crate::camera::FreeCamera>>,
+    world: Res<VoxelWorld>,
+    mut gizmos: Gizmos,
+) {
+    if !settings.show_water_flow {
+        return;
+    }
+    let Some(t) = camera_query.iter().next() else { return };
+    let p = t.translation;
+    let px = p.x.floor() as i32;
+    let py = p.y.floor() as i32;
+    let pz = p.z.floor() as i32;
+    let radius = 24;
+    let debug_color = Color::srgb(1.0, 0.15, 0.15); // Red
+
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            let wx = px + dx;
+            let wz = pz + dz;
+            let (flow, speed) = crate::hydro::river_at(wx as f64 + 0.5, wz as f64 + 0.5)
+                .map(|r| (r.flow, r.speed))
+                .unwrap_or((Vec2::ZERO, 0.0));
+
+            let mut water_y = None;
+            for y in (py - 20).max(1)..(py + 20).min(CHUNK_HEIGHT as i32 - 1) {
+                let b = world.get_block(wx, y, wz);
+                let above = world.get_block(wx, y + 1, wz);
+                if b.is_water() && !above.is_water() {
+                    water_y = Some(y);
+                    break;
+                }
+            }
+
+            let wy_i = match water_y {
+                Some(y) => y,
+                None => continue,
+            };
+
+            let sample = |x, y, z| world.get_block(x, y, z);
+            let d0 = water_corner_info(&sample, wx, wy_i, wz + 1).0;
+            let d1 = water_corner_info(&sample, wx + 1, wy_i, wz + 1).0;
+            let d2 = water_corner_info(&sample, wx + 1, wy_i, wz).0;
+            let d3 = water_corner_info(&sample, wx, wy_i, wz).0;
+
+            let slope_x = (d1 + d2 - d0 - d3) * 0.5;
+            let slope_z = (d0 + d1 - d2 - d3) * 0.5;
+
+            let final_flow_x = flow.x * speed + slope_x * 2.0;
+            let final_flow_z = flow.y * speed + slope_z * 2.0;
+            let final_speed = (final_flow_x * final_flow_x + final_flow_z * final_flow_z).sqrt();
+
+            if final_speed <= 0.001 {
+                continue;
+            }
+
+            let slope_mag = (slope_x * slope_x + slope_z * slope_z).sqrt();
+            let tilt_y = -slope_mag * 1.2; // Point downwards on slopes
+            
+            let dir = Vec3::new(final_flow_x / final_speed, tilt_y, final_flow_z / final_speed).normalize();
+
+            // Calculate exact visual center height for the arrow origin
+            let avg_drop = (d0 + d1 + d2 + d3) * 0.25;
+            let surface_y = wy_i as f32 + 1.0 - avg_drop + 0.05;
+
+            let start = Vec3::new(wx as f32 + 0.5, surface_y, wz as f32 + 0.5);
+            let arrow_len = (0.4 + final_speed * 0.2).min(1.2);
+            let end = start + dir * arrow_len;
+
+            gizmos.line(start, end, debug_color);
+            // Construct arrow head
+            let right = dir.cross(Vec3::Y).normalize_or_zero();
+            let up_local = right.cross(dir).normalize_or_zero();
+            let head_back = end - dir * 0.25;
+            gizmos.line(end, head_back + right * 0.15 + up_local * 0.1, debug_color);
+            gizmos.line(end, head_back - right * 0.15 + up_local * 0.1, debug_color);
         }
     }
 }

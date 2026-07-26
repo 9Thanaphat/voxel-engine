@@ -579,64 +579,6 @@ pub fn setup_ui(mut commands: Commands) {
                         });
                     });
 
-                // 1. palette ของ Creative — 10 คอลัมน์ x เท่าที่ PLACEABLE_ITEMS ต้องใช้ (ซ่อนใน Survival)
-                // คำนวณจำนวนแถวจากความยาวจริงแทนที่จะ hardcode 2 แถว — ก่อนหน้านี้ hardcode ไว้ที่
-                // 2x10=20 ช่อง ตอนเพิ่ม Furnace/Chest (ดัน PLACEABLE_ITEMS เป็น 22 ตัว) เลยตกกริดไปเงียบๆ
-                panel
-                    .spawn((
-                        Node {
-                            flex_direction: FlexDirection::Column,
-                            align_items: AlignItems::Center,
-                            row_gap: Val::Px(4.0),
-                            margin: UiRect::bottom(Val::Px(10.0)),
-                            ..default()
-                        },
-                        InventoryPalette,
-                    ))
-                    .with_children(|pal| {
-                        let items = crate::voxel::PLACEABLE_ITEMS;
-                        const PALETTE_COLS: usize = 10;
-                        let palette_rows = items.len().div_ceil(PALETTE_COLS);
-                        for row in 0..palette_rows {
-                            pal.spawn(Node { column_gap: Val::Px(4.0), ..default() })
-                                .with_children(|r| {
-                                    for col in 0..PALETTE_COLS {
-                                        let i = row * PALETTE_COLS + col;
-                                        if items.get(i).is_none() { continue; }
-                                        r.spawn((
-                                            Node {
-                                                width: Val::Px(52.0),
-                                                height: Val::Px(52.0),
-                                                border: UiRect::all(Val::Px(3.0)),
-                                                padding: UiRect::all(Val::Px(4.0)),
-                                                ..default()
-                                            },
-                                            BackgroundColor(Color::srgba(0.1, 0.1, 0.15, 0.7)),
-                                            BorderColor::all(Color::srgba(0.2, 0.2, 0.2, 0.6)),
-                                            Interaction::default(),
-                                            PaletteSlotUi(i),
-                                        ))
-                                        .with_children(|slot| {
-                                            // palette ไม่เปลี่ยนตลอดเกม แต่ห้ามใส่ icon ตอน spawn ตรงนี้:
-                                            // setup_ui เป็น Startup system ลำดับไม่การันตีว่าจะรันหลัง
-                                            // setup_voxel (ซึ่งเป็นคน init FACE_TEXTURES) — ใส่ตอนนี้
-                                            // มีโอกาสได้ FACE_TEXTURES ว่างแล้วเห็นเป็นสีพื้นทั้งอัน
-                                            // ให้ bake_palette_icons (Update, รันหลัง Startup เสร็จ
-                                            // แน่นอน) มาใส่แทนทีหลัง — ดูคอมเมนต์เดียวกันใน update_hotbar_ui
-                                            slot.spawn((
-                                                Node {
-                                                    width: Val::Percent(100.0),
-                                                    height: Val::Percent(100.0),
-                                                    ..default()
-                                                },
-                                                BackgroundColor(Color::NONE),
-                                                PaletteSlotIcon(i),
-                                            ));
-                                        });
-                                    }
-                                });
-                        }
-                    });
 
                 // 2. ช่องเก็บของ (index HOTBAR_SLOTS..TOTAL_SLOTS)
                 for row in 0..crate::voxel::INV_ROWS {
@@ -661,6 +603,68 @@ pub fn setup_ui(mut commands: Commands) {
                     });
 
                 // 4. บรรทัดชื่อ item ที่ hover อยู่ (ย้ายไปเป็น UI ลอยแทน)
+            });
+
+            // 1. palette ของ Creative (แยกจากเป้ มาเป็น UI ลอยด้านข้าง)
+            root.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(40.0),
+                    top: Val::Px(40.0),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    padding: UiRect::all(Val::Px(16.0)),
+                    row_gap: Val::Px(8.0),
+                    border: UiRect::all(Val::Px(4.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.08, 0.08, 0.11, 0.96)),
+                BorderColor::all(Color::srgba(0.2, 0.2, 0.2, 0.8)),
+                InventoryPalette,
+            ))
+            .with_children(|pal| {
+                pal.spawn((
+                    Text::new("Creative Items"),
+                    TextFont { font_size: bevy::text::FontSize::Px(18.0), ..default() },
+                    TextColor(Color::srgba(0.9, 0.9, 0.9, 0.9)),
+                ));
+                
+                let items = crate::voxel::PLACEABLE_ITEMS;
+                const PALETTE_COLS: usize = 5;
+                let palette_rows = items.len().div_ceil(PALETTE_COLS);
+                for row in 0..palette_rows {
+                    pal.spawn(Node { column_gap: Val::Px(4.0), ..default() })
+                        .with_children(|r| {
+                            for col in 0..PALETTE_COLS {
+                                let i = row * PALETTE_COLS + col;
+                                if items.get(i).is_none() { continue; }
+                                r.spawn((
+                                    Node {
+                                        width: Val::Px(52.0),
+                                        height: Val::Px(52.0),
+                                        border: UiRect::all(Val::Px(3.0)),
+                                        padding: UiRect::all(Val::Px(4.0)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgba(0.1, 0.1, 0.15, 0.7)),
+                                    BorderColor::all(Color::srgba(0.2, 0.2, 0.2, 0.6)),
+                                    Interaction::default(),
+                                    PaletteSlotUi(i),
+                                ))
+                                .with_children(|slot| {
+                                    slot.spawn((
+                                        Node {
+                                            width: Val::Percent(100.0),
+                                            height: Val::Percent(100.0),
+                                            ..default()
+                                        },
+                                        BackgroundColor(Color::NONE),
+                                        PaletteSlotIcon(i),
+                                    ));
+                                });
+                            }
+                        });
+                }
             });
         });
 
@@ -3196,7 +3200,6 @@ pub fn egui_settings_system(
     mut camera_query: Query<&mut crate::camera::FreeCamera>,
     mut proj_query: Query<&mut Projection, With<crate::camera::MainCamera>>,
     mut wireframe_config: ResMut<bevy::pbr::wireframe::WireframeConfig>,
-    mut hotbar: ResMut<crate::voxel::Hotbar>,
     (mut server, mut client, lan_info, world, mut mp_ui): (
         Option<ResMut<bevy_renet::RenetServer>>,
         Option<ResMut<bevy_renet::RenetClient>>,
@@ -3267,13 +3270,7 @@ pub fn egui_settings_system(
         });
         if mode != settings.game_mode {
             settings.game_mode = mode;
-            *hotbar = crate::voxel::Hotbar::for_mode(mode);
         }
-        ui.label(
-            bevy_egui::egui::RichText::new("switching mode clears inventory")
-                .small()
-                .weak(),
-        );
 
         ui.separator();
 

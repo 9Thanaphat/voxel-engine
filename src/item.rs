@@ -63,9 +63,29 @@ impl ToolType {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum MaterialType {
+    Copper = 0,
+    Iron = 1,
+}
+
+impl MaterialType {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(MaterialType::Copper),
+            1 => Some(MaterialType::Iron),
+            _ => None,
+        }
+    }
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Item {
     Block(BlockType),
     Tool(ToolType),
+    Material(MaterialType),
 }
 
 /// เข้ารหัส Item เป็น (kind, id) สำหรับเซฟลง disk / ส่งข้าม network — ไม่ derive serde
@@ -75,6 +95,7 @@ pub fn item_to_wire(item: Item) -> (u8, u8) {
     match item {
         Item::Block(b) => (0, b as u8),
         Item::Tool(t) => (1, t.to_u8()),
+        Item::Material(m) => (2, m.to_u8()),
     }
 }
 
@@ -82,6 +103,7 @@ pub fn item_from_wire(kind: u8, id: u8) -> Option<Item> {
     match kind {
         0 => Some(Item::Block(BlockType::from_u8(id))),
         1 => ToolType::from_u8(id).map(Item::Tool),
+        2 => MaterialType::from_u8(id).map(Item::Material),
         _ => None,
     }
 }
@@ -117,6 +139,8 @@ impl Item {
             Item::Tool(ToolType::Pickaxe) => "Pickaxe",
             Item::Tool(ToolType::Axe) => "Axe",
             Item::Tool(ToolType::Shovel) => "Shovel",
+            Item::Material(MaterialType::Copper) => "Copper",
+            Item::Material(MaterialType::Iron) => "Iron",
         }
     }
 
@@ -130,6 +154,8 @@ impl Item {
             Item::Tool(ToolType::Pickaxe) => Some("items/pickaxe.png"),
             Item::Tool(ToolType::Axe) => Some("items/axe.png"),
             Item::Tool(ToolType::Shovel) => Some("items/shovel.png"),
+            Item::Material(MaterialType::Copper) => Some("items/copper.png"),
+            Item::Material(MaterialType::Iron) => Some("items/iron.png"),
         }
     }
 
@@ -152,7 +178,7 @@ impl Item {
     pub fn color(&self) -> [f32; 4] {
         match self {
             Item::Block(b) => crate::voxel::block_color(*b),
-            Item::Tool(_) => [1.0, 1.0, 1.0, 1.0],
+            Item::Tool(_) | Item::Material(_) => [1.0, 1.0, 1.0, 1.0],
         }
     }
 
@@ -160,6 +186,7 @@ impl Item {
         match self {
             Item::Block(crate::voxel::BlockType::TallGrass) => true,
             Item::Tool(t) if tool_model_path(*t).is_none() => true,
+            Item::Material(_) => true,
             _ => false,
         }
     }
@@ -235,6 +262,7 @@ fn viewmodel_params(item: Item) -> (f32, Transform) {
         Item::Block(_) => 0.3,
         Item::Tool(t) if tool_model_path(t).is_some() => 0.4,
         Item::Tool(_) => 0.35,
+        Item::Material(_) => 0.25,
     };
     let tf = Transform::from_translation(Vec3::new(0.4, -0.35, -0.7))
         .with_rotation(Quat::from_rotation_y(-0.5)); // เอียงเข้ากลางจอเล็กน้อย
@@ -422,6 +450,7 @@ fn spawn_dropped_item_system(
             Item::Block(_) => 0.25,
             Item::Tool(t) if tool_model_path(t).is_some() => 0.5,
             Item::Tool(_) => 0.4,
+            Item::Material(_) => 0.3,
         };
         let entity = spawn_item_visual(
             &mut commands, &mut meshes, &mut materials, &asset_server,

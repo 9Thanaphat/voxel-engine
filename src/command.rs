@@ -26,6 +26,8 @@ const HELP: &[&str] = &[
     "/weather <clear|rain|snow> [intensity] - set weather (host only)",
     "/seed - show the world seed",
     "/chunkborders - toggle chunk boundary grid (debug, this client only)",
+    "/waterflow - toggle water flow direction arrows (debug, this client only)",
+    "/fog <clear|morning|dense> - change fog atmosphere (this client only)",
 ];
 
 /// ทุกอย่างที่คำสั่งอาจต้องแตะ — รวมเป็น SystemParam ก้อนเดียวไม่ให้ signature บาน
@@ -38,6 +40,7 @@ pub struct CommandWorld<'w, 's> {
     pub camera: Query<'w, 's, &'static mut Transform, With<crate::camera::FreeCamera>>,
     pub weather: ResMut<'w, crate::weather::Weather>,
     pub auto_weather: ResMut<'w, crate::weather::AutoWeather>,
+    pub fog: ResMut<'w, crate::camera::FogState>,
 }
 
 pub fn run_commands(
@@ -119,6 +122,12 @@ fn dispatch(
             let state = if world.settings.show_chunk_borders { "on" } else { "off" };
             chat.push_system(format!("Chunk borders {state}"));
         }
+        "waterflow" | "flowdebug" => {
+            world.settings.show_water_flow = !world.settings.show_water_flow;
+            let state = if world.settings.show_water_flow { "on" } else { "off" };
+            chat.push_system(format!("Water flow debug arrows {state}"));
+        }
+        "fog" => cmd_fog(&args, chat, world),
         other => chat.push_error(format!("unknown command '{other}' - try /help")),
     }
 }
@@ -154,9 +163,37 @@ fn cmd_gamemode(args: &[&str], chat: &mut crate::ui::ChatState, world: &mut Comm
         }
     };
     world.settings.game_mode = mode;
-    // เปลี่ยนโหมดล้าง inventory ตาม behaviour เดิมของ settings radio
-    *world.hotbar = crate::voxel::Hotbar::for_mode(mode);
-    chat.push_system(format!("Game mode: {mode:?} (inventory reset)"));
+    chat.push_system(format!("Game mode: {mode:?}"));
+}
+
+fn cmd_fog(args: &[&str], chat: &mut crate::ui::ChatState, world: &mut CommandWorld) {
+    let Some(mode) = args.first().map(|a| a.to_ascii_lowercase()) else {
+        chat.push_error("usage: /fog <clear|morning|dense>");
+        return;
+    };
+    
+    match mode.as_str() {
+        "clear" => {
+            world.fog.target_color = Srgba::new(0.72, 0.80, 0.90, 1.0);
+            world.fog.auto_distance = true;
+            chat.push_system("Fog: Clear atmosphere (matches render distance)");
+        }
+        "morning" => {
+            world.fog.target_color = Srgba::new(0.85, 0.90, 0.95, 1.0);
+            world.fog.target_start = 10.0;
+            world.fog.target_end = 200.0;
+            world.fog.auto_distance = false;
+            chat.push_system("Fog: Morning mist (medium range)");
+        }
+        "dense" => {
+            world.fog.target_color = Srgba::new(0.60, 0.65, 0.70, 1.0);
+            world.fog.target_start = 0.0;
+            world.fog.target_end = 30.0;
+            world.fog.auto_distance = false;
+            chat.push_system("Fog: Dense Silent-Hill (close range)");
+        }
+        _ => chat.push_error("usage: /fog <clear|morning|dense>"),
+    }
 }
 
 /// ชื่อ tool ที่ /give รับ — แยกจาก block_from_name เพราะ tool ไม่อยู่ใน BLOCK_DEFS

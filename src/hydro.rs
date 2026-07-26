@@ -31,12 +31,16 @@ const RIVER_DEPTH: f32 = 3.0;
 /// สเกลความชัน→ความเร็ว และเพดาน
 const FLOW_K: f32 = 6.0;
 const FLOW_MAX: f32 = 1.0;
+/// ขอบเขตของหุบเขาแม่น้ำ (บล็อก)
+const VALLEY_MARGIN: f32 = 30.0;
 
 /// ข้อมูลแม่น้ำ ณ จุดหนึ่ง (คืนจาก [`river_at`])
 #[derive(Clone, Copy)]
 pub struct RiverPoint {
-    /// 0..1 (แกนกลาง=1 จางออกริมฝั่ง)
+    /// 0..1 (แกนกลาง=1 จางออกริมฝั่งน้ำ)
     pub mask: f32,
+    /// 0..1 (สำหรับหุบเขาแม่น้ำ, แกนกลาง=1 จางออกขอบหุบเขา)
+    pub valley_mask: f32,
     /// ระดับผิวน้ำ (บล็อก)
     pub surface: f32,
     /// ความลึกร่อง (บล็อก)
@@ -127,7 +131,7 @@ impl Tile {
                     for &si in list {
                         let s = &self.segs[si as usize];
                         let (dist, t) = dist_to_seg(p, s.a, s.b);
-                        if dist < s.width && best.map_or(true, |b| dist < b.0) {
+                        if dist < s.width + VALLEY_MARGIN && best.map_or(true, |b| dist < b.0) {
                             best = Some((dist, si as usize, t));
                         }
                     }
@@ -138,6 +142,7 @@ impl Tile {
         let s = &self.segs[si];
         Some(RiverPoint {
             mask: (1.0 - dist / s.width).clamp(0.0, 1.0),
+            valley_mask: (1.0 - dist / (s.width + VALLEY_MARGIN)).clamp(0.0, 1.0),
             surface: lerp(s.surf_a, s.surf_b, t),
             depth: RIVER_DEPTH,
             flow: s.flow,
@@ -302,8 +307,8 @@ impl Tile {
                         flow: dir / len,
                         speed,
                     });
-                    // bucket ลงทุก cell ที่ bbox (ขยายด้วย width) พาดถึง
-                    let wr = (width as f64 / CELL).ceil() as i32 + 1;
+                    // bucket ลงทุก cell ที่ bbox (ขยายด้วย width+valley) พาดถึง
+                    let wr = ((width + VALLEY_MARGIN) as f64 / CELL).ceil() as i32 + 1;
                     let cxmin = (prev.x.min(cur.x) as f64 / CELL).floor() as i32 - wr;
                     let cxmax = (prev.x.max(cur.x) as f64 / CELL).floor() as i32 + wr;
                     let czmin = (prev.y.min(cur.y) as f64 / CELL).floor() as i32 - wr;

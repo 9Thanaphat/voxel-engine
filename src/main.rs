@@ -20,6 +20,7 @@ mod audio;
 mod weather;
 mod hydro;
 mod map_preview;
+mod benchmark;
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RenderMode {
@@ -74,6 +75,8 @@ pub struct GameSettings {
     pub show_tnt_rays: bool,
     /// debug: วาดกริดขอบเขต chunk รอบตัวผู้เล่น (สลับด้วย /chunkborders) — local ไม่ sync
     pub show_chunk_borders: bool,
+    /// debug: วาดลูกศรทิศทางการไหลของน้ำ (สลับด้วย /waterflow) — local ไม่ sync
+    pub show_water_flow: bool,
     /// ขนาด nuke หน่วย "บล็อก TNT เทียบเท่า" — รัศมี ∝ yield^⅓ ตามสูตรจริง
     pub nuke_yield: f32,
     pub nuke_fuse_seconds: f32,
@@ -108,6 +111,7 @@ impl Default for GameSettings {
             tnt_fuse_seconds: 2.0,
             show_tnt_rays: false,
             show_chunk_borders: false,
+            show_water_flow: false,
             nuke_yield: 500.0,
             nuke_fuse_seconds: 5.0,
             lod_enabled: true,
@@ -233,11 +237,21 @@ fn install_crash_handler() {
 fn main() {
     install_crash_handler();
 
+    let is_benchmark = std::env::args().any(|arg| arg == "--benchmark");
+
     // โหลดค่าตั้งค่ารวมจาก settings.json (คืน default ถ้าไม่มี) แล้ว apply ลง GameSettings
     // fov/fly เก็บใน UserPrefs resource ให้ apply_camera_prefs_system เอาไปใส่กล้องทีหลัง
     let user_prefs = world_save::load_user_prefs();
     let mut initial_settings = GameSettings::default();
-    user_prefs.apply_to_settings(&mut initial_settings);
+    if is_benchmark {
+        initial_settings.noise.seed = 12345;
+        initial_settings.render_distance = 12; // consistent heavy load
+        initial_settings.day_speed = 0.0;
+        initial_settings.time_of_day = 12.0; // static midday lighting
+        initial_settings.lod_enabled = false; // Disable LOD as requested
+    } else {
+        user_prefs.apply_to_settings(&mut initial_settings);
+    }
 
     // ชุด biome (data-driven) จาก biomes.json — worldgen อ่านผ่าน global ด้วย (single-player)
     let biome_config = world_save::load_biome_config();
@@ -271,6 +285,7 @@ fn main() {
         .init_resource::<ui::ShowOptions>()
         .init_resource::<ui::ChatState>()
         .init_resource::<command::CommandQueue>()
+        .init_resource::<camera::FogState>()
         .init_resource::<EguiTyping>()
         .init_resource::<ui::WorldList>()
         .init_resource::<ui::CreateWorldUi>()
@@ -314,6 +329,8 @@ fn main() {
                 audio::AudioPlugin,
                 weather::WeatherPlugin,
                 map_preview::MapPreviewPlugin,
+                bevy::pbr::MaterialPlugin::<voxel::CustomWaterMaterial>::default(),
+                benchmark::BenchmarkPlugin { enabled: is_benchmark },
             )
         ))
         .init_state::<GameState>()
@@ -356,6 +373,7 @@ fn main() {
                 camera::camera_movement_system,
                 // mouse-look ปิดตัวเองอยู่แล้วเมื่อ cursor ไม่ถูก grab (camera.rs)
                 camera::camera_look_system.run_if(unpaused),
+                camera::fog_transition_system,
                 ui::chat_open_system.run_if(keyboard_free),
                 // E ตอนพิมพ์แชทต้องลงช่องข้อความ ไม่ใช่เปิดช่องเก็บของ
                 ui::inventory_toggle_system.run_if(keyboard_free),
@@ -425,6 +443,7 @@ fn main() {
                     // ใส่ FOV/fly speed ที่จำไว้ (settings.json) ให้กล้องครั้งแรกที่พร้อม
                     world_save::apply_camera_prefs_system,
                     voxel::chunk_border_gizmo_system,
+                    voxel::water_flow_gizmo_system,
                 ),
             ).run_if(in_state(GameState::InGame)),
         )
