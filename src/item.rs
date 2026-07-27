@@ -5,9 +5,10 @@ use crate::voxel::{BlockType, ItemStack};
 pub enum ToolType {
     Chisel,
     CopperWire,
-    Pickaxe,
-    Axe,
-    Shovel,
+    Pickaxe = 2,
+    Axe = 3,
+    Shovel = 4,
+    SlagSkimmer = 5,
 }
 
 /// หมวดการขุด — จับคู่ tool กับบล็อกที่มันถนัด (ฝั่งบล็อกดู block_dig_class ใน voxel.rs)
@@ -28,6 +29,7 @@ impl ToolType {
             ToolType::Pickaxe => 2,
             ToolType::Axe => 3,
             ToolType::Shovel => 4,
+            ToolType::SlagSkimmer => 5,
         }
     }
 
@@ -38,6 +40,7 @@ impl ToolType {
             2 => Some(ToolType::Pickaxe),
             3 => Some(ToolType::Axe),
             4 => Some(ToolType::Shovel),
+            5 => Some(ToolType::SlagSkimmer),
             _ => None,
         }
     }
@@ -48,7 +51,7 @@ impl ToolType {
             ToolType::Pickaxe => DigClass::Pick,
             ToolType::Axe => DigClass::Axe,
             ToolType::Shovel => DigClass::Shovel,
-            ToolType::Chisel | ToolType::CopperWire => DigClass::None,
+            ToolType::Chisel | ToolType::CopperWire | ToolType::SlagSkimmer => DigClass::None,
         }
     }
 
@@ -57,7 +60,7 @@ impl ToolType {
     pub fn dig_speed(self) -> f32 {
         match self {
             ToolType::Pickaxe | ToolType::Axe | ToolType::Shovel => 5.0,
-            ToolType::Chisel | ToolType::CopperWire => 1.0,
+            ToolType::Chisel | ToolType::CopperWire | ToolType::SlagSkimmer => 1.0,
         }
     }
 }
@@ -66,6 +69,16 @@ impl ToolType {
 pub enum MaterialType {
     Copper = 0,
     Iron = 1,
+    Stick = 2,
+    CopperIngot = 3,
+    IronIngot = 4,
+    Coal = 5,
+    Slag = 6,
+    Limestone = 7,
+    BronzeIngot = 8,
+    BrassIngot = 9,
+    SteelIngot = 10,
+    SlagAlloyIngot = 11,
 }
 
 impl MaterialType {
@@ -73,6 +86,16 @@ impl MaterialType {
         match v {
             0 => Some(MaterialType::Copper),
             1 => Some(MaterialType::Iron),
+            2 => Some(MaterialType::Stick),
+            3 => Some(MaterialType::CopperIngot),
+            4 => Some(MaterialType::IronIngot),
+            5 => Some(MaterialType::Coal),
+            6 => Some(MaterialType::Slag),
+            7 => Some(MaterialType::Limestone),
+            8 => Some(MaterialType::BronzeIngot),
+            9 => Some(MaterialType::BrassIngot),
+            10 => Some(MaterialType::SteelIngot),
+            11 => Some(MaterialType::SlagAlloyIngot),
             _ => None,
         }
     }
@@ -86,6 +109,29 @@ pub enum Item {
     Block(BlockType),
     Tool(ToolType),
     Material(MaterialType),
+    Pot(crate::chemistry::CrucibleData),
+}
+
+pub struct FuelProperties {
+    pub base_temp: f32,
+    pub base_energy: f32, // How long it burns at 1.0x multiplier
+}
+
+impl Item {
+    pub fn get_fuel_properties(&self) -> Option<FuelProperties> {
+        match self {
+            Item::Block(crate::voxel::BlockType::OakWood) => Some(FuelProperties { base_temp: 800.0, base_energy: 1000.0 }),
+            Item::Block(crate::voxel::BlockType::Branch) => Some(FuelProperties { base_temp: 600.0, base_energy: 300.0 }),
+            Item::Material(crate::item::MaterialType::Stick) => Some(FuelProperties { base_temp: 600.0, base_energy: 300.0 }),
+            Item::Material(crate::item::MaterialType::Coal) => Some(FuelProperties { base_temp: 1200.0, base_energy: 3000.0 }),
+            // ... more fuels
+            _ => None,
+        }
+    }
+
+    pub fn is_fuel(&self) -> bool {
+        self.get_fuel_properties().is_some()
+    }
 }
 
 /// เข้ารหัส Item เป็น (kind, id) สำหรับเซฟลง disk / ส่งข้าม network — ไม่ derive serde
@@ -96,6 +142,7 @@ pub fn item_to_wire(item: Item) -> (u8, u8) {
         Item::Block(b) => (0, b as u8),
         Item::Tool(t) => (1, t.to_u8()),
         Item::Material(m) => (2, m.to_u8()),
+        Item::Pot(_) => (3, 0),
     }
 }
 
@@ -104,7 +151,30 @@ pub fn item_from_wire(kind: u8, id: u8) -> Option<Item> {
         0 => Some(Item::Block(BlockType::from_u8(id))),
         1 => ToolType::from_u8(id).map(Item::Tool),
         2 => MaterialType::from_u8(id).map(Item::Material),
+        3 => Some(Item::Pot(crate::chemistry::CrucibleData::default())), // Empty pot if parsed from just u8 (e.g. held network packet)
         _ => None,
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SimpleItem {
+    pub kind: u8,
+    pub id: u8,
+    pub count: u32,
+}
+
+impl SimpleItem {
+    pub fn from_stack(s: ItemStack) -> Self {
+        let (kind, id) = item_to_wire(s.item);
+        Self { kind, id, count: s.count.unwrap_or(1) as u32 }
+    }
+
+    pub fn to_stack(self) -> Option<ItemStack> {
+        let item = match self.kind {
+            3 => Item::Pot(crate::chemistry::CrucibleData::default()), // SimpleItem doesn't hold nested pots
+            _ => item_from_wire(self.kind, self.id)?
+        };
+        Some(crate::voxel::ItemStack { item, count: Some(self.count as u32) })
     }
 }
 
@@ -115,16 +185,26 @@ pub struct WireItemStack {
     pub kind: u8,
     pub id: u8,
     pub count: Option<u32>,
+    #[serde(default)]
+    pub pot: Option<crate::chemistry::CrucibleData>,
 }
 
 impl WireItemStack {
     pub fn from_stack(s: ItemStack) -> Self {
         let (kind, id) = item_to_wire(s.item);
-        Self { kind, id, count: s.count }
+        let pot = match s.item {
+            Item::Pot(contents) => Some(contents),
+            _ => None,
+        };
+        Self { kind, id, count: s.count, pot }
     }
 
     pub fn to_stack(self) -> Option<ItemStack> {
-        item_from_wire(self.kind, self.id).map(|item| ItemStack { item, count: self.count })
+        let item = match self.kind {
+            3 => Item::Pot(self.pot.unwrap_or_default()),
+            _ => item_from_wire(self.kind, self.id)?
+        };
+        Some(ItemStack { item, count: self.count })
     }
 }
 
@@ -139,8 +219,20 @@ impl Item {
             Item::Tool(ToolType::Pickaxe) => "Pickaxe",
             Item::Tool(ToolType::Axe) => "Axe",
             Item::Tool(ToolType::Shovel) => "Shovel",
+            Item::Tool(ToolType::SlagSkimmer) => "Slag Skimmer",
             Item::Material(MaterialType::Copper) => "Copper",
             Item::Material(MaterialType::Iron) => "Iron",
+            Item::Material(MaterialType::Stick) => "Stick",
+            Item::Material(MaterialType::CopperIngot) => "Copper Ingot",
+            Item::Material(MaterialType::IronIngot) => "Iron Ingot",
+            Item::Material(MaterialType::Coal) => "Coal",
+            Item::Material(MaterialType::Slag) => "Slag",
+            Item::Material(MaterialType::Limestone) => "Limestone",
+            Item::Material(MaterialType::BronzeIngot) => "Bronze Ingot",
+            Item::Material(MaterialType::BrassIngot) => "Brass Ingot",
+            Item::Material(MaterialType::SteelIngot) => "Steel Ingot",
+            Item::Material(MaterialType::SlagAlloyIngot) => "Slag Alloy Ingot",
+            Item::Pot(_) => "Pot",
         }
     }
 
@@ -154,8 +246,20 @@ impl Item {
             Item::Tool(ToolType::Pickaxe) => Some("items/pickaxe.png"),
             Item::Tool(ToolType::Axe) => Some("items/axe.png"),
             Item::Tool(ToolType::Shovel) => Some("items/shovel.png"),
+            Item::Tool(ToolType::SlagSkimmer) => Some("items/slag_skimmer.png"),
             Item::Material(MaterialType::Copper) => Some("items/copper.png"),
             Item::Material(MaterialType::Iron) => Some("items/iron.png"),
+            Item::Material(MaterialType::Stick) => Some("items/stick.png"),
+            Item::Material(MaterialType::CopperIngot) => Some("items/copper_ingot.png"),
+            Item::Material(MaterialType::IronIngot) => Some("items/iron_ingot.png"),
+            Item::Material(MaterialType::Coal) => Some("items/coal.png"),
+            Item::Material(MaterialType::Slag) => Some("items/slag.png"),
+            Item::Material(MaterialType::Limestone) => Some("items/limestone.png"),
+            Item::Material(MaterialType::BronzeIngot) => Some("items/bronze_ingot.png"),
+            Item::Material(MaterialType::BrassIngot) => Some("items/brass_ingot.png"),
+            Item::Material(MaterialType::SteelIngot) => Some("items/steel_ingot.png"),
+            Item::Material(MaterialType::SlagAlloyIngot) => Some("items/slag_alloy_ingot.png"),
+            Item::Pot(_) => None,
         }
     }
 
@@ -166,8 +270,13 @@ impl Item {
         icons: &crate::voxel::ItemIconCache,
         asset_server: &AssetServer,
     ) -> Option<Handle<Image>> {
+        let cache_key = match self {
+            Item::Pot(_) => Item::Block(crate::voxel::BlockType::Pot),
+            _ => *self,
+        };
+
         // ลองหาใน cache ก่อน (บล็อกทั้งหมด และ Pickaxe จะมีภาพที่ render ไว้แล้ว)
-        if let Some(handle) = icons.0.get(self) {
+        if let Some(handle) = icons.0.get(&cache_key) {
             return Some(handle.clone());
         }
         
@@ -177,8 +286,8 @@ impl Item {
 
     pub fn color(&self) -> [f32; 4] {
         match self {
-            Item::Block(b) => crate::voxel::block_color(*b),
-            Item::Tool(_) | Item::Material(_) => [1.0, 1.0, 1.0, 1.0],
+            Item::Block(_) => [1.0, 1.0, 1.0, 1.0], // block ใช้ tint จาก voxel::hotbar_icon_texture() อีกทีถ้าเป็นใบไม้
+            Item::Tool(_) | Item::Material(_) | Item::Pot(_) => [1.0, 1.0, 1.0, 1.0],
         }
     }
 
@@ -263,6 +372,7 @@ fn viewmodel_params(item: Item) -> (f32, Transform) {
         Item::Tool(t) if tool_model_path(t).is_some() => 0.4,
         Item::Tool(_) => 0.35,
         Item::Material(_) => 0.25,
+        Item::Pot(_) => 0.35,
     };
     let tf = Transform::from_translation(Vec3::new(0.4, -0.35, -0.7))
         .with_rotation(Quat::from_rotation_y(-0.5)); // เอียงเข้ากลางจอเล็กน้อย
@@ -420,6 +530,14 @@ pub fn spawn_item_visual(
             commands.entity(entity).insert(transform);
             entity
         }
+        Item::Pot(_) => {
+            let entity = crate::voxel::spawn_block_model(
+                commands, meshes, materials, block_mats, campfire_assets,
+                crate::voxel::BlockType::Pot, Vec3::ZERO, size, bevy::camera::visibility::RenderLayers::default(),
+            );
+            commands.entity(entity).insert(transform);
+            entity
+        }
         // tool ที่มีโมเดล 3D
         Item::Tool(tool) if tool_model_path(tool).is_some() => {
             use bevy::gltf::GltfAssetLabel;
@@ -447,10 +565,11 @@ fn spawn_dropped_item_system(
     for ev in events.read() {
         // ขนาดของตกพื้น: บล็อกคิวบ์เล็ก, tool โมเดลจริงใหญ่หน่อย, แผ่นแบนกลางๆ
         let size = match ev.item {
-            Item::Block(_) => 0.25,
-            Item::Tool(t) if tool_model_path(t).is_some() => 0.5,
-            Item::Tool(_) => 0.4,
+            Item::Block(_) => 0.4,
+            Item::Tool(t) if tool_model_path(t).is_some() => 0.6,
+            Item::Tool(_) => 0.5,
             Item::Material(_) => 0.3,
+            Item::Pot(_) => 0.4,
         };
         let entity = spawn_item_visual(
             &mut commands, &mut meshes, &mut materials, &asset_server,
