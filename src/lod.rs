@@ -403,7 +403,7 @@ fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> (MeshBuf, Mes
 fn push_tree(buf: &mut MeshBuf, cx: f32, cz: f32, ground: f32) {
     let trunk_h = 5.0;
     let r = 2.6; // รัศมีพุ่มใบ
-    let wood = block_color(BlockType::Wood);
+    let wood = block_color(BlockType::OakWood);
     let leaf = block_color(BlockType::Leaves);
 
     // ลำต้น (กล่องบางน้ำตาล)
@@ -602,7 +602,12 @@ pub fn update_lod_tiles(
     let mut spawned = 0;
     loop {
         if spawned >= 2 { break; }
-        let res = { lod.receiver.lock().unwrap().try_recv() };
+        let res = {
+            lod.receiver
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .try_recv()
+        };
         let Ok(res) = res else { break };
         let key = (res.ring, res.coord);
         lod.pending.remove(&key);
@@ -721,7 +726,11 @@ pub fn update_lod_tiles(
         }
         let (ring, coord) = key;
         lod.pending.insert(key);
-        let sender = lod.sender.lock().unwrap().clone();
+        let sender = lod
+            .sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         let version = lod.version;
         AsyncComputeTaskPool::get()
             .spawn(async move {

@@ -93,6 +93,9 @@ pub struct ParticleAssets {
     dynamic_updraft: Handle<EffectAsset>,
     /// ไฟลุกต่อเนื่องจาก Campfire (เกาะ PointLight เหมือน sparkle แต่สีไฟจริง)
     flame: Handle<EffectAsset>,
+    furnace_smoke: Handle<EffectAsset>,
+    furnace_front_mesh: Handle<Mesh>,
+    furnace_front_materials: Vec<Handle<StandardMaterial>>,
     /// texture ขาว 1x1 คู่กับ tint = สีบล็อก สำหรับบล็อกที่ยังไม่มี texture
     white: Handle<Image>,
 }
@@ -300,6 +303,54 @@ fn flame_effect() -> EffectAsset {
         .render(ColorOverLifetimeModifier {
             gradient: color,
             blend: ColorBlendMode::Add,
+            mask: ColorBlendMask::RGBA,
+        })
+        .render(SizeOverLifetimeModifier {
+            gradient: size,
+            screen_space_size: false,
+        })
+}
+
+fn furnace_smoke_effect() -> EffectAsset {
+    let writer = ExprWriter::new();
+    let init_pos = SetPositionSphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        radius: writer.lit(0.08).expr(),
+        dimension: ShapeDimension::Volume,
+    };
+    let horizontal =
+        (writer.rand(VectorType::VEC3F) * writer.lit(2.0) - writer.lit(1.0))
+            * writer.lit(Vec3::new(0.05, 0.0, 0.05));
+    let velocity =
+        horizontal + writer.lit(Vec3::Y * 0.22)
+            + writer.lit(Vec3::Y * 0.25) * writer.rand(ScalarType::Float);
+    let init_velocity = SetAttributeModifier::new(Attribute::VELOCITY, velocity.expr());
+    let init_age = SetAttributeModifier::new(Attribute::AGE, writer.lit(0.0).expr());
+    let lifetime = writer.lit(1.8).uniform(writer.lit(3.2)).expr();
+    let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
+    let drag = LinearDragModifier::new(writer.lit(0.35).expr());
+
+    let mut color = bevy_hanabi::Gradient::new();
+    color.add_key(0.0, Vec4::new(0.20, 0.18, 0.16, 0.0));
+    color.add_key(0.12, Vec4::new(0.20, 0.18, 0.16, 0.55));
+    color.add_key(0.65, Vec4::new(0.28, 0.27, 0.26, 0.32));
+    color.add_key(1.0, Vec4::new(0.35, 0.35, 0.35, 0.0));
+
+    let mut size = bevy_hanabi::Gradient::new();
+    size.add_key(0.0, Vec3::splat(0.08));
+    size.add_key(0.5, Vec3::splat(0.20));
+    size.add_key(1.0, Vec3::splat(0.34));
+
+    EffectAsset::new(32, SpawnerSettings::rate(2.2.into()), writer.finish())
+        .with_name("furnace_smoke")
+        .init(init_pos)
+        .init(init_velocity)
+        .init(init_age)
+        .init(init_lifetime)
+        .update(drag)
+        .render(ColorOverLifetimeModifier {
+            gradient: color,
+            blend: ColorBlendMode::Overwrite,
             mask: ColorBlendMask::RGBA,
         })
         .render(SizeOverLifetimeModifier {
@@ -575,8 +626,11 @@ pub fn setup_particles(
     mut commands: Commands,
     mut effects: ResMut<Assets<EffectAsset>>,
     mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
+    commands.insert_resource(FurnaceFxState::default());
     commands.insert_resource(ShockwaveMaterial(materials.add(StandardMaterial {
         base_color: Color::WHITE,
         unlit: true,
@@ -594,6 +648,19 @@ pub fn setup_particles(
         bevy::asset::RenderAssetUsages::RENDER_WORLD,
     ));
 
+    let furnace_front_materials = (1..=4)
+        .map(|frame| {
+            let texture: Handle<Image> =
+                asset_server.load(format!("textures/furnace_front{frame}.png"));
+            materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                base_color_texture: Some(texture),
+                unlit: true,
+                perceptual_roughness: 0.8,
+                ..default()
+            })
+        })
+        .collect();
     commands.insert_resource(ParticleAssets {
         debris: effects.add(debris_effect()),
         splash: effects.add(splash_effect()),
@@ -604,6 +671,9 @@ pub fn setup_particles(
         base_surge: effects.add(base_surge_effect()),
         dynamic_updraft: effects.add(dynamic_updraft_effect()),
         flame: effects.add(flame_effect()),
+        furnace_smoke: effects.add(furnace_smoke_effect()),
+        furnace_front_mesh: meshes.add(Rectangle::new(1.001, 1.001)),
+        furnace_front_materials,
         white,
     });
 }
@@ -949,6 +1019,18 @@ pub fn despawn_finished_fx(
 #[derive(Component)]
 pub struct CampfireFlameSource;
 
+#[derive(Component)]
+pub struct FurnaceEffectLight;
+
+struct FurnaceFxEntry {
+    entity: Entity,
+    burning: bool,
+    front: Option<Entity>,
+}
+
+#[derive(Resource, Default)]
+pub struct FurnaceFxState(std::collections::HashMap<IVec3, FurnaceFxEntry>);
+
 /// เกาะ sparkle ให้ PointLight ที่เพิ่ง spawn — ในเกม PointLight มีแต่ไฟ lamp
 /// (refresh_chunk_lamp_lights) จึงใช้ Added<PointLight> ได้ตรงๆ; despawn ของ
 /// parent เก็บ child ให้เองอยู่แล้ว ไม่ต้องแก้บัญชี lamp_lights
@@ -956,7 +1038,15 @@ pub fn attach_lamp_sparkles(
     mut commands: Commands,
     assets: Res<ParticleAssets>,
     // เว้นแฟลชระเบิด — เป็น PointLight ชั่วคราว ไม่ใช่ lamp; เว้น Campfire — ได้ไฟจริงแทน sparkle
-    query: Query<(Entity, &PointLight), (Added<PointLight>, Without<ExplosionFlash>, Without<CampfireFlameSource>)>,
+    query: Query<
+        (Entity, &PointLight),
+        (
+            Added<PointLight>,
+            Without<ExplosionFlash>,
+            Without<CampfireFlameSource>,
+            Without<FurnaceEffectLight>,
+        ),
+    >,
 ) {
     for (entity, light) in &query {
         let c = light.color.to_linear();
@@ -986,6 +1076,168 @@ pub fn attach_campfire_flames(
             .spawn((ParticleEffect::new(assets.flame.clone()), Transform::from_xyz(0.0, 0.4, 0.0)))
             .id();
         commands.entity(entity).add_child(child);
+    }
+}
+
+pub fn update_furnace_effects(
+    mut commands: Commands,
+    world: Res<crate::voxel::VoxelWorld>,
+    assets: Res<ParticleAssets>,
+    time: Res<Time>,
+    mut state: ResMut<FurnaceFxState>,
+    mut lights: Query<&mut PointLight, With<FurnaceEffectLight>>,
+    mut front_materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
+) {
+    let mut active = std::collections::HashSet::new();
+    let elapsed = time.elapsed_secs();
+
+    for (chunk_pos, chunk) in &world.chunks {
+        for (&index, furnace) in &chunk.furnace_slots {
+            let lx = index % crate::voxel::CHUNK_WIDTH;
+            let ly = (index / crate::voxel::CHUNK_WIDTH) % crate::voxel::CHUNK_HEIGHT;
+            let lz =
+                index / (crate::voxel::CHUNK_WIDTH * crate::voxel::CHUNK_HEIGHT);
+            let pos = IVec3::new(
+                chunk_pos.x * crate::voxel::CHUNK_WIDTH as i32 + lx as i32,
+                ly as i32,
+                chunk_pos.y * crate::voxel::CHUNK_WIDTH as i32 + lz as i32,
+            );
+            if world.get_block(pos.x, pos.y, pos.z) != BlockType::Furnace {
+                continue;
+            }
+
+            let burning = furnace.active_fuel_energy > 0.0;
+            let heat = ((furnace.current_temp - 60.0) / 740.0).clamp(0.0, 1.0);
+            if !burning && heat <= 0.01 {
+                continue;
+            }
+            active.insert(pos);
+
+            let needs_spawn = state
+                .0
+                .get(&pos)
+                .is_none_or(|entry| entry.burning != burning);
+            if needs_spawn {
+                if let Some(old) = state.0.remove(&pos) {
+                    commands.entity(old.entity).despawn();
+                }
+
+                let facing = chunk.facings.get(&index).copied().unwrap_or(4);
+                let front = match facing {
+                    2 => Vec3::X,
+                    3 => Vec3::NEG_X,
+                    5 => Vec3::NEG_Z,
+                    _ => Vec3::Z,
+                };
+                let root_pos =
+                    pos.as_vec3() + Vec3::new(0.5, 0.38, 0.5) + front * 0.51;
+                let root = commands
+                    .spawn((
+                        PointLight {
+                            color: Color::srgb(1.0, 0.38, 0.08),
+                            intensity: 1.0,
+                            range: 7.0,
+                            shadow_maps_enabled: false,
+                            ..default()
+                        },
+                        Transform::from_translation(root_pos),
+                        FurnaceEffectLight,
+                    ))
+                    .id();
+
+                if burning {
+                    let rotation = match facing {
+                        2 => Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+                        3 => Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+                        5 => Quat::from_rotation_y(std::f32::consts::PI),
+                        _ => Quat::IDENTITY,
+                    };
+                    let front_quad = commands
+                        .spawn((
+                            Mesh3d(assets.furnace_front_mesh.clone()),
+                            MeshMaterial3d(assets.furnace_front_materials[0].clone()),
+                            Transform::from_translation(Vec3::Y * 0.12)
+                                .with_rotation(rotation),
+                        ))
+                        .id();
+                    let flame = commands
+                        .spawn((
+                            ParticleEffect::new(assets.flame.clone()),
+                            Transform::default().with_scale(Vec3::splat(0.72)),
+                        ))
+                        .id();
+                    let mut spark_props = EffectProperties::default();
+                    spark_props
+                        .set("tint", Vec4::new(5.0, 1.8, 0.25, 1.0).into());
+                    let sparks = commands
+                        .spawn((
+                            ParticleEffect::new(assets.sparkle.clone()),
+                            spark_props,
+                            Transform::default().with_scale(Vec3::splat(0.55)),
+                        ))
+                        .id();
+                    let smoke = commands
+                        .spawn((
+                            ParticleEffect::new(assets.furnace_smoke.clone()),
+                            Transform::from_translation(-front * 0.51 + Vec3::Y * 0.68),
+                        ))
+                        .id();
+                    commands.entity(root).add_child(flame);
+                    commands.entity(root).add_child(sparks);
+                    commands.entity(root).add_child(smoke);
+                    commands.entity(root).add_child(front_quad);
+                    state.0.insert(
+                        pos,
+                        FurnaceFxEntry {
+                            entity: root,
+                            burning,
+                            front: Some(front_quad),
+                        },
+                    );
+                } else {
+                    state.0.insert(
+                        pos,
+                        FurnaceFxEntry {
+                            entity: root,
+                            burning,
+                            front: None,
+                        },
+                    );
+                }
+            }
+
+            if let Some(entry) = state.0.get(&pos) {
+                if let Ok(mut light) = lights.get_mut(entry.entity) {
+                    let phase =
+                        elapsed * 12.0 + pos.x as f32 * 1.7 + pos.z as f32 * 2.3;
+                    let flicker = 0.88 + phase.sin() * 0.08 + (phase * 0.37).sin() * 0.04;
+                    let burn_boost = if burning { 1.0 } else { 0.28 };
+                    light.intensity = 42_000.0 * heat.max(0.12) * burn_boost * flicker;
+                    light.range = 4.0 + heat * 4.0;
+                }
+                if let Some(front) = entry.front {
+                    if let Ok(mut material) = front_materials.get_mut(front) {
+                        let phase_offset =
+                            (pos.x as i64 * 3 + pos.z as i64 * 5).rem_euclid(4) as usize;
+                        let frame = ((elapsed * 7.0) as usize + phase_offset)
+                            % assets.furnace_front_materials.len();
+                        material.0 = assets.furnace_front_materials[frame].clone();
+                    }
+                }
+            }
+        }
+    }
+
+    let stale: Vec<_> = state
+        .0
+        .keys()
+        .copied()
+        .filter(|pos| !active.contains(pos))
+        .collect();
+    for pos in stale {
+        if let Some(entry) = state.0.remove(&pos) {
+            commands.entity(entry.entity).despawn();
+        }
     }
 }
 

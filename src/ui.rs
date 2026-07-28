@@ -72,6 +72,18 @@ pub struct PaletteSlotIcon(pub usize);
 #[derive(Component)]
 pub struct ContainerPanel;
 
+#[derive(Component)]
+pub struct CrucibleMetalPanel;
+
+#[derive(Component)]
+pub struct CrucibleMetalSummary;
+
+#[derive(Component)]
+pub struct CrucibleMetalComposition;
+
+#[derive(Component)]
+pub struct CrucibleMetalLevel;
+
 /// ช่องในกริด container — index 0..27 (Furnace ใช้แค่ 0..3, ที่เหลือซ่อน)
 #[derive(Component)]
 pub struct ContainerSlotUi(pub usize);
@@ -85,6 +97,9 @@ pub struct ContainerSlotCount(pub usize);
 /// icon ของกองที่กำลังถืออยู่บนเมาส์
 #[derive(Component)]
 pub struct HeldStackIcon;
+
+#[derive(Component)]
+pub struct ClearInventoryButton;
 
 /// ป้ายชื่อ item เด้งเหนือ hotbar ตอนสลับช่อง (จางหายเอง) — ตัวครอบ (คุม Visibility)
 #[derive(Component)]
@@ -101,6 +116,21 @@ pub struct InvHoverNameText;
 /// กริด Furnace เฉพาะ (input/fuel → output) — สลับโชว์กับ ContainerPanel ตามชนิดกล่อง
 #[derive(Component)]
 pub struct FurnacePanel;
+
+#[derive(Component)]
+pub struct FurnaceTempText;
+
+#[derive(Component)]
+pub struct FurnaceFuelText;
+
+#[derive(Component)]
+pub struct FurnaceStatusText;
+
+#[derive(Component)]
+pub struct FurnaceIgniteButton;
+
+#[derive(Component)]
+pub struct FurnaceAddAirButton;
 
 /// ตัวครอบ hotbar ล่างจอ (HUD) — ซ่อนตอนหน้าต่างช่องเก็บของเปิด (ในหน้าต่างมีแถว
 /// hotbar ของตัวเองอยู่แล้ว โชว์คู่กันซ้ำซ้อน)
@@ -526,6 +556,72 @@ pub fn setup_ui(mut commands: Commands) {
                         }
                     });
 
+                panel
+                    .spawn((
+                        Node {
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(18.0),
+                            margin: UiRect::bottom(Val::Px(10.0)),
+                            ..default()
+                        },
+                        CrucibleMetalPanel,
+                        Visibility::Hidden,
+                    ))
+                    .with_children(|crucible| {
+                        crucible
+                            .spawn((
+                                Node {
+                                    position_type: PositionType::Relative,
+                                    width: Val::Px(90.0),
+                                    height: Val::Px(140.0),
+                                    border: UiRect::all(Val::Px(5.0)),
+                                    align_items: AlignItems::FlexEnd,
+                                    overflow: Overflow::clip(),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.08, 0.06, 0.05, 1.0)),
+                                BorderColor::all(Color::srgba(0.45, 0.28, 0.18, 1.0)),
+                            ))
+                            .with_children(|vessel| {
+                                vessel.spawn((
+                                    Node {
+                                        width: Val::Percent(100.0),
+                                        height: Val::Percent(0.0),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgb(0.30, 0.08, 0.04)),
+                                    CrucibleMetalLevel,
+                                ));
+                            });
+                        crucible
+                            .spawn(Node {
+                                flex_direction: FlexDirection::Column,
+                                row_gap: Val::Px(6.0),
+                                ..default()
+                            })
+                            .with_children(|info| {
+                                info.spawn((
+                                    Text::new("Crucible"),
+                                    TextFont {
+                                        font_size: bevy::text::FontSize::Px(18.0),
+                                        ..default()
+                                    },
+                                    TextColor(Color::WHITE),
+                                    CrucibleMetalSummary,
+                                ));
+                                info.spawn((
+                                    Text::new("Composition"),
+                                    TextFont {
+                                        font_size: bevy::text::FontSize::Px(15.0),
+                                        ..default()
+                                    },
+                                    TextColor(Color::srgba(0.9, 0.9, 0.9, 1.0)),
+                                    CrucibleMetalComposition,
+                                ));
+                            });
+                    });
+
                 // 0b. กริด Furnace เฉพาะ: Input+Fuel ซ้าย → Output ขวา พร้อม label
                 // (ช่อง 0/1/2 ซ้ำ index กับกริด Chest ได้ — โชว์ทีละ panel เท่านั้น
                 // และ node ที่ซ่อนไม่รับ hover/คลิก จึงไม่ตีกัน; ยังไม่มีระบบเผาจริง
@@ -540,9 +636,9 @@ pub fn setup_ui(mut commands: Commands) {
                 panel
                     .spawn((
                         Node {
-                            flex_direction: FlexDirection::Row,
+                            flex_direction: FlexDirection::Column,
                             align_items: AlignItems::Center,
-                            column_gap: Val::Px(14.0),
+                            row_gap: Val::Px(10.0),
                             margin: UiRect::bottom(Val::Px(10.0)),
                             ..default()
                         },
@@ -551,31 +647,96 @@ pub fn setup_ui(mut commands: Commands) {
                     ))
                     .with_children(|f| {
                         f.spawn(Node {
-                            flex_direction: FlexDirection::Column,
+                            flex_direction: FlexDirection::Row,
                             align_items: AlignItems::Center,
-                            row_gap: Val::Px(4.0),
+                            column_gap: Val::Px(14.0),
                             ..default()
                         })
-                        .with_children(|c| {
-                            slot_label(c, "Input");
-                            spawn_container_slot(c, 0);
-                            slot_label(c, "Fuel");
-                            spawn_container_slot(c, 1);
+                        .with_children(|row| {
+                            row.spawn(Node {
+                                flex_direction: FlexDirection::Column,
+                                align_items: AlignItems::Center,
+                                row_gap: Val::Px(4.0),
+                                ..default()
+                            })
+                            .with_children(|c| {
+                                slot_label(c, "Input (Crucible)");
+                                spawn_container_slot(c, 0);
+                            });
+                            row.spawn(Node {
+                                flex_direction: FlexDirection::Column,
+                                align_items: AlignItems::Center,
+                                row_gap: Val::Px(4.0),
+                                ..default()
+                            })
+                            .with_children(|c| {
+                                slot_label(c, "Fuel");
+                                spawn_container_slot(c, 1);
+                            });
                         });
+                        
                         f.spawn((
-                            Text::new(">"),
-                            TextFont { font_size: bevy::text::FontSize::Px(30.0), ..default() },
-                            TextColor(Color::srgba(1.0, 0.85, 0.2, 0.9)),
+                            Text::new("Temp: 25 C"),
+                            TextFont { font_size: bevy::text::FontSize::Px(16.0), ..default() },
+                            TextColor(Color::srgba(1.0, 0.5, 0.2, 1.0)),
+                            FurnaceTempText,
                         ));
+
+                        f.spawn((
+                            Text::new("Fuel: 0"),
+                            TextFont { font_size: bevy::text::FontSize::Px(16.0), ..default() },
+                            TextColor(Color::srgba(0.8, 0.8, 0.2, 1.0)),
+                            FurnaceFuelText,
+                        ));
+                        f.spawn((
+                            Text::new("Status: Idle"),
+                            TextFont { font_size: bevy::text::FontSize::Px(16.0), ..default() },
+                            TextColor(Color::srgba(0.8, 0.8, 0.8, 1.0)),
+                            FurnaceStatusText,
+                        ));
+
                         f.spawn(Node {
-                            flex_direction: FlexDirection::Column,
+                            flex_direction: FlexDirection::Row,
                             align_items: AlignItems::Center,
-                            row_gap: Val::Px(4.0),
+                            column_gap: Val::Px(10.0),
                             ..default()
                         })
-                        .with_children(|c| {
-                            slot_label(c, "Output");
-                            spawn_container_slot(c, 2);
+                        .with_children(|ctrls| {
+                            ctrls.spawn((
+                                Button,
+                                Node {
+                                    padding: UiRect::all(Val::Px(5.0)),
+                                    border: UiRect::all(Val::Px(1.0)),
+                                    ..default()
+                                },
+                                BorderColor::all(Color::srgba(0.5, 0.5, 0.5, 1.0)),
+                                BackgroundColor(Color::srgba(0.2, 0.2, 0.2, 1.0)),
+                                FurnaceIgniteButton,
+                            ))
+                            .with_children(|btn| {
+                                btn.spawn((
+                                    Text::new("Ignite"),
+                                    TextFont { font_size: bevy::text::FontSize::Px(14.0), ..default() },
+                                ));
+                            });
+
+                            ctrls.spawn((
+                                Button,
+                                Node {
+                                    padding: UiRect::all(Val::Px(5.0)),
+                                    border: UiRect::all(Val::Px(1.0)),
+                                    ..default()
+                                },
+                                BorderColor::all(Color::srgba(0.5, 0.5, 0.5, 1.0)),
+                                BackgroundColor(Color::srgba(0.2, 0.2, 0.2, 1.0)),
+                                FurnaceAddAirButton,
+                            ))
+                            .with_children(|btn| {
+                                btn.spawn((
+                                    Text::new("Add Air"),
+                                    TextFont { font_size: bevy::text::FontSize::Px(14.0), ..default() },
+                                ));
+                            });
                         });
                     });
 
@@ -601,6 +762,29 @@ pub fn setup_ui(mut commands: Commands) {
                             spawn_inv_slot(r, idx);
                         }
                     });
+
+                panel.spawn((
+                    Button,
+                    Node {
+                        align_self: AlignSelf::FlexEnd,
+                        margin: UiRect::top(Val::Px(8.0)),
+                        padding: UiRect::axes(Val::Px(14.0), Val::Px(7.0)),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.45, 0.10, 0.10, 0.95)),
+                    BorderColor::all(Color::srgba(0.85, 0.30, 0.25, 1.0)),
+                    ClearInventoryButton,
+                )).with_children(|button| {
+                    button.spawn((
+                        Text::new("Clear Items"),
+                        TextFont {
+                            font_size: bevy::text::FontSize::Px(16.0),
+                            ..default()
+                        },
+                        TextColor(Color::WHITE),
+                    ));
+                });
 
                 // 4. บรรทัดชื่อ item ที่ hover อยู่ (ย้ายไปเป็น UI ลอยแทน)
             });
@@ -721,7 +905,7 @@ pub fn setup_ui(mut commands: Commands) {
             parent.spawn((
                 Text::new("FPS: 0, Time: 0ms, Entities: 0\nDraw Calls: 0, Polygons: 0, VRAM: 0 MB\nRAM: 0 MB"),
                 TextFont {
-                    font_size: bevy::text::FontSize::Px(16.0),
+                    font_size: bevy::text::FontSize::Px(20.0),
                     ..default()
                 },
                 bevy::text::TextLayout::justify(bevy::text::Justify::Right),
@@ -733,7 +917,7 @@ pub fn setup_ui(mut commands: Commands) {
             parent.spawn((
                 Text::new("X: 0.00, Y: 0.00, Z: 0.00"),
                 TextFont {
-                    font_size: bevy::text::FontSize::Px(16.0),
+                    font_size: bevy::text::FontSize::Px(20.0),
                     ..default()
                 },
                 bevy::text::TextLayout::justify(bevy::text::Justify::Right),
@@ -745,7 +929,7 @@ pub fn setup_ui(mut commands: Commands) {
             parent.spawn((
                 Text::new("Block: None"),
                 TextFont {
-                    font_size: bevy::text::FontSize::Px(16.0),
+                    font_size: bevy::text::FontSize::Px(20.0),
                     ..default()
                 },
                 bevy::text::TextLayout::justify(bevy::text::Justify::Right),
@@ -757,7 +941,7 @@ pub fn setup_ui(mut commands: Commands) {
             parent.spawn((
                 Text::new("Mode: Normal"),
                 TextFont {
-                    font_size: bevy::text::FontSize::Px(16.0),
+                    font_size: bevy::text::FontSize::Px(20.0),
                     ..default()
                 },
                 bevy::text::TextLayout::justify(bevy::text::Justify::Right),
@@ -915,6 +1099,61 @@ fn quick_move(hotbar: &mut crate::voxel::Hotbar, idx: usize) {
 }
 
 /// คลิกซ้าย: หยิบทั้งกอง / วางทั้งกอง / รวมกองถ้าชนิดเดียวกัน / สลับถ้าคนละชนิด
+fn insert_into_crucible(
+    crucible: &mut crate::chemistry::CrucibleData,
+    held: crate::voxel::ItemStack,
+    requested: u32,
+) -> Option<crate::voxel::ItemStack> {
+    use crate::voxel::{max_stack, ItemStack};
+
+    let count = held.count.unwrap_or(max_stack(held.item));
+    let Some(item_mass) = crate::chemistry::composition_total_mass(&held.item) else {
+        return Some(held);
+    };
+    if item_mass == 0 {
+        return Some(held);
+    }
+    let mut to_move = count
+        .min(requested)
+        .min(crucible.remaining_capacity() / item_mass);
+    let mut moved = 0;
+    let stack_limit = max_stack(held.item);
+
+    for stored in crucible.solid_contents.iter_mut().flatten() {
+        if to_move == 0 {
+            break;
+        }
+        if stored.to_stack().is_some_and(|stack| stack.item == held.item)
+            && stored.count < stack_limit
+        {
+            let amount = to_move.min(stack_limit - stored.count);
+            stored.count += amount;
+            moved += amount;
+            to_move -= amount;
+        }
+    }
+    for slot in &mut crucible.solid_contents {
+        if to_move == 0 {
+            break;
+        }
+        if slot.is_none() {
+            let amount = to_move.min(stack_limit);
+            *slot = Some(crate::item::SimpleItem::from_stack(ItemStack {
+                item: held.item,
+                count: Some(amount),
+            }));
+            moved += amount;
+            to_move -= amount;
+        }
+    }
+
+    let remaining = count - moved;
+    (remaining > 0).then_some(ItemStack {
+        item: held.item,
+        count: Some(remaining),
+    })
+}
+
 fn click_left(
     slot: &mut Option<crate::voxel::ItemStack>,
     held: &mut Option<crate::voxel::ItemStack>,
@@ -933,6 +1172,12 @@ fn click_left(
             *slot = Some(ItemStack { item: h.item, count: Some(sc + moved) });
             let left = hc - moved;
             *held = (left > 0).then_some(ItemStack { item: h.item, count: Some(left) });
+        }
+        (Some(h), Some(mut s)) if matches!(s.item, crate::item::Item::Crucible(_)) && crate::chemistry::get_item_composition(&h.item).is_some() => {
+            if let crate::item::Item::Crucible(ref mut crucible_data) = s.item {
+                *held = insert_into_crucible(crucible_data, h, u32::MAX);
+                *slot = Some(s);
+            }
         }
         (Some(h), Some(s)) => {
             *slot = Some(h);
@@ -969,6 +1214,12 @@ fn click_right(
                 *held = (hc > 1).then_some(ItemStack { item: h.item, count: Some(hc - 1) });
             } else {
                 *held = Some(h);
+            }
+        }
+        (Some(h), Some(mut s)) if matches!(s.item, crate::item::Item::Crucible(_)) && crate::chemistry::get_item_composition(&h.item).is_some() => {
+            if let crate::item::Item::Crucible(ref mut crucible_data) = s.item {
+                *held = insert_into_crucible(crucible_data, h, 1);
+                *slot = Some(s);
             }
         }
         (Some(h), Some(s)) => {
@@ -1086,6 +1337,7 @@ pub fn inventory_click_system(
             continue;
         }
         let idx = slot.0;
+
         if left && shift {
             quick_move(&mut hotbar, idx);
         } else if left {
@@ -1094,6 +1346,35 @@ pub fn inventory_click_system(
             click_right(&mut hotbar.slots[idx], &mut held.0);
         }
         return;
+    }
+}
+
+pub fn clear_inventory_button_system(
+    open: Res<crate::voxel::InventoryOpen>,
+    mut hotbar: ResMut<crate::voxel::Hotbar>,
+    mut held: ResMut<HeldStack>,
+    mut buttons: Query<
+        (&Interaction, &mut BackgroundColor),
+        (Changed<Interaction>, With<ClearInventoryButton>),
+    >,
+) {
+    if !open.0 {
+        return;
+    }
+    for (interaction, mut color) in &mut buttons {
+        match *interaction {
+            Interaction::Pressed => {
+                hotbar.slots.fill(None);
+                held.0 = None;
+                color.0 = Color::srgba(0.65, 0.12, 0.10, 1.0);
+            }
+            Interaction::Hovered => {
+                color.0 = Color::srgba(0.58, 0.14, 0.12, 1.0);
+            }
+            Interaction::None => {
+                color.0 = Color::srgba(0.45, 0.10, 0.10, 0.95);
+            }
+        }
     }
 }
 
@@ -1192,31 +1473,146 @@ pub fn update_inventory_ui(
 pub fn update_container_ui(
     open_container: Res<crate::voxel::OpenContainer>,
     world: Res<crate::voxel::VoxelWorld>,
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    icons: Res<crate::voxel::ItemIconCache>,
+    (mut commands, asset_server, icons): (
+        Commands,
+        Res<AssetServer>,
+        Res<crate::voxel::ItemIconCache>,
+    ),
     mut chest_panel: Query<
         (&mut Node, &mut Visibility),
-        (With<ContainerPanel>, Without<FurnacePanel>, Without<ContainerSlotUi>),
+        (
+            With<ContainerPanel>,
+            Without<FurnacePanel>,
+            Without<CrucibleMetalPanel>,
+            Without<ContainerSlotUi>,
+            Without<CrucibleMetalLevel>,
+        ),
     >,
     mut furnace_panel: Query<
         (&mut Node, &mut Visibility),
-        (With<FurnacePanel>, Without<ContainerPanel>, Without<ContainerSlotUi>),
+        (
+            With<FurnacePanel>,
+            Without<ContainerPanel>,
+            Without<CrucibleMetalPanel>,
+            Without<ContainerSlotUi>,
+            Without<CrucibleMetalLevel>,
+        ),
+    >,
+    mut crucible_panel: Query<
+        (&mut Node, &mut Visibility),
+        (
+            With<CrucibleMetalPanel>,
+            Without<ContainerPanel>,
+            Without<FurnacePanel>,
+            Without<ContainerSlotUi>,
+            Without<CrucibleMetalLevel>,
+        ),
     >,
     mut slot_vis_query: Query<
         (&ContainerSlotUi, &mut Visibility),
-        (Without<ContainerPanel>, Without<FurnacePanel>),
+        (
+            Without<ContainerPanel>,
+            Without<FurnacePanel>,
+            Without<CrucibleMetalPanel>,
+        ),
     >,
-    mut icon_query: Query<(Entity, &ContainerSlotIcon, &mut BackgroundColor), Without<HeldStackIcon>>,
-    mut count_query: Query<(&ContainerSlotCount, &mut Text)>,
+    mut icon_query: Query<
+        (Entity, &ContainerSlotIcon, &mut BackgroundColor),
+        (Without<HeldStackIcon>, Without<CrucibleMetalLevel>),
+    >,
+    mut temp_text_query: Query<
+        &mut Text,
+        (
+            With<FurnaceTempText>,
+            Without<FurnaceFuelText>,
+            Without<FurnaceStatusText>,
+            Without<ContainerSlotCount>,
+            Without<CrucibleMetalSummary>,
+            Without<CrucibleMetalComposition>,
+        ),
+    >,
+    mut fuel_text_query: Query<
+        &mut Text,
+        (
+            With<FurnaceFuelText>,
+            Without<FurnaceTempText>,
+            Without<FurnaceStatusText>,
+            Without<ContainerSlotCount>,
+            Without<CrucibleMetalSummary>,
+            Without<CrucibleMetalComposition>,
+        ),
+    >,
+    mut status_text_query: Query<
+        &mut Text,
+        (
+            With<FurnaceStatusText>,
+            Without<FurnaceTempText>,
+            Without<FurnaceFuelText>,
+            Without<ContainerSlotCount>,
+            Without<CrucibleMetalSummary>,
+            Without<CrucibleMetalComposition>,
+        ),
+    >,
+    mut count_query: Query<
+        (&ContainerSlotCount, &mut Text),
+        (
+            Without<FurnaceTempText>,
+            Without<FurnaceFuelText>,
+            Without<FurnaceStatusText>,
+            Without<CrucibleMetalSummary>,
+            Without<CrucibleMetalComposition>,
+        ),
+    >,
+    mut crucible_summary: Query<
+        &mut Text,
+        (
+            With<CrucibleMetalSummary>,
+            Without<CrucibleMetalComposition>,
+            Without<FurnaceTempText>,
+            Without<FurnaceFuelText>,
+            Without<FurnaceStatusText>,
+            Without<ContainerSlotCount>,
+        ),
+    >,
+    mut crucible_composition: Query<
+        &mut Text,
+        (
+            With<CrucibleMetalComposition>,
+            Without<CrucibleMetalSummary>,
+            Without<FurnaceTempText>,
+            Without<FurnaceFuelText>,
+            Without<FurnaceStatusText>,
+            Without<ContainerSlotCount>,
+        ),
+    >,
+    mut crucible_level: Query<
+        (&mut Node, &mut BackgroundColor),
+        (
+            With<CrucibleMetalLevel>,
+            Without<ContainerPanel>,
+            Without<FurnacePanel>,
+            Without<CrucibleMetalPanel>,
+            Without<ContainerSlotIcon>,
+        ),
+    >,
 ) {
     // แต่ละชนิดกล่องมี panel ของตัวเอง — โชว์อันเดียว อีกอันหลุดจาก layout ไปเลย
     // (set_shown ใช้ Display::None — Visibility เฉยๆ ยังกินความสูงหน้าต่างอยู่)
+    let show_crucible_metal = open_container.0.is_some_and(|oc| {
+        oc.kind == crate::voxel::BlockType::Crucible
+            && world
+                .crucibles
+                .get(&oc.pos)
+                .is_some_and(|data| data.liquid_mass.iter().any(|mass| *mass > 0))
+    });
+    let show_crucible_info = open_container
+        .0
+        .is_some_and(|oc| oc.kind == crate::voxel::BlockType::Crucible);
     let (show_chest, show_furnace) = match open_container.0 {
         None => (false, false),
         Some(oc) => {
-            let is_chest = oc.kind == crate::voxel::BlockType::Chest;
-            (is_chest, !is_chest)
+            let is_furnace = oc.kind == crate::voxel::BlockType::Furnace;
+            (!is_furnace && !show_crucible_metal, is_furnace)
         }
     };
     for (mut node, mut vis) in chest_panel.iter_mut() {
@@ -1225,11 +1621,16 @@ pub fn update_container_ui(
     for (mut node, mut vis) in furnace_panel.iter_mut() {
         set_shown(&mut node, &mut vis, show_furnace);
     }
+    for (mut node, mut vis) in crucible_panel.iter_mut() {
+        set_shown(&mut node, &mut vis, show_crucible_info);
+    }
     let Some(oc) = open_container.0 else { return };
-    let is_chest = oc.kind == crate::voxel::BlockType::Chest;
-
-    let capacity: usize = if is_chest { 27 } else { 3 };
-    // เอามาเป็น array คงที่ก่อน — ช่อง 0..27 ใช้ร่วมกันทั้ง Chest(27)/Furnace(3, ที่เหลือ None)
+    let capacity: usize = match oc.kind {
+        crate::voxel::BlockType::Chest => 27,
+        crate::voxel::BlockType::Crucible => 9,
+        _ => 2,
+    };
+    // เอามาเป็น array คงที่ก่อน — ช่อง 0..27 ใช้ร่วมกันทั้ง Chest(27)/Furnace(2, ที่เหลือ None)
     let mut slots: [Option<crate::voxel::ItemStack>; 27] = [None; 27];
     match oc.kind {
         crate::voxel::BlockType::Chest => {
@@ -1237,9 +1638,151 @@ pub fn update_container_ui(
                 slots = *s;
             }
         }
+        crate::voxel::BlockType::Crucible => {
+            if let Some(crucible) = world.crucibles.get(&oc.pos) {
+                let total_mass = crucible.total_mass();
+                let liquid_mass = crucible.liquid_mass_total();
+                let temperature = crate::thermodynamics::unpack_temperature(
+                    crucible.temp,
+                    crucible.temp_acc,
+                );
+                let melting_point =
+                    crate::chemistry::liquid_melting_point(&crucible.liquid_mass);
+                let phase = if liquid_mass == 0 {
+                    if total_mass == 0 { "Empty" } else { "Solid charge" }
+                } else {
+                    match melting_point {
+                        Some(point) if temperature >= point as f32 => "Liquid",
+                        Some(point) if temperature + 50.0 >= point as f32 => "Solidifying",
+                        Some(_) => "Solidified in crucible",
+                        None => "Empty",
+                    }
+                };
+                for mut text in &mut crucible_summary {
+                    text.0 = format!(
+                        "Crucible\nTemp: {:.1} C\nPhase: {}\nLoad: {}/{} g",
+                        temperature,
+                        phase,
+                        total_mass,
+                        crate::chemistry::CRUCIBLE_CAPACITY_GRAMS,
+                    );
+                }
+
+                let mut combined = crucible.liquid_mass;
+                for item in crucible.solid_contents.iter().flatten() {
+                    if let Some(stack) = item.to_stack() {
+                        let count = stack.count.unwrap_or(1);
+                        if let Some(contents) =
+                            crate::chemistry::get_item_composition(&stack.item)
+                        {
+                            for (element, mass) in contents {
+                                combined[element as usize] = combined[element as usize]
+                                    .saturating_add(mass.saturating_mul(count));
+                            }
+                        }
+                    }
+                }
+                let mut composition = "Composition".to_string();
+                if total_mass == 0 {
+                    composition.push_str("\nEmpty");
+                }
+                for (index, mass) in combined.iter().copied().enumerate() {
+                    if mass == 0 {
+                        continue;
+                    }
+                    if let Some(element) = crate::chemistry::Element::from_index(index) {
+                        composition.push_str(&format!(
+                            "\n{}: {} g ({:.1}%)",
+                            element.data().name,
+                            mass,
+                            mass as f32 / total_mass.max(1) as f32 * 100.0,
+                        ));
+                    }
+                }
+                for mut text in &mut crucible_composition {
+                    text.0 = composition.clone();
+                }
+                let fill = (total_mass as f32
+                    / crate::chemistry::CRUCIBLE_CAPACITY_GRAMS as f32)
+                    .clamp(0.0, 1.0);
+                let heat = ((temperature - 450.0) / (1_600.0 - 450.0))
+                    .clamp(0.0, 1.0);
+                let color = if heat < 0.55 {
+                    let t = heat / 0.55;
+                    Color::srgb(0.30 + 0.65 * t, 0.08 + 0.20 * t, 0.04)
+                } else {
+                    let t = (heat - 0.55) / 0.45;
+                    Color::srgb(0.95 + 0.05 * t, 0.28 + 0.62 * t, 0.04 + 0.38 * t)
+                };
+                for (mut node, mut background) in &mut crucible_level {
+                    node.height = Val::Percent(fill * 100.0);
+                    background.0 = color;
+                }
+                for i in 0..9 {
+                    if let Some(item) = &crucible.solid_contents[i] {
+                        slots[i] = item.to_stack();
+                    }
+                }
+            }
+        }
         crate::voxel::BlockType::Furnace => {
-            if let Some(f) = world.get_furnace_slots(oc.pos.x, oc.pos.y, oc.pos.z) {
-                slots[..3].copy_from_slice(f);
+            if let Some(f) = world.get_furnace_data(oc.pos.x, oc.pos.y, oc.pos.z) {
+                slots[..2].copy_from_slice(&f.slots[..2]);
+                
+                let mut status_str = "Status: Idle".to_string();
+                if f.active_fuel_energy > 0.0 {
+                    status_str = "Status: Heating".to_string();
+                }
+                
+                if let Some(ref input_slot) = f.slots[0] {
+                    if let crate::item::Item::Crucible(ref crucible_data) = input_slot.item {
+                        let mut total_mass = 0;
+                        let mut weighted_temp_sum: f32 = 0.0;
+                        let mut has_solids = false;
+                        for s in &crucible_data.solid_contents {
+                            if let Some(item) = s {
+                                has_solids = true;
+                                if let Some(stack) = item.to_stack() {
+                                    if let Some(comp) = crate::chemistry::get_item_composition(&stack.item) {
+                                        let count = stack.count.unwrap_or(1) as u32;
+                                        for (element, mass) in comp {
+                                            let total_item_mass = mass * count;
+                                            total_mass += total_item_mass;
+                                            weighted_temp_sum += (total_item_mass as f32) * (element.data().melting_point as f32);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if has_solids && total_mass > 0 {
+                            let avg_melting_point = (weighted_temp_sum / (total_mass as f32)) as u16;
+                            if crucible_data.temp >= avg_melting_point {
+                                status_str = format!("Crucible: {} C (Melting!)", crucible_data.temp);
+                            } else {
+                                status_str = format!("Crucible: {} C / {} C", crucible_data.temp, avg_melting_point);
+                            }
+                        } else {
+                            let has_liquid = crucible_data.liquid_mass.iter().any(|&m| m > 0);
+                            if has_liquid {
+                                status_str = format!("Crucible: {} C (Liquid Ready)", crucible_data.temp);
+                            } else {
+                                status_str = format!("Crucible: {} C (Empty)", crucible_data.temp);
+                            }
+                        }
+                    }
+                }
+
+                for mut text in &mut temp_text_query {
+                    let s = format!("Temp: {:.0} C", f.current_temp);
+                    if text.0 != s { text.0 = s; }
+                }
+                for mut text in &mut fuel_text_query {
+                    let s = format!("Fuel: {:.0}", f.active_fuel_energy);
+                    if text.0 != s { text.0 = s; }
+                }
+                for mut text in &mut status_text_query {
+                    if text.0 != status_str { text.0 = status_str.clone(); }
+                }
             }
         }
         _ => {}
@@ -1297,13 +1840,26 @@ pub fn container_click_system(
     ),
 ) {
     let Some(oc) = open_container.0 else { return };
+    if oc.kind == crate::voxel::BlockType::Crucible
+        && world.crucibles.get(&oc.pos).is_some_and(|crucible| {
+            crucible.temp > 60 || crucible.liquid_mass.iter().any(|mass| *mass > 0)
+        })
+    {
+        // A hot or occupied crucible is inspection-only. Once metal has melted,
+        // the slot array is no longer the physical contents of the vessel.
+        return;
+    }
     let left = mouse.just_pressed(MouseButton::Left);
     let right = mouse.just_pressed(MouseButton::Right);
     if !left && !right {
         return;
     }
     let shift = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
-    let capacity: usize = if oc.kind == crate::voxel::BlockType::Chest { 27 } else { 3 };
+    let capacity: usize = match oc.kind {
+        crate::voxel::BlockType::Chest => 27,
+        crate::voxel::BlockType::Crucible => 9,
+        _ => 2,
+    };
 
     for (slot, interaction) in &slot_query {
         if *interaction == Interaction::None {
@@ -1318,11 +1874,48 @@ pub fn container_click_system(
             crate::voxel::BlockType::Chest => {
                 world.get_chest_slots(oc.pos.x, oc.pos.y, oc.pos.z).and_then(|s| s[idx])
             }
+            crate::voxel::BlockType::Crucible => {
+                world.crucibles.get(&oc.pos).and_then(|p| p.solid_contents.get(idx)).and_then(|c| c.as_ref()).and_then(|c| c.to_stack())
+            }
             crate::voxel::BlockType::Furnace => {
                 world.get_furnace_slots(oc.pos.x, oc.pos.y, oc.pos.z).and_then(|s| s[idx])
             }
             _ => None,
         };
+
+        let original_current = current;
+        let original_held = held.0;
+        let mut held_overflow = 0;
+        if oc.kind == crate::voxel::BlockType::Crucible && !(left && shift) {
+            if let Some(held_stack) = held.0 {
+                if let Some(item_mass) =
+                    crate::chemistry::composition_total_mass(&held_stack.item)
+                {
+                    let can_add_to_slot =
+                        current.is_none_or(|stack| stack.item == held_stack.item);
+                    if item_mass > 0 && can_add_to_slot {
+                        let remaining_capacity = world
+                            .crucibles
+                            .get(&oc.pos)
+                            .map_or(crate::chemistry::CRUCIBLE_CAPACITY_GRAMS, |crucible| {
+                                crucible.remaining_capacity()
+                            });
+                        let held_count =
+                            held_stack.count.unwrap_or(crate::voxel::max_stack(held_stack.item));
+                        let requested = if right { 1 } else { held_count };
+                        let allowed = requested.min(remaining_capacity / item_mass);
+                        if allowed == 0 {
+                            continue;
+                        }
+                        held_overflow = held_count - allowed;
+                        held.0 = Some(crate::voxel::ItemStack {
+                            item: held_stack.item,
+                            count: Some(allowed),
+                        });
+                    }
+                }
+            }
+        }
 
         if left && shift {
             // shift+คลิกซ้าย: เด้งทั้งกองไปช่องเก็บของผู้เล่น (ทางเดียว — ย้อนกลับใช้คลิกลากปกติ)
@@ -1333,6 +1926,28 @@ pub fn container_click_system(
             click_left(&mut current, &mut held.0);
         } else {
             click_right(&mut current, &mut held.0);
+        }
+
+        if held_overflow > 0 {
+            if let Some(mut remainder) = held.0 {
+                remainder.count = Some(remainder.count.unwrap_or(0) + held_overflow);
+                held.0 = Some(remainder);
+            } else if let Some(original) = original_held {
+                held.0 = Some(crate::voxel::ItemStack {
+                    item: original.item,
+                    count: Some(held_overflow),
+                });
+            }
+        }
+
+        if oc.kind == crate::voxel::BlockType::Crucible {
+            let mut prospective = world.crucibles.get(&oc.pos).copied().unwrap_or_default();
+            prospective.solid_contents[idx] =
+                current.map(crate::item::SimpleItem::from_stack);
+            if prospective.total_mass() > crate::chemistry::CRUCIBLE_CAPACITY_GRAMS {
+                current = original_current;
+                held.0 = original_held;
+            }
         }
 
         let edit = crate::network::BlockEdit::SetContainerSlot {
@@ -1458,6 +2073,149 @@ pub fn update_underwater_overlay(
     }
 }
 
+pub fn format_item(item: &crate::item::Item) -> String {
+    let mut s = item.name().to_string();
+    if let crate::item::Item::CastIngot(ingot) = item {
+        s.push_str(&format!(
+            "\nMass: {} g\nQuality: {:.1}%\nComposition:",
+            ingot.mass,
+            ingot.quality_permille as f32 / 10.0,
+        ));
+        for (index, mass) in ingot.composition.iter().copied().enumerate() {
+            if mass == 0 {
+                continue;
+            }
+            if let Some(element) = crate::chemistry::Element::from_index(index) {
+                s.push_str(&format!(
+                    "\n - {}: {} g ({:.1}%)",
+                    element.data().name,
+                    mass,
+                    mass as f32 / ingot.mass.max(1) as f32 * 100.0,
+                ));
+            }
+        }
+    }
+    if matches!(
+        item,
+        crate::item::Item::Block(crate::voxel::BlockType::CopperOre | crate::voxel::BlockType::IronOre)
+            | crate::item::Item::Material(
+                crate::item::MaterialType::Copper | crate::item::MaterialType::Iron
+            )
+    ) {
+        if let Some(composition) = crate::chemistry::get_item_composition(item) {
+            let total = crate::chemistry::composition_total_mass(item).unwrap_or(0);
+            s.push_str(&format!("\nSmelting yield: {total} g per item"));
+            for (element, mass) in composition {
+                s.push_str(&format!("\n - {}: {mass} g", element.data().name));
+            }
+        }
+    }
+    if let crate::item::Item::Crucible(crucible) = item {
+        s.push_str(&format!("\nTemp: {} C", crucible.temp));
+        s.push_str(&format!(
+            "\nLoad: {}/{} g",
+            crucible.total_mass(),
+            crate::chemistry::CRUCIBLE_CAPACITY_GRAMS,
+        ));
+        let mut empty = true;
+        let mut total_solid_mass = 0;
+        let mut solid_elements = [0; 8];
+        let mut weighted_temp_sum = 0.0;
+        
+        for c in &crucible.solid_contents {
+            if let Some(c) = c {
+                if let Some(stack) = c.to_stack() {
+                    empty = false;
+                    let count = stack.count.unwrap_or(1);
+                    s.push_str(&format!("\n - {} ({})", stack.item.name(), count));
+                    if let Some(comp) = crate::chemistry::get_item_composition(&stack.item) {
+                        for (element, mass) in comp {
+                            let total_item_mass = mass * (count as u32);
+                            total_solid_mass += total_item_mass;
+                            solid_elements[element as usize] += total_item_mass;
+                            weighted_temp_sum += (total_item_mass as f32) * (element.data().melting_point as f32);
+                        }
+                    }
+                }
+            }
+        }
+        
+        if total_solid_mass > 0 {
+            let avg_melting_point = (weighted_temp_sum / (total_solid_mass as f32)) as u16;
+            s.push_str(&format!("\nSolid mass: {total_solid_mass} g"));
+            s.push_str(&format!("\nMelting Point: {} C", avg_melting_point));
+            s.push_str("\nSolid Mix:");
+            for (i, &mass) in solid_elements.iter().enumerate() {
+                if mass > 0 {
+                    if let Some(element) = crate::chemistry::Element::from_index(i) {
+                        let percent = (mass as f32 / total_solid_mass as f32) * 100.0;
+                        s.push_str(&format!(
+                            "\n - {}: {} g ({:.1}%)",
+                            element.data().name,
+                            mass,
+                            percent
+                        ));
+                    }
+                }
+            }
+        }
+        let mut total_liquid = 0;
+        for mass in &crucible.liquid_mass {
+            total_liquid += mass;
+        }
+        if total_liquid > 0 {
+            s.push_str(&format!("\nLiquid mass: {total_liquid} g"));
+            s.push_str("\nLiquid Mix:");
+            for (i, &mass) in crucible.liquid_mass.iter().enumerate() {
+                if mass > 0 {
+                    if let Some(element) = crate::chemistry::Element::from_index(i) {
+                        let percent = (mass as f32 / total_liquid as f32) * 100.0;
+                        s.push_str(&format!(
+                            "\n - {}: {} g ({:.1}%)",
+                            element.data().name,
+                            mass,
+                            percent
+                        ));
+                        empty = false;
+                    }
+                }
+            }
+        }
+        if empty {
+            s.push_str("\n (Empty)");
+        }
+    }
+    s
+}
+
+pub fn furnace_button_interaction_system(
+    open_container: Res<crate::voxel::OpenContainer>,
+    q_add_air: Query<&Interaction, (Changed<Interaction>, With<FurnaceAddAirButton>)>,
+    net_server: Option<Res<bevy_renet::RenetServer>>,
+    net_client: Option<Res<bevy_renet::RenetClient>>,
+    mut net_out: ResMut<crate::network::PendingNetEdits>,
+    mut world: ResMut<crate::voxel::VoxelWorld>,
+) {
+    let Some(oc) = open_container.0 else { return };
+    if oc.kind != crate::voxel::BlockType::Furnace { return; }
+
+    for interaction in &q_add_air {
+        if *interaction == Interaction::Pressed {
+            let pos = oc.pos;
+            if let Some(ref client) = net_client {
+                if client.is_connected() {
+                    net_out.0.push_back((None, crate::network::BlockEdit::AddFurnaceAir { pos: pos.to_array() }));
+                }
+            } else if net_server.is_some() || net_client.is_none() {
+                // Host or Singleplayer: apply directly
+                if let Some(f) = world.get_furnace_data_mut(pos.x, pos.y, pos.z) {
+                    f.air_boost_time = (f.air_boost_time + 2.0).min(10.0);
+                }
+            }
+        }
+    }
+}
+
 /// โชว์ชื่อ item ใต้กริดตอนเมาส์ hover ช่องในหน้าต่าง E (ช่องเรา/palette/กล่อง)
 pub fn inventory_hover_name_system(
     open: Res<crate::voxel::InventoryOpen>,
@@ -1476,17 +2234,17 @@ pub fn inventory_hover_name_system(
         }
         return;
     }
-    let mut name: Option<&'static str> = None;
+    let mut name: Option<String> = None;
     for (slot, interaction) in &slot_query {
         if *interaction != Interaction::None {
-            name = hotbar.slots[slot.0].map(|s| s.item.name());
+            name = hotbar.slots[slot.0].map(|s| format_item(&s.item));
             break;
         }
     }
     if name.is_none() {
         for (pal, interaction) in &palette_query {
             if *interaction != Interaction::None {
-                name = crate::voxel::PLACEABLE_ITEMS.get(pal.0).map(|i| i.name());
+                name = crate::voxel::PLACEABLE_ITEMS.get(pal.0).map(|i| format_item(i));
                 break;
             }
         }
@@ -1501,11 +2259,17 @@ pub fn inventory_hover_name_system(
                     crate::voxel::BlockType::Chest => world
                         .get_chest_slots(oc.pos.x, oc.pos.y, oc.pos.z)
                         .and_then(|s| s.get(slot.0).copied().flatten())
-                        .map(|s| s.item.name()),
+                        .map(|s| format_item(&s.item)),
+                    crate::voxel::BlockType::Crucible => world
+                        .crucibles.get(&oc.pos)
+                        .and_then(|p| p.solid_contents.get(slot.0))
+                        .and_then(|c| c.as_ref())
+                        .and_then(|c| c.to_stack())
+                        .map(|s| format_item(&s.item)),
                     crate::voxel::BlockType::Furnace => world
-                        .get_furnace_slots(oc.pos.x, oc.pos.y, oc.pos.z)
-                        .and_then(|s| s.get(slot.0).copied().flatten())
-                        .map(|s| s.item.name()),
+                        .get_furnace_data(oc.pos.x, oc.pos.y, oc.pos.z)
+                        .and_then(|f| f.slots.get(slot.0).copied().flatten())
+                        .map(|s| format_item(&s.item)),
                     _ => None,
                 };
                 break;
@@ -1515,7 +2279,7 @@ pub fn inventory_hover_name_system(
     if let Ok((mut text, mut node, mut vis)) = hover_ui_query.single_mut() {
         if let Some(want) = name {
             if text.0 != want {
-                text.0 = want.to_string();
+                text.0 = want;
             }
             if *vis != Visibility::Visible {
                 *vis = Visibility::Visible;
@@ -1841,6 +2605,12 @@ pub fn setup_egui_theme(mut contexts: bevy_egui::EguiContexts, mut done: Local<b
     let Ok(ctx) = contexts.ctx_mut() else { return };
     *done = true;
     use bevy_egui::egui::{self, Color32, FontFamily, FontId, TextStyle};
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert("RD_CHULAJARUEK".to_owned(), std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/RD CHULAJARUEK.ttf"))));
+    fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "RD_CHULAJARUEK".to_owned());
+    fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "RD_CHULAJARUEK".to_owned());
+    ctx.set_fonts(fonts);
 
     // egui 0.35: style แยกตาม light/dark theme — all_styles_mut ทาให้ทั้งคู่
     ctx.all_styles_mut(|style| {
@@ -2633,15 +3403,101 @@ pub fn update_mode_text(
 pub fn update_block_target_text(
     target: Res<crate::voxel::TargetedBlock>,
     selected: Res<crate::voxel::SelectedBlock>,
+    world: Res<crate::voxel::VoxelWorld>,
+    settings: Res<crate::GameSettings>,
+    weather: Res<crate::weather::Weather>,
     mut text_query: Query<&mut Text, With<BlockIdText>>,
 ) {
     if let Ok(mut text) = text_query.single_mut() {
         let looking_at = match target.0 {
-            Some(hit) => crate::voxel::block_name(hit.block),
-            None => "None",
+            Some(hit) if hit.block == crate::voxel::BlockType::IngotMold => {
+                let data = world.ingot_molds.get(&hit.pos).copied().unwrap_or_default();
+                let mass = data.total_mass();
+                let capacity = crate::chemistry::INGOT_MOLD_CAPACITY_GRAMS;
+                let percent = mass as f32 / capacity as f32 * 100.0;
+                let metal_temp =
+                    crate::thermodynamics::unpack_temperature(data.temp, data.temp_acc);
+                let ambient = crate::thermodynamics::outdoor_temperature_celsius(
+                    hit.pos.as_vec3() + Vec3::splat(0.5),
+                    &settings,
+                    &weather,
+                );
+                let melting_point = crate::chemistry::liquid_melting_point(&data.metal_mass);
+                let state = match melting_point {
+                    None => "Empty",
+                    Some(point) if metal_temp >= point as f32 => "Liquid",
+                    Some(point) if metal_temp + 50.0 >= point as f32 => "Solidifying",
+                    Some(_) => "Solid",
+                };
+                let extraction = if crate::chemistry::mold_ready_to_extract(&data) {
+                    "Ready — right-click with empty hand"
+                } else if mass < crate::chemistry::MIN_CAST_INGOT_MASS_GRAMS {
+                    "Not ready — less than 100 g"
+                } else if metal_temp > crate::chemistry::INGOT_SAFE_REMOVAL_TEMP_C {
+                    "Not ready — hotter than 200 C"
+                } else {
+                    "Not ready — metal is not solid"
+                };
+                let mut details = format!(
+                    "{} @ [{}, {}, {}]\nMass: {}/{} g ({:.1}%)\nMetal: {:.1} C | Ambient: {:.1} C\nState: {}\nExtraction: {}",
+                    crate::voxel::block_name(hit.block),
+                    hit.pos.x,
+                    hit.pos.y,
+                    hit.pos.z,
+                    mass,
+                    capacity,
+                    percent,
+                    metal_temp,
+                    ambient,
+                    state,
+                    extraction,
+                );
+                if let Some(point) = melting_point {
+                    details.push_str(&format!(" | Melt point: {} C", point));
+                }
+                if mass > 0 {
+                    details.push_str("\nComposition:");
+                    for (index, element_mass) in data.metal_mass.iter().copied().enumerate() {
+                        if element_mass == 0 {
+                            continue;
+                        }
+                        if let Some(element) = crate::chemistry::Element::from_index(index) {
+                            details.push_str(&format!(
+                                "\n  {}: {} g ({:.1}%)",
+                                element.data().name,
+                                element_mass,
+                                element_mass as f32 / mass as f32 * 100.0,
+                            ));
+                        }
+                    }
+                }
+                details
+            }
+            Some(hit) if hit.block == crate::voxel::BlockType::Crucible => {
+                let mass = world
+                    .crucibles
+                    .get(&hit.pos)
+                    .map_or(0, |c| c.liquid_mass.iter().copied().sum::<u32>());
+                format!("{} — liquid {} g", crate::voxel::block_name(hit.block), mass)
+            }
+            Some(hit) if hit.block == crate::voxel::BlockType::CastIngot => {
+                if let Some(ingot) = world.placed_ingots.get(&hit.pos) {
+                    format!(
+                        "{} — {} g | {} | quality {:.1}%",
+                        crate::voxel::block_name(hit.block),
+                        ingot.mass,
+                        ingot.kind.name(),
+                        ingot.quality_permille as f32 / 10.0,
+                    )
+                } else {
+                    crate::voxel::block_name(hit.block).to_string()
+                }
+            }
+            Some(hit) => crate::voxel::block_name(hit.block).to_string(),
+            None => "None".to_string(),
         };
         text.0 = format!(
-            "Block: {} | Place [1-9]: {}",
+            "Block: {}\nPlace [1-9]: {}",
             looking_at,
             crate::voxel::block_name(selected.0)
         );
@@ -3431,4 +4287,14 @@ pub fn egui_settings_system(
         ui.label("ESC: pause | F: fly/walk | F5: 3rd person | F3: debug | 1-9/scroll: hotbar");
         ui.label("E: inventory | Q: drop item | T or /: chat | middle click: pick block | hold Chisel: sub-voxel");
     });
+}
+
+pub fn apply_custom_font(
+    mut fonts: Query<&mut TextFont, Added<TextFont>>,
+    asset_server: Res<AssetServer>,
+) {
+    let custom_font = asset_server.load("fonts/RD CHULAJARUEK.ttf");
+    for mut text_font in &mut fonts {
+        text_font.font = bevy::text::FontSource::Handle(custom_font.clone());
+    }
 }

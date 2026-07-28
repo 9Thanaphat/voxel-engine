@@ -1,0 +1,407 @@
+--- EDIT IN ui.rs ---
+{
+  "Description": "Adding marker components for Furnace UI buttons and temp text, modifying FurnacePanel layout to include them, and adding fuel restrictions to container_click_system.",
+  "Instruction": "Add components, UI nodes, and logic for the Furnace GUI updates",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 125,
+      "ReplacementContent": "/// \u0e01\u0e23\u0e34\u0e14 Furnace \u0e40\u0e09\u0e1e\u0e32\u0e30 (input/fuel \u2192 output) \u2014 \u0e2a\u0e25\u0e31\u0e1a\u0e42\u0e0a\u0e27\u0e4c\u0e01\u0e31\u0e1a ContainerPanel\n#[derive(Component)]\npub struct FurnacePanel;\n\n#[derive(Component)]\npub struct FurnaceIgniteButton;\n\n#[derive(Component)]\npub struct FurnaceAddAirButton;\n\n#[derive(Component)]\npub struct FurnaceTempText;",
+      "StartLine": 123,
+      "TargetContent": "/// \u0e01\u0e23\u0e34\u0e14 Furnace \u0e40\u0e09\u0e1e\u0e32\u0e30 (input/fuel \u2192 output) \u2014 \u0e2a\u0e25\u0e31\u0e1a\u0e42\u0e0a\u0e27\u0e4c\u0e01\u0e31\u0e1a ContainerPanel\n#[derive(Component)]\npub struct FurnacePanel;"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 690,
+      "ReplacementContent": "                let slot_label = |p: &mut bevy::ecs::relationship::RelatedSpawnerCommands<ChildOf>, text: &str| {\n                    p.spawn((\n                        Text::new(text),\n                        TextFont { font_size: bevy::text::FontSize::Px(13.0), ..default() },\n                        TextColor(Color::srgba(0.8, 0.8, 0.8, 0.9)),\n                    ));\n                };\n                panel\n                    .spawn((\n                        Node {\n                            flex_direction: FlexDirection::Column,\n                            align_items: AlignItems::Center,\n                            row_gap: Val::Px(10.0),\n                            margin: UiRect::bottom(Val::Px(10.0)),\n                            ..default()\n                        },\n                        FurnacePanel,\n                        Visibility::Hidden,\n                    ))\n                    .with_children(|f| {\n                        f.spawn(Node {\n                            flex_direction: FlexDirection::Row,\n                            align_items: AlignItems::Center,\n                            column_gap: Val::Px(14.0),\n                            ..default()\n                        })\n                        .with_children(|row| {\n                            row.spawn(Node {\n                                flex_direction: FlexDirection::Column,\n                                align_items: AlignItems::Center,\n                                row_gap: Val::Px(4.0),\n                                ..default()\n                            })\n                            .with_children(|c| {\n                                slot_label(c, \"Input\");\n                                spawn_container_slot(c, 0);\n                                slot_label(c, \"Fuel\");\n                                spawn_container_slot(c, 1);\n                            });\n                            row.spawn((\n                                Text::new(\">\"),\n                                TextFont { font_size: bevy::text::FontSize::Px(30.0), ..default() },\n                                TextColor(Color::srgba(1.0, 0.85, 0.2, 0.9)),\n                            ));\n                            row.spawn(Node {\n                                flex_direction: FlexDirection::Column,\n                                align_items: AlignItems::Center,\n                                row_gap: Val::Px(4.0),\n                                ..default()\n                            })\n                            .with_children(|c| {\n                                slot_label(c, \"Output\");\n                                spawn_container_slot(c, 2);\n                            });\n                        });\n                        \n                        f.spawn((\n                            Text::new(\"Temp: 25 \u00b0C\"),\n                            TextFont { font_size: bevy::text::FontSize::Px(16.0), ..default() },\n                            TextColor(Color::srgba(1.0, 0.5, 0.2, 1.0)),\n                            FurnaceTempText,\n                        ));\n\n                        f.spawn(Node {\n                            flex_direction: FlexDirection::Row,\n                            align_items: AlignItems::Center,\n                            column_gap: Val::Px(10.0),\n                            ..default()\n                        })\n                        .with_children(|ctrls| {\n                            ctrls.spawn((\n                                Button,\n                                Node {\n                                    padding: UiRect::all(Val::Px(5.0)),\n                                    border: UiRect::all(Val::Px(1.0)),\n                                    ..default()\n                                },\n                                BorderColor(Color::srgba(0.5, 0.5, 0.5, 1.0)),\n                                BackgroundColor(Color::srgba(0.2, 0.2, 0.2, 1.0)),\n                                FurnaceIgniteButton,\n                            ))\n                            .with_children(|btn| {\n                                btn.spawn((\n                                    Text::new(\"\u0e08\u0e38\u0e14\u0e44\u0e1f (Ignite)\"),\n                                    TextFont { font_size: bevy::text::FontSize::Px(14.0), ..default() },\n                                ));\n                            });\n\n                            ctrls.spawn((\n                                Button,\n                                Node {\n                                    padding: UiRect::all(Val::Px(5.0)),\n                                    border: UiRect::all(Val::Px(1.0)),\n                                    ..default()\n                                },\n                                BorderColor(Color::srgba(0.5, 0.5, 0.5, 1.0)),\n                                BackgroundColor(Color::srgba(0.2, 0.2, 0.2, 1.0)),\n                                FurnaceAddAirButton,\n                            ))\n                            .with_children(|btn| {\n                                btn.spawn((\n                                    Text::new(\"Add Air\"),\n                                    TextFont { font_size: bevy::text::FontSize::Px(14.0), ..default() },\n                                ));\n                            });\n                        });\n                    });",
+      "StartLine": 643,
+      "TargetContent": "                let slot_label = |p: &mut bevy::ecs::relationship::RelatedSpawnerCommands<ChildOf>, text: &str| {\n                    p.spawn((\n                        Text::new(text),\n                        TextFont { font_size: bevy::text::FontSize::Px(13.0), ..default() },\n                        TextColor(Color::srgba(0.8, 0.8, 0.8, 0.9)),\n                    ));\n                };\n                panel\n                    .spawn((\n                        Node {\n                            flex_direction: FlexDirection::Row,\n                            align_items: AlignItems::Center,\n                            column_gap: Val::Px(14.0),\n                            margin: UiRect::bottom(Val::Px(10.0)),\n                            ..default()\n                        },\n                        FurnacePanel,\n                        Visibility::Hidden,\n                    ))\n                    .with_children(|f| {\n                        f.spawn(Node {\n                            flex_direction: FlexDirection::Column,\n                            align_items: AlignItems::Center,\n                            row_gap: Val::Px(4.0),\n                            ..default()\n                        })\n                        .with_children(|c| {\n                            slot_label(c, \"Input\");\n                            spawn_container_slot(c, 0);\n                            slot_label(c, \"Fuel\");\n                            spawn_container_slot(c, 1);\n                        });\n                        f.spawn((\n                            Text::new(\">\"),\n                            TextFont { font_size: bevy::text::FontSize::Px(30.0), ..default() },\n                            TextColor(Color::srgba(1.0, 0.85, 0.2, 0.9)),\n                        ));\n                        f.spawn(Node {\n                            flex_direction: FlexDirection::Column,\n                            align_items: AlignItems::Center,\n                            row_gap: Val::Px(4.0),\n                            ..default()\n                        })\n                        .with_children(|c| {\n                            slot_label(c, \"Output\");\n                            spawn_container_slot(c, 2);\n                        });\n                    });"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 1627,
+      "ReplacementContent": "        let idx = slot.0;\n        if idx >= capacity {\n            continue;\n        }\n\n        if oc.kind == crate::voxel::BlockType::Furnace && idx == 1 {\n            if let Some(held_stack) = held.0 {\n                if !held_stack.item.is_fuel() {\n                    continue; // Skip placement if not a fuel item\n                }\n            }\n        }",
+      "StartLine": 1624,
+      "TargetContent": "        let idx = slot.0;\n        if idx >= capacity {\n            continue;\n        }"
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Updating ui.rs",
+  "toolSummary": "Update ui.rs with Furnace GUI and fuel checks"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "AllowMultiple": true,
+  "Description": "Fixing BorderColor instantiation by using BorderColor::all",
+  "EndLine": 749,
+  "Instruction": "Change BorderColor to BorderColor::all",
+  "ReplacementContent": "                                BorderColor::all(Color::srgba(0.5, 0.5, 0.5, 1.0)),",
+  "StartLine": 729,
+  "TargetContent": "                                BorderColor(Color::srgba(0.5, 0.5, 0.5, 1.0)),",
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Fixing BorderColor in ui.rs",
+  "toolSummary": "Fix BorderColor usage in ui.rs"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Fix Item::Pot matching in ui.rs",
+  "Instruction": "Update Item::Pot usage with CrucibleData",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 1876,
+      "ReplacementContent": "        if let crate::item::Item::Pot(crucible) = item {\n            let mut empty = true;\n            for c in &crucible.solid_contents {",
+      "StartLine": 1874,
+      "TargetContent": "        if let crate::item::Item::Pot(contents) = item {\n            let mut empty = true;\n            for c in contents {"
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Updating ui.rs",
+  "toolSummary": "Fix Pot matching in ui.rs"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Update Furnace UI to 2 slots",
+  "Instruction": "Update capacity and copy slice for Furnace to 2 slots",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 1618,
+      "ReplacementContent": "        crate::voxel::BlockType::Furnace => {\n            if let Some(f) = world.get_furnace_slots(oc.pos.x, oc.pos.y, oc.pos.z) {\n                slots[..2].copy_from_slice(f);\n            }\n        }",
+      "StartLine": 1615,
+      "TargetContent": "        crate::voxel::BlockType::Furnace => {\n            if let Some(f) = world.get_furnace_slots(oc.pos.x, oc.pos.y, oc.pos.z) {\n                slots[..3].copy_from_slice(f);\n            }\n        }"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 1686,
+      "ReplacementContent": "    let capacity: usize = if oc.kind == crate::voxel::BlockType::Chest { 27 } else if oc.kind == crate::voxel::BlockType::Pot { 9 } else { 2 };",
+      "StartLine": 1686,
+      "TargetContent": "    let capacity: usize = if oc.kind == crate::voxel::BlockType::Chest { 27 } else if oc.kind == crate::voxel::BlockType::Pot { 9 } else { 3 };"
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Updating ui.rs",
+  "toolSummary": "Update Furnace UI to 2 slots"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Fix UI pot accessing",
+  "Instruction": "Update ui.rs to use CrucibleData from world.pots",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 1624,
+      "ReplacementContent": "        crate::voxel::BlockType::Pot => {\n            if let Some(p) = world.pots.get(&oc.pos) {\n                for i in 0..9 {\n                    slots[i] = p.solid_contents[i].and_then(|s| s.to_stack());\n                }\n            }\n        }",
+      "StartLine": 1620,
+      "TargetContent": "        crate::voxel::BlockType::Pot => {\n            if let Some(p) = world.pots.get(&oc.pos) {\n                slots[..9].copy_from_slice(p);\n            }\n        }"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 1711,
+      "ReplacementContent": "            crate::voxel::BlockType::Pot => {\n                world.pots.get(&oc.pos).and_then(|p| p.solid_contents[idx].and_then(|s| s.to_stack()))\n            }",
+      "StartLine": 1709,
+      "TargetContent": "            crate::voxel::BlockType::Pot => {\n                world.pots.get(&oc.pos).and_then(|s| s[idx])\n            }"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 1927,
+      "ReplacementContent": "                    crate::voxel::BlockType::Pot => world\n                        .pots.get(&oc.pos)\n                        .and_then(|p| p.solid_contents[idx].and_then(|s| s.to_stack()))",
+      "StartLine": 1925,
+      "TargetContent": "                    crate::voxel::BlockType::Pot => world\n                        .pots.get(&oc.pos)\n                        .and_then(|s| s[idx])"
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Fixing ui.rs",
+  "toolSummary": "Update ui.rs for CrucibleData"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Fix ui.rs item preview for Pot",
+  "Instruction": "Update item preview for Pot",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 1930,
+      "ReplacementContent": "                    crate::voxel::BlockType::Pot => world\n                        .pots.get(&oc.pos)\n                        .and_then(|p| p.solid_contents.get(slot.0).copied().flatten())\n                        .and_then(|s| s.to_stack())\n                        .map(|s| s.item),",
+      "StartLine": 1927,
+      "TargetContent": "                    crate::voxel::BlockType::Pot => world\n                        .pots.get(&oc.pos)\n                        .and_then(|s| s.get(slot.0).copied().flatten())\n                        .map(|s| s.item),"
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Fixing item preview in ui.rs",
+  "toolSummary": "Fix Pot item preview in ui.rs"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Update format_item for Pot",
+  "Instruction": "Add temperature and liquid mass to Pot tooltip",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 1890,
+      "ReplacementContent": "        if let crate::item::Item::Pot(crucible) = item {\n            s.push_str(&format!(\"\\nTemp: {}\u00b0C\", crucible.temp));\n            let mut empty = true;\n            for c in &crucible.solid_contents {\n                if let Some(c) = c {\n                    if let Some(stack) = c.to_stack() {\n                        empty = false;\n                        let count = stack.count.unwrap_or(1);\n                        s.push_str(&format!(\"\\n - {} ({})\", stack.item.name(), count));\n                    }\n                }\n            }\n            let mut total_liquid = 0;\n            for mass in &crucible.liquid_mass {\n                total_liquid += mass;\n            }\n            if total_liquid > 0 {\n                s.push_str(\"\\nLiquid:\");\n                for (i, &mass) in crucible.liquid_mass.iter().enumerate() {\n                    if mass > 0 {\n                        let element: crate::chemistry::Element = unsafe { std::mem::transmute(i as u8) };\n                        let percent = (mass as f32 / total_liquid as f32) * 100.0;\n                        s.push_str(&format!(\"\\n - {:?} ({:.1}%)\", element, percent));\n                        empty = false;\n                    }\n                }\n            }\n            if empty {\n                s.push_str(\"\\n (Empty)\");\n            }\n        }",
+      "StartLine": 1876,
+      "TargetContent": "        if let crate::item::Item::Pot(crucible) = item {\n            let mut empty = true;\n            for c in &crucible.solid_contents {\n                if let Some(c) = c {\n                    if let Some(stack) = c.to_stack() {\n                        empty = false;\n                        let count = stack.count.unwrap_or(1);\n                        s.push_str(&format!(\"\\n - {} ({})\", stack.item.name(), count));\n                    }\n                }\n            }\n            if empty {\n                s.push_str(\"\\n (Empty)\");\n            }\n        }"
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Updating format_item",
+  "toolSummary": "Update Pot tooltip to show liquid"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Update FurnaceTempText",
+  "Instruction": "Update FurnaceTempText in update_container_ui",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 1581,
+      "ReplacementContent": "    mut icon_query: Query<(Entity, &ContainerSlotIcon, &mut BackgroundColor), Without<HeldStackIcon>>,\n    mut temp_text_query: Query<&mut Text, With<FurnaceTempText>>,\n    mut count_query: Query<(&ContainerSlotCount, &mut Text), Without<FurnaceTempText>>,",
+      "StartLine": 1580,
+      "TargetContent": "    mut icon_query: Query<(Entity, &ContainerSlotIcon, &mut BackgroundColor), Without<HeldStackIcon>>,\n    mut count_query: Query<(&ContainerSlotCount, &mut Text)>,"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 1627,
+      "ReplacementContent": "        crate::voxel::BlockType::Furnace => {\n            if let Some(f) = world.get_furnace_data_mut(oc.pos.x, oc.pos.y, oc.pos.z) {\n                slots[..2].copy_from_slice(&f.slots);\n                for mut text in &mut temp_text_query {\n                    let s = format!(\"Temp: {:.0} \u00b0C\", f.current_temp);\n                    if text.0 != s { text.0 = s; }\n                }\n            }\n        }\n        crate::voxel::BlockType::Pot => {",
+      "StartLine": 1615,
+      "TargetContent": "        crate::voxel::BlockType::Furnace => {\n            if let Some(f) = world.get_furnace_slots(oc.pos.x, oc.pos.y, oc.pos.z) {\n                slots[..2].copy_from_slice(f);\n            }\n        }\n        crate::voxel::BlockType::Pot => {"
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Updating ui.rs",
+  "toolSummary": "Update FurnaceTempText logic in ui.rs"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Fix get_furnace_data usage",
+  "Instruction": "Use get_furnace_data instead of mut in ui.rs",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 1617,
+      "ReplacementContent": "        crate::voxel::BlockType::Furnace => {\n            if let Some(f) = world.get_furnace_data(oc.pos.x, oc.pos.y, oc.pos.z) {",
+      "StartLine": 1615,
+      "TargetContent": "        crate::voxel::BlockType::Furnace => {\n            if let Some(f) = world.get_furnace_data_mut(oc.pos.x, oc.pos.y, oc.pos.z) {"
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Fixing ui.rs",
+  "toolSummary": "Fix get_furnace_data usage in ui.rs"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Remove slot 2 from FurnacePanel",
+  "Instruction": "Remove Output slot from FurnacePanel in ui.rs",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 706,
+      "ReplacementContent": "                            row.spawn(Node {\n                                flex_direction: FlexDirection::Column,\n                                align_items: AlignItems::Center,\n                                row_gap: Val::Px(4.0),\n                                ..default()\n                            })\n                            .with_children(|c| {\n                                slot_label(c, \"Input (Pot)\");\n                                spawn_container_slot(c, 0);\n                            });\n                            row.spawn(Node {\n                                flex_direction: FlexDirection::Column,\n                                align_items: AlignItems::Center,\n                                row_gap: Val::Px(4.0),\n                                ..default()\n                            })\n                            .with_children(|c| {\n                                slot_label(c, \"Fuel\");\n                                spawn_container_slot(c, 1);\n                            });\n                        });",
+      "StartLine": 679,
+      "TargetContent": "                            row.spawn(Node {\n                                flex_direction: FlexDirection::Column,\n                                align_items: AlignItems::Center,\n                                row_gap: Val::Px(4.0),\n                                ..default()\n                            })\n                            .with_children(|c| {\n                                slot_label(c, \"Input\");\n                                spawn_container_slot(c, 0);\n                                slot_label(c, \"Fuel\");\n                                spawn_container_slot(c, 1);\n                            });\n                            row.spawn((\n                                Text::new(\">\"),\n                                TextFont { font_size: bevy::text::FontSize::Px(30.0), ..default() },\n                                TextColor(Color::srgba(1.0, 0.85, 0.2, 0.9)),\n                            ));\n                            row.spawn(Node {\n                                flex_direction: FlexDirection::Column,\n                                align_items: AlignItems::Center,\n                                row_gap: Val::Px(4.0),\n                                ..default()\n                            })\n                            .with_children(|c| {\n                                slot_label(c, \"Output\");\n                                spawn_container_slot(c, 2);\n                            });\n                        });"
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Removing slot 2",
+  "toolSummary": "Remove output slot from FurnacePanel in ui.rs"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Add furnace button logic",
+  "Instruction": "Add furnace_button_interaction_system in ui.rs",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 1731,
+      "ReplacementContent": "        } else if left {\n            // ... (keep rest unchanged)\n",
+      "StartLine": 1730,
+      "TargetContent": "        } else if left {"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 3942,
+      "ReplacementContent": "pub fn inventory_click_system(\n    // existing system...",
+      "StartLine": 3942,
+      "TargetContent": "pub fn inventory_click_system("
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Updating ui.rs",
+  "toolSummary": "Add furnace button logic in ui.rs"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Revert inventory_click_system",
+  "Instruction": "Revert the incorrect modification of inventory_click_system",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 1363,
+      "ReplacementContent": "pub fn inventory_click_system(\n    open: Res<crate::voxel::InventoryOpen>,",
+      "StartLine": 1361,
+      "TargetContent": "pub fn inventory_click_system(\n    // existing system...\n    open: Res<crate::voxel::InventoryOpen>,"
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Reverting mistake",
+  "toolSummary": "Revert mistake in ui.rs"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Add furnace button system",
+  "Instruction": "Add furnace_button_interaction_system to the end of ui.rs",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 3940,
+      "ReplacementContent": "\n\npub fn furnace_button_interaction_system(\n    open_container: Res<crate::voxel::OpenContainer>,\n    q_add_air: Query<&Interaction, (Changed<Interaction>, With<FurnaceAddAirButton>)>,\n    (net_server, net_client, mut net_out): (\n        Option<Res<bevy_renet::RenetServer>>,\n        Option<Res<bevy_renet::RenetClient>>,\n        ResMut<crate::network::PendingNetEdits>,\n    ),\n    mut world: ResMut<crate::voxel::VoxelWorld>,\n) {\n    let Some(oc) = open_container.0 else { return };\n    if oc.kind != crate::voxel::BlockType::Furnace { return; }\n\n    for interaction in &q_add_air {\n        if *interaction == Interaction::Pressed {\n            let pos = oc.pos;\n            if let Some(ref client) = net_client {\n                if client.is_connected() {\n                    net_out.0.push_back((None, crate::network::BlockEdit::AddFurnaceAir { pos: pos.to_array() }));\n                }\n            } else if net_server.is_some() || net_client.is_none() {\n                // Host or Singleplayer: apply directly\n                if let Some(f) = world.get_furnace_data_mut(pos.x, pos.y, pos.z) {\n                    f.air_boost_time = (f.air_boost_time + 2.0).min(10.0);\n                }\n            }\n        }\n    }\n}",
+      "StartLine": 3940,
+      "TargetContent": ""
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Appending furnace_button_interaction_system",
+  "toolSummary": "Add furnace_button_interaction_system to ui.rs"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Add FurnaceFuelText",
+  "Instruction": "Add FurnaceFuelText in ui.rs",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 134,
+      "ReplacementContent": "pub struct FurnaceTempText;\n#[derive(Component)]\npub struct FurnaceFuelText;",
+      "StartLine": 133,
+      "TargetContent": "pub struct FurnaceTempText;"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 707,
+      "ReplacementContent": "                        f.spawn((\n                            Text::new(\"Temp: 25 \u00b0C\"),\n                            TextFont { font_size: bevy::text::FontSize::Px(16.0), ..default() },\n                            TextColor(Color::srgba(1.0, 0.5, 0.2, 1.0)),\n                            FurnaceTempText,\n                        ));\n                        f.spawn((\n                            Text::new(\"Fuel: 0%\"),\n                            TextFont { font_size: bevy::text::FontSize::Px(16.0), ..default() },\n                            TextColor(Color::srgba(0.8, 0.8, 0.2, 1.0)),\n                            FurnaceFuelText,\n                        ));",
+      "StartLine": 701,
+      "TargetContent": "                        f.spawn((\n                            Text::new(\"Temp: 25 \u00b0C\"),\n                            TextFont { font_size: bevy::text::FontSize::Px(16.0), ..default() },\n                            TextColor(Color::srgba(1.0, 0.5, 0.2, 1.0)),\n                            FurnaceTempText,\n                        ));"
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Updating UI for fuel",
+  "toolSummary": "Add FurnaceFuelText to ui.rs"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Update Furnace fuel UI and smelting temp rate",
+  "Instruction": "Query FurnaceFuelText and update it, slow down smelting temperature",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 1584,
+      "ReplacementContent": "    mut icon_query: Query<(Entity, &ContainerSlotIcon, &mut BackgroundColor), Without<HeldStackIcon>>,\n    mut temp_text_query: Query<&mut Text, (With<FurnaceTempText>, Without<FurnaceFuelText>, Without<ContainerSlotCount>)>,\n    mut fuel_text_query: Query<&mut Text, (With<FurnaceFuelText>, Without<FurnaceTempText>, Without<ContainerSlotCount>)>,\n    mut count_query: Query<(&ContainerSlotCount, &mut Text), (Without<FurnaceTempText>, Without<FurnaceFuelText>)>,\n) {",
+      "StartLine": 1581,
+      "TargetContent": "    mut icon_query: Query<(Entity, &ContainerSlotIcon, &mut BackgroundColor), Without<HeldStackIcon>>,\n    mut temp_text_query: Query<&mut Text, With<FurnaceTempText>>,\n    mut count_query: Query<(&ContainerSlotCount, &mut Text), Without<FurnaceTempText>>,\n) {"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 1625,
+      "ReplacementContent": "        crate::voxel::BlockType::Furnace => {\n            if let Some(f) = world.get_furnace_data(oc.pos.x, oc.pos.y, oc.pos.z) {\n                slots[..2].copy_from_slice(&f.slots);\n                for mut text in &mut temp_text_query {\n                    let s = format!(\"Temp: {:.0} \u00b0C\", f.current_temp);\n                    if text.0 != s { text.0 = s; }\n                }\n                for mut text in &mut fuel_text_query {\n                    let s = format!(\"Fuel: {:.0}\", f.active_fuel_energy);\n                    if text.0 != s { text.0 = s; }\n                }\n            }\n        }",
+      "StartLine": 1617,
+      "TargetContent": "        crate::voxel::BlockType::Furnace => {\n            if let Some(f) = world.get_furnace_data(oc.pos.x, oc.pos.y, oc.pos.z) {\n                slots[..2].copy_from_slice(&f.slots);\n                for mut text in &mut temp_text_query {\n                    let s = format!(\"Temp: {:.0} \u00b0C\", f.current_temp);\n                    if text.0 != s { text.0 = s; }\n                }\n            }\n        }"
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Updating update_container_ui",
+  "toolSummary": "Update ui.rs to display fuel text"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Remove Thai in UI and add Status text",
+  "Instruction": "Remove Thai text, add FurnaceStatusText",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 137,
+      "ReplacementContent": "#[derive(Component)]\npub struct FurnaceFuelText;\n#[derive(Component)]\npub struct FurnaceStatusText;",
+      "StartLine": 134,
+      "TargetContent": "#[derive(Component)]\npub struct FurnaceFuelText;"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 710,
+      "ReplacementContent": "                        f.spawn((\n                            Text::new(\"Fuel: 0\"),\n                            TextFont { font_size: bevy::text::FontSize::Px(16.0), ..default() },\n                            TextColor(Color::srgba(0.8, 0.8, 0.2, 1.0)),\n                            FurnaceFuelText,\n                        ));\n                        f.spawn((\n                            Text::new(\"Status: Idle\"),\n                            TextFont { font_size: bevy::text::FontSize::Px(16.0), ..default() },\n                            TextColor(Color::srgba(0.8, 0.8, 0.8, 1.0)),\n                            FurnaceStatusText,\n                        ));",
+      "StartLine": 705,
+      "TargetContent": "                        f.spawn((\n                            Text::new(\"Fuel: 0%\"),\n                            TextFont { font_size: bevy::text::FontSize::Px(16.0), ..default() },\n                            TextColor(Color::srgba(0.8, 0.8, 0.2, 1.0)),\n                            FurnaceFuelText,\n                        ));"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 736,
+      "ReplacementContent": "                            .with_children(|btn| {\n                                btn.spawn((\n                                    Text::new(\"Ignite\"),\n                                    TextFont { font_size: bevy::text::FontSize::Px(14.0), ..default() },\n                                ));\n                            });",
+      "StartLine": 731,
+      "TargetContent": "                            .with_children(|btn| {\n                                btn.spawn((\n                                    Text::new(\"\u0e08\u0e38\u0e14\u0e44\u0e1f (Ignite)\"),\n                                    TextFont { font_size: bevy::text::FontSize::Px(14.0), ..default() },\n                                ));\n                            });"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 1584,
+      "ReplacementContent": "    mut icon_query: Query<(Entity, &ContainerSlotIcon, &mut BackgroundColor), Without<HeldStackIcon>>,\n    mut temp_text_query: Query<&mut Text, (With<FurnaceTempText>, Without<FurnaceFuelText>, Without<FurnaceStatusText>, Without<ContainerSlotCount>)>,\n    mut fuel_text_query: Query<&mut Text, (With<FurnaceFuelText>, Without<FurnaceTempText>, Without<FurnaceStatusText>, Without<ContainerSlotCount>)>,\n    mut status_text_query: Query<&mut Text, (With<FurnaceStatusText>, Without<FurnaceTempText>, Without<FurnaceFuelText>, Without<ContainerSlotCount>)>,\n    mut count_query: Query<(&ContainerSlotCount, &mut Text), (Without<FurnaceTempText>, Without<FurnaceFuelText>, Without<FurnaceStatusText>)>,\n) {",
+      "StartLine": 1579,
+      "TargetContent": "    mut icon_query: Query<(Entity, &ContainerSlotIcon, &mut BackgroundColor), Without<HeldStackIcon>>,\n    mut temp_text_query: Query<&mut Text, (With<FurnaceTempText>, Without<FurnaceFuelText>, Without<ContainerSlotCount>)>,\n    mut fuel_text_query: Query<&mut Text, (With<FurnaceFuelText>, Without<FurnaceTempText>, Without<ContainerSlotCount>)>,\n    mut count_query: Query<(&ContainerSlotCount, &mut Text), (Without<FurnaceTempText>, Without<FurnaceFuelText>)>,\n) {"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 1625,
+      "ReplacementContent": "        crate::voxel::BlockType::Furnace => {\n            if let Some(f) = world.get_furnace_data(oc.pos.x, oc.pos.y, oc.pos.z) {\n                slots[..2].copy_from_slice(&f.slots);\n                \n                let mut status_str = \"Status: Idle\".to_string();\n                if f.active_fuel_energy > 0.0 {\n                    status_str = \"Status: Heating\".to_string();\n                }\n                \n                if let Some(ref input_slot) = f.slots[0] {\n                    if let crate::item::Item::Pot(ref pot_data) = input_slot.item {\n                        // calculate average melting point just like in smelting.rs\n                        let mut total_mass = 0;\n                        let mut weighted_temp_sum: f32 = 0.0;\n                        let mut has_solids = false;\n                        for s in &pot_data.solid_contents {\n                            if let Some(item) = s {\n                                has_solids = true;\n                                if let Some(stack) = item.to_stack() {\n                                    if let Some(comp) = crate::chemistry::get_item_composition(&stack.item) {\n                                        for (element, mass) in comp {\n                                            total_mass += mass;\n                                            weighted_temp_sum += (mass as f32) * (element.data().melting_point as f32);\n                                        }\n                                    }\n                                }\n                            }\n                        }\n                        if has_solids && total_mass > 0 {\n                            let avg_melting_point = (weighted_temp_sum / (total_mass as f32)) as u16;\n                            if pot_data.temp >= avg_melting_point {\n                                status_str = \"Status: Melting!\".to_string();\n                            } else if pot_data.temp > 25 {\n                                status_str = format!(\"Status: Heating to {} \u00b0C\", avg_melting_point);\n                            }\n                        } else {\n                            // If no solids, check liquid\n                            let has_liquid = pot_data.liquid_mass.iter().any(|&m| m > 0);\n                            if has_liquid {\n                                status_str = \"Status: Liquid ready\".to_string();\n                            }\n                        }\n                    }\n                }\n\n                for mut text in &mut temp_text_query {\n                    let s = format!(\"Temp: {:.0} \u00b0C\", f.current_temp);\n                    if text.0 != s { text.0 = s; }\n                }\n                for mut text in &mut fuel_text_query {\n                    let s = format!(\"Fuel: {:.0}\", f.active_fuel_energy);\n                    if text.0 != s { text.0 = s; }\n                }\n                for mut text in &mut status_text_query {\n                    if text.0 != status_str { text.0 = status_str.clone(); }\n                }\n            }\n        }",
+      "StartLine": 1613,
+      "TargetContent": "        crate::voxel::BlockType::Furnace => {\n            if let Some(f) = world.get_furnace_data(oc.pos.x, oc.pos.y, oc.pos.z) {\n                slots[..2].copy_from_slice(&f.slots);\n                for mut text in &mut temp_text_query {\n                    let s = format!(\"Temp: {:.0} \u00b0C\", f.current_temp);\n                    if text.0 != s { text.0 = s; }\n                }\n                for mut text in &mut fuel_text_query {\n                    let s = format!(\"Fuel: {:.0}\", f.active_fuel_energy);\n                    if text.0 != s { text.0 = s; }\n                }\n            }\n        }"
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Updating UI in ui.rs",
+  "toolSummary": "Add FurnaceStatusText and remove Thai UI text"
+}
+
+--- EDIT IN ui.rs ---
+{
+  "Description": "Add GameFont resource and apply_custom_font system",
+  "Instruction": "Add GameFont resource and apply_custom_font system to ui.rs",
+  "ReplacementChunks": [
+    {
+      "AllowMultiple": false,
+      "EndLine": 25,
+      "ReplacementContent": "#[derive(Component)]\npub struct CrosshairUi;\n\n#[derive(Resource)]\npub struct GameFont(pub Handle<Font>);",
+      "StartLine": 24,
+      "TargetContent": "#[derive(Component)]\npub struct CrosshairUi;"
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 104,
+      "ReplacementContent": "    hotbar.slots[2] = Some(crate::voxel::ItemStack { item: crate::item::Item::Block(crate::voxel::BlockType::Sand), count: 64 });\n    \n    // Load custom font\n    let custom_font = asset_server.load(\"fonts/RD CHULAJARUEK.ttf\");\n    commands.insert_resource(GameFont(custom_font));\n\n    let root = commands\n        .spawn((",
+      "StartLine": 101,
+      "TargetContent": "    hotbar.slots[2] = Some(crate::voxel::ItemStack { item: crate::item::Item::Block(crate::voxel::BlockType::Sand), count: 64 });\n\n    let root = commands\n        .spawn(("
+    },
+    {
+      "AllowMultiple": false,
+      "EndLine": 161,
+      "ReplacementContent": "    });\n}\n\npub fn apply_custom_font(\n    mut query: Query<&mut TextFont, Added<TextFont>>,\n    font: Option<Res<GameFont>>,\n) {\n    if let Some(font) = font {\n        for mut text_font in query.iter_mut() {\n            if text_font.font.id() == Handle::<Font>::default().id() {\n                text_font.font = font.0.clone();\n            }\n        }\n    }\n}\n\npub fn spawn_dropped_item(",
+      "StartLine": 160,
+      "TargetContent": "    });\n}\n\npub fn spawn_dropped_item("
+    }
+  ],
+  "TargetFile": "C:\\Users\\tangc\\voxel-game\\src\\ui.rs",
+  "toolAction": "Update ui.rs",
+  "toolSummary": "Add GameFont to ui.rs"
+}
+

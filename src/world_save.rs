@@ -231,6 +231,7 @@ pub fn save_player_and_electricity(
     camera: &crate::camera::FreeCamera,
     hotbar: &crate::voxel::Hotbar,
     settings: &crate::GameSettings,
+    world: &crate::voxel::VoxelWorld,
 ) {
     let dir = crate::voxel::active_save_dir();
         if let Ok(bytes) = bincode::serialize(grid) {
@@ -252,6 +253,13 @@ pub fn save_player_and_electricity(
         };
         if let Ok(json) = serde_json::to_string_pretty(&player_data) {
             let _ = std::fs::write(dir.join("player.json"), json);
+        }
+        if let Ok(bytes) = bincode::serialize(&(
+            world.crucibles.clone(),
+            world.ingot_molds.clone(),
+            world.placed_ingots.clone(),
+        )) {
+            let _ = std::fs::write(dir.join("metallurgy.bin"), bytes);
         }
 }
 
@@ -405,13 +413,14 @@ pub fn auto_save_system(
     proj_q: bevy::prelude::Query<&bevy::prelude::Projection, bevy::prelude::With<crate::camera::MainCamera>>,
     hotbar: bevy::prelude::Res<crate::voxel::Hotbar>,
     settings: bevy::prelude::Res<crate::GameSettings>,
+    world: bevy::prelude::Res<crate::voxel::VoxelWorld>,
     mut chat: bevy::prelude::ResMut<crate::ui::ChatState>,
 ) {
     *timer += time.delta_secs();
     if *timer >= 45.0 { // เซฟบ่อยขึ้น กัน crash เสียความคืบหน้ามาก
         *timer = 0.0;
         if let Ok((transform, camera)) = camera_q.single() {
-            save_player_and_electricity(&grid, transform, camera, &hotbar, &settings);
+            save_player_and_electricity(&grid, transform, camera, &hotbar, &settings, &world);
             let (fov, fly) = camera_fov_speed(&camera_q, &proj_q);
             save_user_prefs(&settings, fov, fly);
             chat.push_system("Auto-saved game.");
@@ -425,9 +434,10 @@ pub fn save_on_exit_system(
     proj_q: bevy::prelude::Query<&bevy::prelude::Projection, bevy::prelude::With<crate::camera::MainCamera>>,
     hotbar: bevy::prelude::Res<crate::voxel::Hotbar>,
     settings: bevy::prelude::Res<crate::GameSettings>,
+    world: bevy::prelude::Res<crate::voxel::VoxelWorld>,
 ) {
     if let Ok((transform, camera)) = camera_q.single() {
-        save_player_and_electricity(&grid, transform, camera, &hotbar, &settings);
+        save_player_and_electricity(&grid, transform, camera, &hotbar, &settings, &world);
         let (fov, fly) = camera_fov_speed(&camera_q, &proj_q);
         save_user_prefs(&settings, fov, fly);
     }
@@ -443,6 +453,18 @@ pub fn load_game_system(
     net_client: Option<bevy::prelude::Res<bevy_renet::RenetClient>>,
 ) {
     let dir = crate::voxel::active_save_dir();
+        if let Ok(bytes) = std::fs::read(dir.join("metallurgy.bin")) {
+            type MetallurgySave = (
+                std::collections::HashMap<bevy::prelude::IVec3, crate::chemistry::CrucibleData>,
+                std::collections::HashMap<bevy::prelude::IVec3, crate::chemistry::IngotMoldData>,
+                std::collections::HashMap<bevy::prelude::IVec3, crate::chemistry::CastIngotData>,
+            );
+            if let Ok((crucibles, molds, ingots)) = bincode::deserialize::<MetallurgySave>(&bytes) {
+                world.crucibles = crucibles;
+                world.ingot_molds = molds;
+                world.placed_ingots = ingots;
+            }
+        }
         if let Ok(bytes) = std::fs::read(dir.join("electricity.bin")) {
             if let Ok(loaded_grid) = bincode::deserialize(&bytes) {
                 *grid = loaded_grid;

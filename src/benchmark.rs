@@ -139,7 +139,10 @@ fn check_benchmark_end(
                 elapsed - 5.0, total_frames, avg_fps, fps_1_percent_low, fps_0_1_percent_low, chunks_generated
             );
             
-            let timestamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+            let timestamp = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             let filename = format!("benchmark_results_{}.json", timestamp);
             if let Ok(mut file) = File::create(&filename) {
                 let _ = file.write_all(json_output.as_bytes());

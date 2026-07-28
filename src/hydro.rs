@@ -6,7 +6,7 @@
 //! → host/client คำนวณเองได้เท่ากัน (ไม่ต้อง sync). infinite world = คำนวณเป็น tile + apron แล้ว cache.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use bevy::math::Vec2;
@@ -14,25 +14,85 @@ use bevy::math::Vec2;
 use crate::voxel::{TerrainSampler, SEA_LEVEL};
 use crate::NoiseParams;
 
+#[cfg(test)]
+mod regression_tests;
+
 // ── ค่าจูน ──
 /// ขนาด coarse cell (บล็อก)
 const CELL: f64 = 32.0;
 /// จำนวน cell ต่อด้านของ tile ชั้นใน (inner) และ apron รอบด้าน (จับ watershed ที่ไหลเข้าจากนอก tile)
 const TILE: i32 = 48;
 const APRON: i32 = 48;
-/// accumulation (จำนวน cell ต้นน้ำ) ขั้นต่ำที่นับเป็นแม่น้ำ
-const RIVER_THRESHOLD: f32 = 45.0;
-/// accumulation ที่ทำให้ลำน้ำกว้างสุด
-const WIDTH_ACC: f32 = 1200.0;
-const WIDTH_MIN: f32 = 4.0;
-const WIDTH_MAX: f32 = 20.0;
-/// ความลึกร่องแม่น้ำ (carve ใต้ผิวน้ำ)
-const RIVER_DEPTH: f32 = 3.0;
-/// สเกลความชัน→ความเร็ว และเพดาน
+const MAX_CACHED_TILES: usize = 64;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering as AtomicOrdering;
+
+pub struct RiverConfig {
+    pub threshold: AtomicU32,
+    pub width_acc: AtomicU32,
+    pub width_min: AtomicU32,
+    pub width_max: AtomicU32,
+    pub depth: AtomicU32,
+    pub valley_margin: AtomicU32,
+}
+
+#[allow(dead_code)] // Setter API is kept for the planned world-generation tuning UI.
+impl RiverConfig {
+    pub const fn new() -> Self {
+        Self {
+            threshold: AtomicU32::new(120f32.to_bits()),
+            width_acc: AtomicU32::new(1800f32.to_bits()),
+            width_min: AtomicU32::new(2.5f32.to_bits()),
+            width_max: AtomicU32::new(14f32.to_bits()),
+            depth: AtomicU32::new(3f32.to_bits()),
+            valley_margin: AtomicU32::new(16f32.to_bits()),
+        }
+    }
+
+    pub fn threshold(&self) -> f32 { f32::from_bits(self.threshold.load(AtomicOrdering::Relaxed)) }
+    pub fn width_acc(&self) -> f32 { f32::from_bits(self.width_acc.load(AtomicOrdering::Relaxed)) }
+    pub fn width_min(&self) -> f32 { f32::from_bits(self.width_min.load(AtomicOrdering::Relaxed)) }
+    pub fn width_max(&self) -> f32 { f32::from_bits(self.width_max.load(AtomicOrdering::Relaxed)) }
+    pub fn depth(&self) -> f32 { f32::from_bits(self.depth.load(AtomicOrdering::Relaxed)) }
+    pub fn valley_margin(&self) -> f32 { f32::from_bits(self.valley_margin.load(AtomicOrdering::Relaxed)) }
+
+    pub fn set_threshold(&self, v: f32) { self.threshold.store(v.to_bits(), AtomicOrdering::Relaxed); invalidate_cache(); }
+    pub fn set_width_acc(&self, v: f32) { self.width_acc.store(v.to_bits(), AtomicOrdering::Relaxed); invalidate_cache(); }
+    pub fn set_width_min(&self, v: f32) { self.width_min.store(v.to_bits(), AtomicOrdering::Relaxed); invalidate_cache(); }
+    pub fn set_width_max(&self, v: f32) { self.width_max.store(v.to_bits(), AtomicOrdering::Relaxed); invalidate_cache(); }
+    pub fn set_depth(&self, v: f32) { self.depth.store(v.to_bits(), AtomicOrdering::Relaxed); invalidate_cache(); }
+    pub fn set_valley_margin(&self, v: f32) { self.valley_margin.store(v.to_bits(), AtomicOrdering::Relaxed); invalidate_cache(); }
+}
+
+pub static RIVER_CFG: RiverConfig = RiverConfig::new();
+
+#[derive(Clone, Copy)]
+struct RiverTuning {
+    threshold: f32,
+    width_acc: f32,
+    width_min: f32,
+    width_max: f32,
+    depth: f32,
+    valley_margin: f32,
+}
+
+impl RiverTuning {
+    fn snapshot() -> Self {
+        let width_min = RIVER_CFG.width_min().max(0.5);
+        Self {
+            threshold: RIVER_CFG.threshold().max(1.0),
+            width_acc: RIVER_CFG.width_acc().max(1.0),
+            width_min,
+            width_max: RIVER_CFG.width_max().max(width_min),
+            depth: RIVER_CFG.depth().max(0.5),
+            valley_margin: RIVER_CFG.valley_margin().max(0.0),
+        }
+    }
+}
+
+/// สเกลความชัน→ความเร็ว และเพดาน (ปรับยากเพราะเกี่ยวพันกับหลายส่วน)
 const FLOW_K: f32 = 6.0;
 const FLOW_MAX: f32 = 1.0;
-/// ขอบเขตของหุบเขาแม่น้ำ (บล็อก)
-const VALLEY_MARGIN: f32 = 30.0;
 
 /// ข้อมูลแม่น้ำ ณ จุดหนึ่ง (คืนจาก [`river_at`])
 #[derive(Clone, Copy)]
@@ -60,20 +120,40 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 struct State {
     params: Option<NoiseParams>,
     tiles: HashMap<(i32, i32), Arc<Tile>>,
+    insertion_order: VecDeque<(i32, i32)>,
+    generation: u64,
 }
 
 static HYDRO: OnceLock<RwLock<State>> = OnceLock::new();
 
 fn state() -> &'static RwLock<State> {
-    HYDRO.get_or_init(|| RwLock::new(State { params: None, tiles: HashMap::new() }))
+    HYDRO.get_or_init(|| RwLock::new(State {
+        params: None,
+        tiles: HashMap::new(),
+        insertion_order: VecDeque::new(),
+        generation: 0,
+    }))
+}
+
+fn clear_cache(state: &mut State) {
+    state.tiles.clear();
+    state.insertion_order.clear();
+    state.generation = state.generation.wrapping_add(1);
+}
+
+fn invalidate_cache() {
+    let mut state = state()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_cache(&mut state);
 }
 
 /// ตั้ง seed/noise ของโลก — ล้าง cache ถ้าเปลี่ยน (เรียกตอนสร้างโลก/เปลี่ยน seed)
 pub fn configure(params: NoiseParams) {
-    let mut s = state().write().unwrap();
+    let mut s = state().write().unwrap_or_else(|poisoned| poisoned.into_inner());
     if s.params != Some(params) {
         s.params = Some(params);
-        s.tiles.clear();
+        clear_cache(&mut s);
     }
 }
 
@@ -81,25 +161,71 @@ pub fn configure(params: NoiseParams) {
 pub fn river_at(wx: f64, wz: f64) -> Option<RiverPoint> {
     let cx = (wx / CELL).floor() as i32;
     let cz = (wz / CELL).floor() as i32;
-    let tile = tile_for_cell(cx, cz)?;
-    tile.query(wx, wz)
+    let local_x = cx.rem_euclid(TILE);
+    let local_z = cz.rem_euclid(TILE);
+    let x_offsets: &[i32] = if local_x <= 1 {
+        &[-1, 0]
+    } else if local_x >= TILE - 2 {
+        &[0, 1]
+    } else {
+        &[0]
+    };
+    let z_offsets: &[i32] = if local_z <= 1 {
+        &[-1, 0]
+    } else if local_z >= TILE - 2 {
+        &[0, 1]
+    } else {
+        &[0]
+    };
+
+    let mut best: Option<RiverPoint> = None;
+    for &tile_z in z_offsets {
+        for &tile_x in x_offsets {
+            let tile = tile_for_cell(cx + tile_x * TILE, cz + tile_z * TILE)?;
+            let Some(candidate) = tile.query(wx, wz) else {
+                continue;
+            };
+            let replace = best.is_none_or(|current| {
+                candidate.mask > current.mask + 0.01
+                    || ((candidate.mask - current.mask).abs() <= 0.01
+                        && candidate.speed > current.speed)
+            });
+            if replace {
+                best = Some(candidate);
+            }
+        }
+    }
+    best
 }
 
 fn tile_for_cell(cx: i32, cz: i32) -> Option<Arc<Tile>> {
     let tx = cx.div_euclid(TILE);
     let tz = cz.div_euclid(TILE);
     // fast path: มีใน cache แล้ว
-    let params = {
-        let s = state().read().unwrap();
+    let (params, generation) = {
+        let s = state().read().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(t) = s.tiles.get(&(tx, tz)) {
             return Some(t.clone());
         }
-        s.params?
+        (s.params?, s.generation)
     };
     // คำนวณนอก lock (deterministic — สองเธรดคำนวณ tile เดียวกันได้ผลเท่ากัน)
-    let tile = Arc::new(Tile::compute(tx, tz, params));
-    let mut s = state().write().unwrap();
-    Some(s.tiles.entry((tx, tz)).or_insert(tile).clone())
+    let tile = Arc::new(Tile::compute(tx, tz, params, RiverTuning::snapshot()));
+    let mut s = state().write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if s.generation != generation || s.params != Some(params) {
+        drop(s);
+        return tile_for_cell(cx, cz);
+    }
+    if let Some(existing) = s.tiles.get(&(tx, tz)) {
+        return Some(existing.clone());
+    }
+    while s.tiles.len() >= MAX_CACHED_TILES {
+        let Some(oldest) = s.insertion_order.pop_front() else { break };
+        s.tiles.remove(&oldest);
+    }
+    s.insertion_order.push_back((tx, tz));
+    s.tiles.insert((tx, tz), tile.clone());
+    Some(tile)
 }
 
 // ── tile ──
@@ -111,10 +237,12 @@ struct Seg {
     width: f32,
     flow: Vec2,
     speed: f32,
+    accumulation: f32,
 }
 
 struct Tile {
     segs: Vec<Seg>,
+    tuning: RiverTuning,
     /// cell → index ของ segment ที่พาดผ่านบริเวณนั้น (spatial index)
     buckets: HashMap<(i32, i32), Vec<u32>>,
 }
@@ -131,7 +259,12 @@ impl Tile {
                     for &si in list {
                         let s = &self.segs[si as usize];
                         let (dist, t) = dist_to_seg(p, s.a, s.b);
-                        if dist < s.width + VALLEY_MARGIN && best.map_or(true, |b| dist < b.0) {
+                        let better = best.map_or(true, |(best_dist, best_si, _)| {
+                            dist + 0.5 < best_dist
+                                || ((dist - best_dist).abs() <= 0.5
+                                    && s.accumulation > self.segs[best_si].accumulation)
+                        });
+                        if dist < s.width + self.tuning.valley_margin && better {
                             best = Some((dist, si as usize, t));
                         }
                     }
@@ -142,15 +275,15 @@ impl Tile {
         let s = &self.segs[si];
         Some(RiverPoint {
             mask: (1.0 - dist / s.width).clamp(0.0, 1.0),
-            valley_mask: (1.0 - dist / (s.width + VALLEY_MARGIN)).clamp(0.0, 1.0),
+            valley_mask: (1.0 - dist / (s.width + self.tuning.valley_margin)).clamp(0.0, 1.0),
             surface: lerp(s.surf_a, s.surf_b, t),
-            depth: RIVER_DEPTH,
+            depth: self.tuning.depth,
             flow: s.flow,
             speed: s.speed,
         })
     }
 
-    fn compute(tx: i32, tz: i32, params: NoiseParams) -> Tile {
+    fn compute(tx: i32, tz: i32, params: NoiseParams, tuning: RiverTuning) -> Tile {
         let sampler = TerrainSampler::new(params);
         let n = (TILE + 2 * APRON) as usize;
         let min_cx = tx * TILE - APRON;
@@ -231,12 +364,16 @@ impl Tile {
 
         // 4) flow accumulation — ประมวลจากสูง→ต่ำ (ต้นน้ำก่อน) บวกลง downstream
         let mut acc = vec![1f32; n * n];
+        let mut surface = h.clone();
         let mut order: Vec<usize> = (0..n * n).collect();
         order.sort_by(|&a, &b| filled[b].total_cmp(&filled[a]));
         for &ci in &order {
             let d = down[ci];
             if d != usize::MAX {
                 acc[d] += acc[ci];
+                // Routing uses the depression-filled elevation, but visible water
+                // follows a carved profile that never rises above the source terrain.
+                surface[d] = surface[d].min(surface[ci] - 0.02);
             }
         }
 
@@ -245,7 +382,7 @@ impl Tile {
         for c in 0..n * n {
             let d = down[c];
             if d != usize::MAX
-                && acc[c] >= RIVER_THRESHOLD
+                && acc[c] >= tuning.threshold
                 && (up[d] == usize::MAX || acc[c] > acc[up[d]])
             {
                 up[d] = c;
@@ -257,7 +394,13 @@ impl Tile {
             let (wx, wz) = cell_world(i % n, i / n);
             Vec2::new(wx as f32, wz as f32)
         };
-        let width_of = |a: f32| lerp(WIDTH_MIN, WIDTH_MAX, (a - RIVER_THRESHOLD) / WIDTH_ACC);
+        let width_of = |a: f32| {
+            lerp(
+                tuning.width_min,
+                tuning.width_max,
+                (a - tuning.threshold) / tuning.width_acc,
+            )
+        };
 
         let mut segs: Vec<Seg> = Vec::new();
         let mut buckets: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
@@ -271,7 +414,7 @@ impl Tile {
                     continue;
                 }
                 let ci = idx(x, z);
-                if h[ci] <= sea + 1.0 || acc[ci] < RIVER_THRESHOLD {
+                if h[ci] <= sea + 1.0 || acc[ci] < tuning.threshold {
                     continue;
                 }
                 let d = down[ci];
@@ -285,7 +428,7 @@ impl Tile {
                 let dd = down[d];
                 let p3 = if dd != usize::MAX { center(dd) } else { p2 * 2.0 - p1 };
 
-                let (surf1, surf2) = (filled[ci], filled[d]);
+                let (surf1, surf2) = (surface[ci], surface[d]);
                 let (w1, w2) = (width_of(acc[ci]), width_of(acc[d]));
                 let total_len = (p2 - p1).length().max(0.001);
                 let speed = (((surf1 - surf2).max(0.0) / total_len) * FLOW_K).clamp(0.0, FLOW_MAX);
@@ -306,9 +449,11 @@ impl Tile {
                         width,
                         flow: dir / len,
                         speed,
+                        accumulation: lerp(acc[ci], acc[d], (t0 + t1) * 0.5),
                     });
                     // bucket ลงทุก cell ที่ bbox (ขยายด้วย width+valley) พาดถึง
-                    let wr = ((width + VALLEY_MARGIN) as f64 / CELL).ceil() as i32 + 1;
+                    let wr =
+                        ((width + tuning.valley_margin) as f64 / CELL).ceil() as i32 + 1;
                     let cxmin = (prev.x.min(cur.x) as f64 / CELL).floor() as i32 - wr;
                     let cxmax = (prev.x.max(cur.x) as f64 / CELL).floor() as i32 + wr;
                     let czmin = (prev.y.min(cur.y) as f64 / CELL).floor() as i32 - wr;
@@ -323,7 +468,11 @@ impl Tile {
             }
         }
 
-        Tile { segs, buckets }
+        Tile {
+            segs,
+            tuning,
+            buckets,
+        }
     }
 }
 
@@ -345,8 +494,25 @@ impl Ord for MinF {
 /// Catmull-Rom spline (uniform) ผ่าน p1→p2 โดยมี p0/p3 เป็น tangent — คืนจุดที่ t (0..1)
 #[inline]
 fn catmull(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: f32) -> Vec2 {
-    let (t2, t3) = (t * t, t * t * t);
-    ((p1 * 2.0) + (p2 - p0) * t + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2 + (p1 * 3.0 - p0 - p2 * 3.0 + p3) * t3) * 0.5
+    fn knot(a: Vec2, b: Vec2, previous: f32) -> f32 {
+        previous + (b - a).length().sqrt().max(1e-3)
+    }
+    fn blend(a: Vec2, b: Vec2, ta: f32, tb: f32, t: f32) -> Vec2 {
+        let span = (tb - ta).max(1e-6);
+        a * ((tb - t) / span) + b * ((t - ta) / span)
+    }
+
+    let t0 = 0.0;
+    let t1 = knot(p0, p1, t0);
+    let t2 = knot(p1, p2, t1);
+    let t3 = knot(p2, p3, t2);
+    let u = lerp(t1, t2, t);
+    let a1 = blend(p0, p1, t0, t1, u);
+    let a2 = blend(p1, p2, t1, t2, u);
+    let a3 = blend(p2, p3, t2, t3, u);
+    let b1 = blend(a1, a2, t0, t2, u);
+    let b2 = blend(a2, a3, t1, t3, u);
+    blend(b1, b2, t1, t2, u)
 }
 
 /// ระยะจากจุด p ถึงเซกเมนต์ a→b + พารามิเตอร์ t (0..1) ของจุดที่ใกล้สุด
@@ -363,25 +529,25 @@ mod tests {
     use super::*;
 
     fn params() -> NoiseParams {
-        NoiseParams { frequency: 0.015, amplitude: 40.0, octaves: 4, seed: 1 }
+        NoiseParams { frequency: 0.015, amplitude: 40.0, octaves: 4, seed: 1, temp_offset: 0.0 }
     }
 
     #[test]
     fn tile_has_rivers_and_flows_downhill() {
-        let tile = Tile::compute(0, 0, params());
+        let tile = Tile::compute(0, 0, params(), RiverTuning::snapshot());
         assert!(!tile.segs.is_empty(), "ควรมีแม่น้ำอย่างน้อยหนึ่งสายใน tile seed 1");
         // ทุกเซกเมนต์ต้องไหลลง (ผิวน้ำต้นทาง ≥ ปลายทาง) และมีทิศเป็นเวกเตอร์หนึ่งหน่วย
         for s in &tile.segs {
             assert!(s.surf_a >= s.surf_b - 0.01, "แม่น้ำต้องไหลลง (surf_a≥surf_b)");
             assert!((s.flow.length() - 1.0).abs() < 1e-3, "flow ต้องเป็นเวกเตอร์หนึ่งหน่วย");
-            assert!(s.width >= WIDTH_MIN && s.width <= WIDTH_MAX);
+            assert!(s.width >= RIVER_CFG.width_min() && s.width <= RIVER_CFG.width_max());
         }
     }
 
     #[test]
     fn river_query_returns_flow_on_channel() {
         configure(params());
-        let tile = Tile::compute(0, 0, params());
+        let tile = Tile::compute(0, 0, params(), RiverTuning::snapshot());
         // หยิบเซกเมนต์แรก แล้ว query ที่จุดกึ่งกลาง — ต้องเจอแม่น้ำ ทิศตรงกับเซกเมนต์
         let s = &tile.segs[0];
         let mid = (s.a + s.b) * 0.5;

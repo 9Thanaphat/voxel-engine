@@ -207,7 +207,8 @@ pub fn instant_power_update_system(
             }
             if changed {
                 let affected = crate::voxel::edit_affected_chunks(pos);
-                crate::voxel::remesh_chunks(&mut commands, &mut world, &mut mp, affected.clone());
+                // ให้ mesh สะท้อนไฟเปิด/ปิดทันที (ทางนี้เป็นการวางสายไฟ ไม่ทุบบล็อก เลยไม่ต้องอัปเดต sky light)
+                crate::voxel::remesh_chunks(&mut commands, &mut world, &mut mp, None, affected.clone());
                 for chunk_pos in affected {
                     crate::voxel::refresh_chunk_lamp_lights(&mut commands, &mut world, chunk_pos);
                     crate::voxel::refresh_chunk_campfire_models(&mut commands, &mut world, chunk_pos, &campfire_assets);

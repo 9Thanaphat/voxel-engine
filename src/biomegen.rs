@@ -87,16 +87,20 @@ impl Default for BiomeConfig {
                 mk("Desert", Hot, 1.0, 3.0, 6.0, sand, sand, None, 0.0),
                 mk("Savanna", Hot, 1.0, 4.0, 8.0, g, d, Broadleaf, 0.15),
                 mk("Tropical Forest", Hot, 1.0, 5.0, 14.0, g, d, Broadleaf, 0.7),
+                mk("Warm Ocean", Hot, 1.0, -80.0, 3.0, sand, sand, None, 0.0),
                 // ── อุ่น ──
                 mk("Plains", Warm, 1.2, 4.0, 6.0, g, d, Broadleaf, 0.1),
                 mk("Temperate Forest", Warm, 1.0, 5.0, 16.0, g, d, Broadleaf, 0.6),
                 mk("Mountains", Warm, 0.6, 10.0, 22.0, g, stone, Broadleaf, 0.2),
+                mk("Ocean", Warm, 1.0, -80.0, 3.0, sand, d, None, 0.0),
                 // ── เย็น ──
                 mk("Taiga", Cool, 1.0, 4.0, 10.0, sgrass, d, Spruce, 0.5),
                 mk("Conifer Mountains", Cool, 0.7, 10.0, 22.0, sgrass, stone, Spruce, 0.3),
+                mk("Cold Ocean", Cool, 1.0, -80.0, 3.0, sand, stone, None, 0.0),
                 // ── หนาว ──
                 mk("Tundra", Cold, 1.0, 3.0, 6.0, snow, d, None, 0.0),
                 mk("Snowy Mountains", Cold, 0.7, 12.0, 24.0, snow, stone, None, 0.0),
+                mk("Frozen Ocean", Cold, 1.0, -80.0, 3.0, snow, stone, None, 0.0),
             ],
         }
     }

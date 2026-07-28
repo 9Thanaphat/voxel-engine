@@ -12,6 +12,8 @@ use bevy::{
 };
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 
+mod block_edit;
+
 #[derive(Component)]
 pub struct Block;
 
@@ -23,7 +25,7 @@ pub enum BlockType {
     Grass = 2,
     Stone = 3,
     Water = 4,
-    Wood = 5,
+    OakWood = 5,
     Leaves = 6,
     Sand = 7,
     Glowstone = 8,
@@ -67,6 +69,11 @@ pub enum BlockType {
     SpruceLeaves = 39,
     CopperOre = 40,
     IronOre = 41,
+    SpruceLogDamaged1 = 42,
+    SpruceLogDamaged2 = 43,
+    Crucible = 44,
+    IngotMold = 45,
+    CastIngot = 46,
 }
 
 impl BlockType {
@@ -76,7 +83,7 @@ impl BlockType {
             2 => BlockType::Grass,
             3 => BlockType::Stone,
             4 => BlockType::Water,
-            5 => BlockType::Wood,
+            5 => BlockType::OakWood,
             6 => BlockType::Leaves,
             7 => BlockType::Sand,
             8 => BlockType::Glowstone,
@@ -113,6 +120,11 @@ impl BlockType {
             39 => BlockType::SpruceLeaves,
             40 => BlockType::CopperOre,
             41 => BlockType::IronOre,
+            42 => BlockType::SpruceLogDamaged1,
+            43 => BlockType::SpruceLogDamaged2,
+            44 => BlockType::Crucible,
+            45 => BlockType::IngotMold,
+            46 => BlockType::CastIngot,
             _ => BlockType::Air,
         }
     }
@@ -164,7 +176,7 @@ pub struct BlockDef {
     pub overlay_side: &'static [&'static str],
 }
 
-pub const BLOCK_DEFS: [BlockDef; 42] = [
+pub const BLOCK_DEFS: [BlockDef; 47] = [
     BlockDef { name: "Air", color: [1.0, 1.0, 1.0, 1.0], solid: false, transparent: true, emission: None, hardness: 0.0,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
     BlockDef { name: "Dirt", color: [0.4, 0.2, 0.0, 1.0], solid: true, transparent: false, emission: None, hardness: 1.0,
@@ -181,9 +193,9 @@ pub const BLOCK_DEFS: [BlockDef; 42] = [
         overlay_side: &[] },
     BlockDef { name: "Water", color: [0.25, 0.5, 0.85, 1.0], solid: false, transparent: true, emission: None, hardness: 3.2,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
-    BlockDef { name: "Wood", color: [0.4, 0.3, 0.2, 1.0], solid: true, transparent: false, emission: None, hardness: 3.0,
-        tex_top: &["textures/wood_top.png"], tex_side: &["textures/wood_side.png"],
-        tex_bottom: &["textures/wood_top.png"], overlay_side: &[] },
+    BlockDef { name: "Oak Wood", color: [0.4, 0.3, 0.2, 1.0], solid: true, transparent: false, emission: None, hardness: 3.0,
+        tex_top: &["textures/oak_log_top.png"], tex_side: &["textures/oak_log_side.png"],
+        tex_bottom: &["textures/oak_log_top.png"], overlay_side: &[] },
     // ใบไม้วาดเป็นแผ่น sprite ตัดกันแบบดาว 3 แกน (ดู generate_leaf_mesh_into) ไม่ใช่คิวบ์
     // — transparent:true เพื่อไม่ให้หน้าของบล็อกข้างเคียงถูก cull หายไปหลังพุ่มใบ
     // solid:true คงไว้ให้ยังเดินบนพุ่มได้เหมือนเดิม
@@ -268,7 +280,7 @@ pub const BLOCK_DEFS: [BlockDef; 42] = [
     BlockDef { name: "Campfire", color: [0.35, 0.22, 0.12, 1.0], solid: true, transparent: true, emission: Some([1.4, 0.6, 0.15]), hardness: 0.4,
         tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
     BlockDef { name: "Branch", color: [0.4, 0.2, 0.0, 1.0], solid: true, transparent: true, emission: None, hardness: 2.0,
-        tex_top: &["textures/wood_side.png"], tex_side: &["textures/wood_side.png"], tex_bottom: &["textures/wood_side.png"], overlay_side: &[] },
+        tex_top: &["textures/oak_log_side.png"], tex_side: &["textures/oak_log_side.png"], tex_bottom: &["textures/oak_log_side.png"], overlay_side: &[] },
     // ไบโอมหิมะ — พื้นหญ้าคลุมหิมะ (บน=หิมะ ข้าง=หญ้าคลุมหิมะ ล่าง=ดิน) ไม่มีพู่หญ้า
     BlockDef { name: "Snowy Grass", color: [0.85, 0.9, 0.95, 1.0], solid: true, transparent: false, emission: None, hardness: 1.2,
         tex_top: &["textures/snow.png"], tex_side: &["textures/grass_side_snow.png"], tex_bottom: &["textures/dirt.png"],
@@ -276,8 +288,8 @@ pub const BLOCK_DEFS: [BlockDef; 42] = [
     BlockDef { name: "Snow", color: [0.9, 0.95, 1.0, 1.0], solid: true, transparent: false, emission: None, hardness: 0.6,
         tex_top: &["textures/snow.png"], tex_side: &["textures/snow.png"], tex_bottom: &["textures/snow.png"], overlay_side: &[] },
     BlockDef { name: "Spruce Log", color: [0.35, 0.25, 0.18, 1.0], solid: true, transparent: false, emission: None, hardness: 3.0,
-        tex_top: &["textures/spruce_top.png"], tex_side: &["textures/spruce_side.png"],
-        tex_bottom: &["textures/spruce_top.png"], overlay_side: &[] },
+        tex_top: &["textures/spruce_log_top.png"], tex_side: &["textures/spruce_log_side.png"],
+        tex_bottom: &["textures/spruce_log_top.png"], overlay_side: &[] },
     // ใบสน: วาดเป็น sprite ดาว 3 แกน (ดู generate_leaf_mesh_into) เหมือน Leaves — transparent:true
     BlockDef { name: "Spruce Leaves", color: [0.1, 0.35, 0.2, 1.0], solid: true, transparent: true, emission: None, hardness: 0.3,
         tex_top: &["textures/spruce_leaves.png"], tex_side: &["textures/spruce_leaves.png"],
@@ -288,6 +300,18 @@ pub const BLOCK_DEFS: [BlockDef; 42] = [
     BlockDef { name: "Iron Ore", color: [0.7, 0.6, 0.5, 1.0], solid: true, transparent: false, emission: None, hardness: 6.0,
         tex_top: &["textures/iron_ore.png"], tex_side: &["textures/iron_ore.png"], tex_bottom: &["textures/iron_ore.png"],
         overlay_side: &[] },
+    BlockDef { name: "Spruce Log Damaged 1", color: [0.35, 0.22, 0.12, 1.0], solid: true, transparent: false, emission: None, hardness: 3.0,
+        tex_top: &["textures/spruce_log_top.png"], tex_side: &["textures/spruce_log_damaged1.png"],
+        tex_bottom: &["textures/spruce_log_top.png"], overlay_side: &[] },
+    BlockDef { name: "Spruce Log Damaged 2", color: [0.35, 0.22, 0.12, 1.0], solid: true, transparent: false, emission: None, hardness: 3.0,
+        tex_top: &["textures/spruce_log_top.png"], tex_side: &["textures/spruce_log_damaged2.png"],
+        tex_bottom: &["textures/spruce_log_top.png"], overlay_side: &[] },
+    BlockDef { name: "Crucible", color: [0.6, 0.3, 0.2, 1.0], solid: true, transparent: true, emission: None, hardness: 0.5,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Ingot Mold", color: [0.45, 0.28, 0.18, 1.0], solid: true, transparent: true, emission: None, hardness: 0.8,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
+    BlockDef { name: "Cast Ingot", color: [0.72, 0.42, 0.20, 1.0], solid: true, transparent: true, emission: None, hardness: 0.8,
+        tex_top: &[], tex_side: &[], tex_bottom: &[], overlay_side: &[] },
 ];
 
 pub fn block_def(block: BlockType) -> &'static BlockDef {
@@ -345,6 +369,13 @@ pub fn block_collision_box(block: BlockType) -> (Vec3, Vec3) {
     match block {
         BlockType::Campfire => (Vec3::new(0.15, 0.0, 0.15), Vec3::new(0.85, 0.4, 0.85)),
         BlockType::Branch => (Vec3::new(0.25, 0.0, 0.25), Vec3::new(0.75, 1.0, 0.75)),
+        BlockType::Crucible => (Vec3::new(0.15, 0.0, 0.15), Vec3::new(0.85, 0.7, 0.85)),
+        BlockType::IngotMold => (Vec3::ZERO, Vec3::new(1.0, 5.0 / 16.0, 1.0)),
+        BlockType::CastIngot => (
+            Vec3::new(3.0 / 16.0, 0.0, 5.0 / 16.0),
+            Vec3::new(13.0 / 16.0, 3.0 / 16.0, 11.0 / 16.0),
+        ),
+        BlockType::SmartLamp | BlockType::SmartLampOn => (Vec3::new(0.25, 0.0, 0.25), Vec3::new(0.75, 0.6, 0.75)),
         _ => (Vec3::ZERO, Vec3::ONE),
     }
 }
@@ -353,6 +384,18 @@ pub fn block_collision_box(block: BlockType) -> (Vec3, Vec3) {
 /// ตอนนี้คือ Branch: กล่องต้องวางตามทิศที่กิ่งเชื่อมจริง ไม่ใช่เสาตั้งตายตัว
 /// (กิ่งแนวนอนจะได้ชนตรงกับที่ตาเห็น)
 pub fn block_collision_box_at(world: &VoxelWorld, pos: IVec3, block: BlockType) -> (Vec3, Vec3) {
+    if block == BlockType::CastIngot {
+        let (min, mut max) = block_collision_box(block);
+        let fill = world
+            .placed_ingots
+            .get(&pos)
+            .map_or(1.0, |ingot| {
+                ingot.mass as f32 / crate::chemistry::INGOT_MOLD_CAPACITY_GRAMS as f32
+            })
+            .clamp(0.1, 1.0);
+        max.y *= fill;
+        return (min, max);
+    }
     if block != BlockType::Branch {
         return block_collision_box(block);
     }
@@ -382,6 +425,36 @@ pub fn block_collision_box_at(world: &VoxelWorld, pos: IVec3, block: BlockType) 
     (min, max)
 }
 
+fn ray_aabb_hit(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<(f32, IVec3)> {
+    let mut near = 0.0f32;
+    let mut far = f32::INFINITY;
+    let mut normal = IVec3::ZERO;
+    for axis in 0..3 {
+        if dir[axis].abs() < 1e-7 {
+            if origin[axis] < min[axis] || origin[axis] > max[axis] {
+                return None;
+            }
+            continue;
+        }
+        let mut t1 = (min[axis] - origin[axis]) / dir[axis];
+        let mut t2 = (max[axis] - origin[axis]) / dir[axis];
+        let mut axis_normal = IVec3::ZERO;
+        axis_normal[axis] = if dir[axis] > 0.0 { -1 } else { 1 };
+        if t1 > t2 {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        if t1 > near {
+            near = t1;
+            normal = axis_normal;
+        }
+        far = far.min(t2);
+        if far < near {
+            return None;
+        }
+    }
+    (far >= 0.0).then_some((near, normal))
+}
+
 // --------------------------------------------------------
 // ตารางการขุด (ระบบทุบบล็อก Survival) — แพทเทิร์นเดียวกับ block_collision_box:
 // match function แยก ไม่เพิ่ม field ใน BLOCK_DEFS (field `hardness` เดิมคือความทน
@@ -396,9 +469,9 @@ pub fn block_dig_class(block: BlockType) -> crate::item::DigClass {
         | BlockType::Glowstone | BlockType::LampRed | BlockType::LampGreen | BlockType::LampBlue
         | BlockType::SmartLamp | BlockType::SmartLampOn
         | BlockType::SwitchOff | BlockType::SwitchOn 
-        | BlockType::CopperOre | BlockType::IronOre => DigClass::Pick,
-        BlockType::Wood | BlockType::Chest | BlockType::Tnt | BlockType::Nuke
-        | BlockType::Campfire | BlockType::Branch | BlockType::SpruceLog => DigClass::Axe,
+        | BlockType::Crucible | BlockType::IngotMold | BlockType::CastIngot | BlockType::CopperOre | BlockType::IronOre => DigClass::Pick,
+        BlockType::OakWood | BlockType::Chest | BlockType::Tnt | BlockType::Nuke
+        | BlockType::Campfire | BlockType::Branch | BlockType::SpruceLog | BlockType::SpruceLogDamaged1 | BlockType::SpruceLogDamaged2 => DigClass::Axe,
         BlockType::Dirt | BlockType::Grass | BlockType::Sand
         | BlockType::SnowyGrass | BlockType::Snow => DigClass::Shovel,
         _ => DigClass::None,
@@ -418,7 +491,7 @@ pub fn block_dig_time(block: BlockType) -> f32 {
         BlockType::Glowstone | BlockType::LampRed | BlockType::LampGreen | BlockType::LampBlue
         | BlockType::SmartLamp | BlockType::SmartLampOn
         | BlockType::SwitchOff | BlockType::SwitchOn => 1.5,
-        BlockType::Wood | BlockType::Chest | BlockType::Branch | BlockType::SpruceLog => 3.0,
+        BlockType::OakWood | BlockType::Chest | BlockType::Branch | BlockType::SpruceLog | BlockType::SpruceLogDamaged1 | BlockType::SpruceLogDamaged2 => 3.0,
         BlockType::Furnace => 3.5,
         BlockType::Stone | BlockType::CopperOre | BlockType::IronOre => 5.0,
         BlockType::IronBlock => 7.5,
@@ -429,6 +502,9 @@ pub fn block_dig_time(block: BlockType) -> f32 {
 /// กติกา drop แบบ Minecraft: หมวด Pick (หิน/แร่) ต้องถือ pickaxe ตอนแตกถึงได้ของ
 /// มือเปล่า/tool ผิดหมวดขุดได้ (ช้า) แต่บล็อกหายเปล่า — หมวดอื่นได้ของเสมอ
 pub fn block_requires_tool(block: BlockType) -> bool {
+    if block == BlockType::Crucible {
+        return false;
+    }
     block_dig_class(block) == crate::item::DigClass::Pick
 }
 
@@ -770,6 +846,17 @@ impl ChunkBlocks {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct FurnaceData {
+    pub slots: [Option<ItemStack>; 2],
+    pub current_temp: f32,
+    pub active_fuel_energy: f32,
+    pub active_fuel_base_temp: f32,
+    pub air_multiplier: f32,
+    pub air_boost_time: f32,
+    pub smelting_progress: f32,
+}
+
 pub struct ChunkData {
     pub blocks: Arc<ChunkBlocks>,
     pub chiseled_blocks: HashMap<usize, Box<[u8; 4096]>>,
@@ -778,8 +865,9 @@ pub struct ChunkData {
     pub facings: HashMap<usize, u8>,
     /// ของในกล่อง Chest ต่อตำแหน่ง (27 ช่อง) — เซฟลง disk เหมือน facings
     pub chest_slots: HashMap<usize, Box<[Option<ItemStack>; 27]>>,
-    /// ของในกล่อง Furnace ต่อตำแหน่ง (3 ช่อง: input/fuel/output — ยังไม่มี logic เผา)
-    pub furnace_slots: HashMap<usize, Box<[Option<ItemStack>; 3]>>,
+
+    /// ข้อมูลในกล่อง Furnace ต่อตำแหน่ง (3 ช่อง + อุณหภูมิ)
+    pub furnace_slots: HashMap<usize, Box<FurnaceData>>,
     pub num_vertices: usize,
     pub num_indices: usize,
     /// ช่วง y ที่มีน้ำ (inclusive) — grow-only ตอน set_block เขียนน้ำ,
@@ -881,6 +969,9 @@ pub struct VoxelWorld {
     pub pending_branch_save: std::collections::HashSet<IVec2>,
     pub total_vertices: usize,
     pub total_indices: usize,
+    pub crucibles: HashMap<IVec3, crate::chemistry::CrucibleData>,
+    pub ingot_molds: HashMap<IVec3, crate::chemistry::IngotMoldData>,
+    pub placed_ingots: HashMap<IVec3, crate::chemistry::CastIngotData>,
 }
 
 impl VoxelWorld {
@@ -976,14 +1067,33 @@ impl VoxelWorld {
         })
     }
 
-    pub fn get_furnace_slots(&self, x: i32, y: i32, z: i32) -> Option<&[Option<ItemStack>; 3]> {
+    pub fn get_furnace_slots(&self, x: i32, y: i32, z: i32) -> Option<&[Option<ItemStack>; 2]> {
         if y < 0 || y >= CHUNK_HEIGHT as i32 { return None; }
         let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
         let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
         self.chunks.get(&IVec2::new(cx, cz)).and_then(|chunk| {
-            chunk.furnace_slots.get(&ChunkData::get_index(lx, y as usize, lz)).map(|b| b.as_ref())
+            chunk.furnace_slots.get(&ChunkData::get_index(lx, y as usize, lz)).map(|b| &b.slots)
         })
     }
+
+    pub fn get_furnace_data_mut(&mut self, x: i32, y: i32, z: i32) -> Option<&mut FurnaceData> {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 { return None; }
+        let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        self.chunks.get_mut(&IVec2::new(cx, cz)).and_then(|chunk| {
+            chunk.furnace_slots.get_mut(&ChunkData::get_index(lx, y as usize, lz)).map(|b| &mut **b)
+        })
+    }
+
+    pub fn get_furnace_data(&self, x: i32, y: i32, z: i32) -> Option<&FurnaceData> {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 { return None; }
+        let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
+        self.chunks.get(&IVec2::new(cx, cz)).and_then(|chunk| {
+            chunk.furnace_slots.get(&ChunkData::get_index(lx, y as usize, lz)).map(|b| &**b)
+        })
+    }
+
 
     pub fn set_chest_slot(&mut self, x: i32, y: i32, z: i32, slot: usize, item: Option<ItemStack>) {
         if y < 0 || y >= CHUNK_HEIGHT as i32 || slot >= 27 { return; }
@@ -996,12 +1106,12 @@ impl VoxelWorld {
     }
 
     pub fn set_furnace_slot(&mut self, x: i32, y: i32, z: i32, slot: usize, item: Option<ItemStack>) {
-        if y < 0 || y >= CHUNK_HEIGHT as i32 || slot >= 3 { return; }
+        if y < 0 || y >= CHUNK_HEIGHT as i32 || slot >= 2 { return; }
         let (cx, lx) = (x.div_euclid(CHUNK_WIDTH as i32), x.rem_euclid(CHUNK_WIDTH as i32) as usize);
         let (cz, lz) = (z.div_euclid(CHUNK_WIDTH as i32), z.rem_euclid(CHUNK_WIDTH as i32) as usize);
         if let Some(chunk) = self.chunks.get_mut(&IVec2::new(cx, cz)) {
             let idx = ChunkData::get_index(lx, y as usize, lz);
-            chunk.furnace_slots.entry(idx).or_insert_with(|| Box::new([None; 3]))[slot] = item;
+            chunk.furnace_slots.entry(idx).or_insert_with(|| Box::new(FurnaceData::default())).slots[slot] = item;
         }
     }
 
@@ -1017,6 +1127,9 @@ impl VoxelWorld {
             chunk.chest_slots.remove(&idx);
             chunk.furnace_slots.remove(&idx);
         }
+        self.crucibles.remove(&IVec3::new(x, y, z));
+        self.ingot_molds.remove(&IVec3::new(x, y, z));
+        self.placed_ingots.remove(&IVec3::new(x, y, z));
     }
 
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, block_type: BlockType) -> bool {
@@ -1115,6 +1228,8 @@ pub struct MeshBuf {
     pub normals: Vec<[f32; 3]>,
     pub colors: Vec<[f32; 4]>,
     pub uvs: Vec<[f32; 2]>,
+    /// Secondary per-vertex data. Water uses [depth, shoreline], other meshes use zero.
+    pub uv_b: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
 }
 
@@ -1137,6 +1252,7 @@ impl MeshBuf {
             self.normals.push(normal);
             self.colors.push(cols[i]);
             self.uvs.push(uvs[i]);
+            self.uv_b.push([0.0, 0.0]);
         }
         // flip = สลับ diagonal ของ quad (ใช้ตอน AO ไม่สมมาตร กัน interpolation เบี้ยว)
         if flip {
@@ -1146,12 +1262,27 @@ impl MeshBuf {
         }
     }
 
+    fn push_water_quad(
+        &mut self,
+        verts: [[f32; 3]; 4],
+        normal: [f32; 3],
+        cols: [[f32; 4]; 4],
+        flow: [[f32; 2]; 4],
+        water_data: [[f32; 2]; 4],
+        flip: bool,
+    ) {
+        let first = self.positions.len();
+        self.push_quad(verts, normal, cols, flow, flip);
+        self.uv_b[first..first + 4].copy_from_slice(&water_data);
+    }
+
     pub fn into_mesh(self) -> Mesh {
         let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colors);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, self.uv_b);
         mesh.insert_indices(Indices::U32(self.indices));
         mesh
     }
@@ -1279,7 +1410,7 @@ fn water_corner_info(
     cx: i32,
     vy: i32,
     cz: i32,
-) -> (f32, f32) {
+) -> (f32, f32, f32) {
     let mut sum_y = 0.0;
     let mut cnt = 0;
     let mut depth_sum = 0.0;
@@ -1310,9 +1441,10 @@ fn water_corner_info(
         let corner_y = avg_y.max(vy as f32);
         let drop = (vy as f32 + 1.0) - corner_y;
         let depth = if depth_cnt > 0 { (depth_sum / depth_cnt as f32 / WATER_DEPTH_RANGE as f32).min(1.0) } else { 0.0 };
-        (drop, depth)
+        let shoreline = 1.0 - cnt as f32 / 4.0;
+        (drop, depth, shoreline)
     } else {
-        (0.0, 0.0)
+        (0.0, 0.0, 0.0)
     }
 }
 
@@ -1324,9 +1456,11 @@ pub fn create_mesh_from_blocks(
     facings: Option<&HashMap<usize, u8>>,
     branch_network: Option<&crate::tree::BranchNetwork>,
     light: Option<&LightNeighborhood>,
+    breaking_target: Option<(IVec3, f32)>,
 ) -> ChunkMeshSet {
     // ต่อมุมผิวน้ำ: (ระยะกดผิวลง, ความลึกน้ำ normalize 0..1) — แชร์ข้ามหน้า/บล็อก
-    let mut drop_cache: HashMap<(i32, i32, i32), (f32, f32)> = HashMap::with_capacity(1024);
+    let mut drop_cache: HashMap<(i32, i32, i32), (f32, f32, f32)> =
+        HashMap::with_capacity(1024);
     
     let mut set = ChunkMeshSet::default();
 
@@ -1527,7 +1661,7 @@ pub fn create_mesh_from_blocks(
                     // Chiseled ข้ามไปก่อน วาดแยกทีหลัง
                     // Branch เป็น Tapered Cylinder
                     // Leaves / Spruce Leaves เป็นแผ่น sprite ตัดกันแบบดาว 3 แกน
-                    if block == BlockType::Air || block == BlockType::TallGrass || block == BlockType::Chiseled || block == BlockType::Campfire || block == BlockType::SmartLamp || block == BlockType::SmartLampOn || block == BlockType::Branch || block == BlockType::Leaves || block == BlockType::SpruceLeaves {
+                    if block == BlockType::Air || block == BlockType::TallGrass || block == BlockType::Chiseled || block == BlockType::Campfire || block == BlockType::SmartLamp || block == BlockType::SmartLampOn || block == BlockType::Branch || block == BlockType::Leaves || block == BlockType::SpruceLeaves || block == BlockType::Crucible || block == BlockType::IngotMold || block == BlockType::CastIngot {
                         continue;
                     }
 
@@ -1630,6 +1764,7 @@ pub fn create_mesh_from_blocks(
                         let mut verts = [[0f32; 3]; 4];
                         let mut cols = [[0f32; 4]; 4];
                         let mut uvs = [[0f32; 2]; 4];
+                        let mut water_data = [[0f32; 2]; 4];
                         let (vx, vy, vz) = (c[0], c[1], c[2]);
                         let is_w = block.is_water();
                         // หน้าหญ้าบนย้อมสีตาม biome (แบบ Minecraft) — path AO ไล่เฉด
@@ -1646,7 +1781,7 @@ pub fn create_mesh_from_blocks(
                             for i in 0..4 {
                                 let p = CUBE_POSITIONS[face_id][i];
                                 let (cx, cz) = (vx + p[0] as i32, vz + p[2] as i32);
-                                let (d, dep) = *drop_cache.entry((cx, vy, cz)).or_insert_with(|| {
+                                let (d, dep, _) = *drop_cache.entry((cx, vy, cz)).or_insert_with(|| {
                                     water_corner_info(&sample, cx, vy, cz)
                                 });
                                 corner_drop[i] = d;
@@ -1678,6 +1813,14 @@ pub fn create_mesh_from_blocks(
                             let a = if is_w { WATER_ALPHA } else { base[3] };
                             cols[i] = [base[0] * br * tint * fol[0], base[1] * br * tint * fol[1], base[2] * br * tint * fol[2], a];
                             uvs[i] = if is_w { water_flow_uv } else { face_uv(verts[i]) };
+                            if is_w {
+                                let depth = corner_depth[i];
+                                let p = CUBE_POSITIONS[face_id][i];
+                                let (_, _, shoreline) = *drop_cache
+                                    .get(&(vx + p[0] as i32, vy, vz + p[2] as i32))
+                                    .expect("water corner was cached above");
+                                water_data[i] = [depth, shoreline];
+                            }
                         }
                         let flip = (ao[0] as u32 + ao[2] as u32) < (ao[1] as u32 + ao[3] as u32);
                         let buf = if is_w {
@@ -1687,7 +1830,18 @@ pub fn create_mesh_from_blocks(
                         } else {
                             &mut set.solid
                         };
-                        buf.push_quad(verts, CUBE_NORMALS[face_id], cols, uvs, flip);
+                        if is_w {
+                            buf.push_water_quad(
+                                verts,
+                                CUBE_NORMALS[face_id],
+                                cols,
+                                uvs,
+                                water_data,
+                                flip,
+                            );
+                        } else {
+                            buf.push_quad(verts, CUBE_NORMALS[face_id], cols, uvs, flip);
+                        }
                         if block_level != [0, 0, 0] && !is_w {
                             set.block_overlay.push_quad(verts, CUBE_NORMALS[face_id], [block_glow_color(block_level); 4], uvs, flip);
                         }
@@ -1834,7 +1988,14 @@ pub fn create_mesh_from_blocks(
             }
 
             let tint = block_tint(xi as i32, yi as i32, zi as i32);
-            generate_branch_mesh_into(&mut set, xi as f32, yi as f32, zi as f32, thickness, parent, &children, tint);
+            
+            let mut eff_thickness = thickness;
+            if let Some((tp, progress)) = breaking_target {
+                if p == tp {
+                    eff_thickness = (thickness as f32 * (1.0 - progress)).max(1.0) as u8;
+                }
+            }
+            generate_branch_mesh_into(&mut set, xi as f32, yi as f32, zi as f32, eff_thickness, parent, &children, tint);
         });
     }
 
@@ -1973,7 +2134,7 @@ fn generate_branch_mesh_into(
 
     ends.retain(|e| e.dir != IVec3::ZERO);
 
-    let tex = face_texture(BlockType::Branch, 2, 0).unwrap_or("textures/wood_side.png");
+    let tex = face_texture(BlockType::Branch, 2, 0).unwrap_or("textures/oak_log_side.png");
 
     // ไม่มีคิวบ์แกนกลางแล้ว — กิ่งประกอบจากแท่งเรียวที่ยิงออกจากใจกลาง node ล้วนๆ
     // แต่ละแท่งเป็นก้อนตันปิดครบทุกด้าน กิ่งทั้งเส้นจึงเป็นยูเนียนของก้อนตัน = ไม่มีรู
@@ -2338,27 +2499,21 @@ impl TerrainSampler {
         // แม่น้ำ: โครงข่ายจริงจาก hydro (flow accumulation) — carve หุบเขาก่อน แล้วค่อย carve แม่น้ำ
         let mut water = SEA_LEVEL as i32;
         if let Some(r) = crate::hydro::river_at(wx, wz) {
-            let local_surface = r.surface as f64;
+            // Hydrology owns the downhill profile, but never allow a coarse sample
+            // to suspend water more than one block above the detailed local terrain.
+            let local_surface = (r.surface as f64).min(h + 1.0);
             let bed = local_surface - r.depth as f64;
             
             // 1. สร้างหุบเขา (Valley) เพื่อปรับระดับดินเดิม (h) ให้เข้าหาระดับผิวน้ำ (local_surface) อย่างนุ่มนวล
             // ป้องกันปัญหาน้ำลอยอยู่กลางอากาศ (Aqueduct) ถ้าระดับดินเดิมต่ำกว่าน้ำ (ยกเว้นอยู่ในทะเลอยู่แล้ว)
             let v = r.valley_mask as f64;
-            // Map v from [0, 0.55] to [0, 1] to ensure banks are raised *before* the river edge
-            let v_raise = (v / 0.55).clamp(0.0, 1.0);
-            let v_smooth_raise = v_raise * v_raise * (3.0 - 2.0 * v_raise);
-            let v_smooth_dig = v * v * (3.0 - 2.0 * v); // Smoothstep curve
-            
-            let valley_h = if h < local_surface {
-                // Raise terrain to prevent flying rivers, BUT only if it's not already in the sea basin
-                if h < SEA_LEVEL as f64 && local_surface <= SEA_LEVEL as f64 + 1.0 {
-                    // Do not raise sea floor, just let it be
-                    h
-                } else {
-                    lerp(h, local_surface, v_smooth_raise)
-                }
+            let v_smooth = v * v * (3.0 - 2.0 * v);
+            // Valleys may carve high terrain down, but must never raise low terrain
+            // to meet a depression-filled routing surface.
+            let valley_h = if h > local_surface {
+                lerp(h, local_surface, v_smooth)
             } else {
-                lerp(h, local_surface, v_smooth_dig)
+                h
             };
             
             // 2. ขุดร่องแม่น้ำ (Channel) ลงไปหาระดับก้นแม่น้ำ (bed)
@@ -2368,7 +2523,7 @@ impl TerrainSampler {
             
             // เติมน้ำเฉพาะจุดที่เป็นแม่น้ำจริงๆ (mask > 0)
             if r.mask > 0.0 {
-                water = water.max(r.surface.floor() as i32);
+                water = water.max(local_surface.floor() as i32);
             }
         }
         (h, water)
@@ -2920,7 +3075,8 @@ pub fn create_water_mesh(
     let y_lo = y_min as i32;
     let y_hi = (y_max.min(CHUNK_HEIGHT - 1)) as i32;
 
-    let mut drop_cache: HashMap<(i32, i32, i32), (f32, f32)> = HashMap::with_capacity(256);
+    let mut drop_cache: HashMap<(i32, i32, i32), (f32, f32, f32)> =
+        HashMap::with_capacity(256);
     let mut observed: Option<(usize, usize)> = None;
 
     let world_base_x = chunk_pos.x * CHUNK_WIDTH as i32;
@@ -3032,7 +3188,7 @@ pub fn create_water_mesh(
                     for i in 0..4 {
                         let p = CUBE_POSITIONS[face_id][i];
                         let (cx, cz) = (vx + p[0] as i32, vz + p[2] as i32);
-                        let (d, dep) = *drop_cache.entry((cx, vy, cz)).or_insert_with(|| {
+                        let (d, dep, _) = *drop_cache.entry((cx, vy, cz)).or_insert_with(|| {
                             water_corner_info(&sample, cx, vy, cz)
                         });
                         corner_drop[i] = d;
@@ -3042,6 +3198,7 @@ pub fn create_water_mesh(
                     let mut verts = [[0f32; 3]; 4];
                     let mut cols = [[0f32; 4]; 4];
                     let mut uvs = [[0f32; 2]; 4];
+                    let mut water_data = [[0f32; 2]; 4];
                     let (flow_vec, speed) = crate::hydro::river_at((world_base_x + vx) as f64 + 0.5, (world_base_z + vz) as f64 + 0.5)
                         .map(|r| (r.flow, r.speed))
                         .unwrap_or((Vec2::ZERO, 0.0));
@@ -3061,9 +3218,22 @@ pub fn create_water_mesh(
                         // create_water_mesh วาดเฉพาะน้ำ → alpha ที่ vertex เสมอ (ดู WATER_ALPHA)
                         cols[i] = [base[0] * br * tint, base[1] * br * tint, base[2] * br * tint, WATER_ALPHA];
                         uvs[i] = water_flow_uv;
+                        let depth = corner_depth[i];
+                        let p = CUBE_POSITIONS[face_id][i];
+                        let (_, _, shoreline) = *drop_cache
+                            .get(&(vx + p[0] as i32, vy, vz + p[2] as i32))
+                            .expect("water corner was cached above");
+                        water_data[i] = [depth, shoreline];
                     }
                     let flip = (ao[0] as u32 + ao[2] as u32) < (ao[1] as u32 + ao[3] as u32);
-                    buf.push_quad(verts, CUBE_NORMALS[face_id], cols, uvs, flip);
+                    buf.push_water_quad(
+                        verts,
+                        CUBE_NORMALS[face_id],
+                        cols,
+                        uvs,
+                        water_data,
+                        flip,
+                    );
                 }
             }
         }
@@ -3154,10 +3324,55 @@ pub fn load_chunk_tree(chunk_pos: IVec2) -> Vec<crate::tree::BranchRecord> {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
+pub struct WireFurnaceData {
+    pub slots: [Option<crate::item::WireItemStack>; 2],
+    pub current_temp: f32,
+    pub active_fuel_energy: f32,
+    pub active_fuel_base_temp: f32,
+    pub air_multiplier: f32,
+    pub air_boost_time: f32,
+    pub smelting_progress: f32,
+}
+
+impl WireFurnaceData {
+    pub fn from_data(data: &FurnaceData) -> Self {
+        let mut slots = [None; 2];
+        for (w, s) in slots.iter_mut().zip(data.slots.iter()) {
+            *w = s.map(crate::item::WireItemStack::from_stack);
+        }
+        Self {
+            slots,
+            current_temp: data.current_temp,
+            active_fuel_energy: data.active_fuel_energy,
+            active_fuel_base_temp: data.active_fuel_base_temp,
+            air_multiplier: data.air_multiplier,
+            air_boost_time: data.air_boost_time,
+            smelting_progress: data.smelting_progress,
+        }
+    }
+
+    pub fn to_data(self) -> FurnaceData {
+        let mut slots = [None; 2];
+        for (w, s) in slots.iter_mut().zip(self.slots.iter()) {
+            *w = s.and_then(|w| w.to_stack());
+        }
+        FurnaceData {
+            slots,
+            current_temp: self.current_temp,
+            active_fuel_energy: self.active_fuel_energy,
+            active_fuel_base_temp: self.active_fuel_base_temp,
+            air_multiplier: self.air_multiplier,
+            air_boost_time: self.air_boost_time,
+            smelting_progress: self.smelting_progress,
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 struct ChunkAux {
     facings: Vec<(u32, u8)>,
     chest: Vec<(u32, [Option<crate::item::WireItemStack>; 27])>,
-    furnace: Vec<(u32, [Option<crate::item::WireItemStack>; 3])>,
+    furnace: Vec<(u32, WireFurnaceData)>,
 }
 
 pub fn save_chunk(chunk_pos: IVec2, blocks: &ChunkBlocks) {
@@ -3194,11 +3409,7 @@ pub fn save_chunk_full(chunk_pos: IVec2, chunk: &ChunkData, branches: &[crate::t
             (i as u32, wire)
         }).collect(),
         furnace: chunk.furnace_slots.iter().map(|(&i, s)| {
-            let mut wire = [None; 3];
-            for (w, slot) in wire.iter_mut().zip(s.iter()) {
-                *w = slot.map(crate::item::WireItemStack::from_stack);
-            }
-            (i as u32, wire)
+            (i as u32, WireFurnaceData::from_data(s))
         }).collect(),
     };
     // chunk ไม่มี facing/container เลย — ไม่ต้องเขียนไฟล์ (และลบของเก่าถ้ามี กันค้าง)
@@ -3233,11 +3444,13 @@ fn load_chunk(chunk_pos: IVec2) -> Option<ChunkBlocks> {
 }
 
 /// แปลง facings map เป็นรูปแบบสายส่ง (network ChunkData / เซฟ) — ใช้ร่วมกันทั้งสองทาง
+#[allow(dead_code)] // Legacy wire helper retained until the chunk protocol migration is complete.
 pub fn facings_to_wire(facings: &HashMap<usize, u8>) -> Vec<(u32, u8)> {
     facings.iter().map(|(&k, &v)| (k as u32, v)).collect()
 }
 
 /// แปลง chest+furnace slots เป็นรูปแบบสายส่งเดียวกัน (kind tag: 0=chest, 1=furnace)
+#[allow(dead_code)] // Legacy wire helper retained until the chunk protocol migration is complete.
 pub fn containers_to_wire(
     chest: &HashMap<usize, Box<[Option<ItemStack>; 27]>>,
     furnace: &HashMap<usize, Box<[Option<ItemStack>; 3]>>,
@@ -3262,11 +3475,13 @@ pub fn containers_to_wire(
 }
 
 /// กลับด้าน facings_to_wire — ใช้ตอนรับ ServerMessage::ChunkData ฝั่ง client
+#[allow(dead_code)] // Legacy wire helper retained until the chunk protocol migration is complete.
 pub fn wire_to_facings(wire: Vec<(u32, u8)>) -> HashMap<usize, u8> {
     wire.into_iter().map(|(k, v)| (k as usize, v)).collect()
 }
 
 /// กลับด้าน containers_to_wire — kind 0=chest(27)/1=furnace(3), ช่องอื่นทิ้ง (ข้อมูลเพี้ยน)
+#[allow(dead_code)] // Legacy wire helper retained until the chunk protocol migration is complete.
 pub fn wire_to_containers(
     wire: Vec<(u32, u8, Vec<Option<crate::item::WireItemStack>>)>,
 ) -> (HashMap<usize, Box<[Option<ItemStack>; 27]>>, HashMap<usize, Box<[Option<ItemStack>; 3]>>) {
@@ -3297,7 +3512,7 @@ pub fn wire_to_containers(
 
 /// โหลด facing + container จากไฟล์ .aux.bin — ไม่มีไฟล์/decode ไม่ผ่าน = ว่างเปล่า
 /// (ทั้งเซฟเก่าก่อนมีฟีเจอร์นี้ และ chunk ที่ไม่เคยมี Furnace/Chest)
-pub fn load_chunk_aux(chunk_pos: IVec2) -> (HashMap<usize, u8>, HashMap<usize, Box<[Option<ItemStack>; 27]>>, HashMap<usize, Box<[Option<ItemStack>; 3]>>) {
+pub fn load_chunk_aux(chunk_pos: IVec2) -> (HashMap<usize, u8>, HashMap<usize, Box<[Option<ItemStack>; 27]>>, HashMap<usize, Box<FurnaceData>>) {
     let empty = || (HashMap::new(), HashMap::new(), HashMap::new());
     let Ok(bytes) = std::fs::read(chunk_aux_path(chunk_pos)) else { return empty() };
     let Some(rest) = bytes.strip_prefix(b"AUX1") else { return empty() };
@@ -3312,11 +3527,7 @@ pub fn load_chunk_aux(chunk_pos: IVec2) -> (HashMap<usize, u8>, HashMap<usize, B
         (i as usize, slots)
     }).collect();
     let furnace = aux.furnace.into_iter().map(|(i, wire)| {
-        let mut slots: Box<[Option<ItemStack>; 3]> = Box::new([None; 3]);
-        for (s, w) in slots.iter_mut().zip(wire.into_iter()) {
-            *s = w.and_then(crate::item::WireItemStack::to_stack);
-        }
-        (i as usize, slots)
+        (i as usize, Box::new(wire.to_data()))
     }).collect();
     (facings, chest, furnace)
 }
@@ -3333,7 +3544,7 @@ pub struct ChunkBlockData {
     /// facing ของ Furnace/Chest ต่อตำแหน่ง (จาก disk save หรือ network host)
     pub facings: HashMap<usize, u8>,
     pub chest_slots: HashMap<usize, Box<[Option<ItemStack>; 27]>>,
-    pub furnace_slots: HashMap<usize, Box<[Option<ItemStack>; 3]>>,
+    pub furnace_slots: HashMap<usize, Box<FurnaceData>>,
     /// โครงกิ่งของ chunk นี้ — มาจาก .tree.bin ถ้าโหลดจาก disk หรือจากตัวปั้นต้นไม้
     /// ถ้าเป็น chunk ที่เพิ่ง generate (ดู spawn_block_generation_task)
     pub branches: Vec<crate::tree::BranchRecord>,
@@ -3425,10 +3636,11 @@ pub fn spawn_mesh_generation_task(
     // lightmap ของ chunk + เพื่อนบ้าน (Arc ทั้งชุด clone ฟรี)
     light: LightNeighborhood,
     version: u32,
+    breaking_target: Option<(IVec3, f32)>,
     sender: Sender<ChunkMeshData>,
 ) {
     AsyncComputeTaskPool::get().spawn(async move {
-        let set = create_mesh_from_blocks(chunk_pos, &blocks, &neighbors, None, Some(&facings), Some(&branches), Some(&light));
+        let set = create_mesh_from_blocks(chunk_pos, &blocks, &neighbors, None, Some(&facings), Some(&branches), Some(&light), breaking_target);
         let _ = sender.send(ChunkMeshData { chunk_pos, set, version });
     }).detach();
 }
@@ -3544,8 +3756,12 @@ pub struct CustomWaterMaterial {
 #[derive(bevy::render::render_resource::ShaderType, Debug, Clone, Default)]
 pub struct WaterUniforms {
     pub color: LinearRgba,
+    pub shallow_color: LinearRgba,
+    pub deep_color: LinearRgba,
+    pub reflection_color: LinearRgba,
     pub sun_dir: Vec3,
-    pub _padding: f32, // Padding required by WGSL for 16-byte alignment
+    /// x: flow speed, y: wave strength, z: foam strength, w: reflection strength
+    pub tuning: Vec4,
 }
 
 impl bevy::pbr::Material for CustomWaterMaterial {
@@ -3646,8 +3862,11 @@ pub fn setup_voxel(
     let water_material = custom_water_materials.add(CustomWaterMaterial {
         uniforms: WaterUniforms {
             color: LinearRgba::WHITE,
+            shallow_color: LinearRgba::new(0.20, 0.72, 0.72, 0.28),
+            deep_color: LinearRgba::new(0.015, 0.16, 0.30, 0.72),
+            reflection_color: LinearRgba::new(0.38, 0.62, 0.88, 1.0),
             sun_dir: Vec3::Y,
-            _padding: 0.0,
+            tuning: Vec4::new(0.75, 0.16, 0.85, 0.72),
         }
     });
     commands.insert_resource(WaterMaterial(water_material));
@@ -3860,18 +4079,19 @@ pub fn update_sun_system(
         settings.day_of_year as f32,
         settings.latitude_deg.to_radians(),
     );
+    let night = Vec3::new(0.02, 0.02, 0.06);
+    let day = Vec3::new(0.35, 0.55, 0.90);
+    let sky = night.lerp(day, elevation);
 
     if let Some(m) = water_mat.as_ref() {
         if let Some(mut mat) = custom_water_materials.get_mut(&m.0) {
             mat.uniforms.color = tint.into();
             mat.uniforms.sun_dir = sun_dir;
+            mat.uniforms.reflection_color = LinearRgba::new(sky.x, sky.y, sky.z, 1.0);
         }
     }
 
     // สีท้องฟ้า (fallback ก่อน skydome พร้อม / ส่วนที่ skydome ไม่ครอบ)
-    let night = Vec3::new(0.02, 0.02, 0.06);
-    let day = Vec3::new(0.35, 0.55, 0.90);
-    let sky = night.lerp(day, elevation);
     clear_color.0 = Color::srgb(sky.x, sky.y, sky.z);
 
     // หมอกระยะไกล: ให้กลืนกับสีขอบฟ้าของ skydome ทุกช่วงเวลา
@@ -4286,6 +4506,7 @@ pub fn world_generation_system(
     mut generator: ResMut<ChunkGenerator>,
     settings: Res<crate::GameSettings>,
     client_sync: Option<Res<crate::network::ClientSync>>,
+    breaking: Option<Res<BreakingProgress>>,
     // cache offset เรียงจากใกล้ไปไกล (สร้างใหม่เมื่อ render distance เปลี่ยน)
     mut offsets_cache: Local<(i32, Vec<IVec2>)>,
 ) {
@@ -4332,7 +4553,11 @@ pub fn world_generation_system(
                 && !generator.generating_meshes.contains_key(&chunk_pos)
             {
                 generator.generating_meshes.insert(chunk_pos, true);
-                let sender = generator.sender_meshes.lock().unwrap().clone();
+                let sender = generator
+                    .sender_meshes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
                 spawn_surface_preview_task(chunk_pos, settings.noise, generator.version, sender);
                 mesh_budget -= 1;
             }
@@ -4345,7 +4570,11 @@ pub fn world_generation_system(
             && !generator.generating_blocks.contains_key(&chunk_pos)
         {
             generator.generating_blocks.insert(chunk_pos, true);
-            let sender = generator.sender_blocks.lock().unwrap().clone();
+            let sender = generator
+                .sender_blocks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
             // network client: chunk ที่ host ส่งมา (มี edit) ใช้แทนการ generate
             if let Some(received) = client_sync.as_ref().and_then(|cs| cs.full_chunks.get(&chunk_pos)) {
                 let _ = sender.send(ChunkBlockData {
@@ -4397,8 +4626,13 @@ pub fn world_generation_system(
                 let facings = world.chunks.get(&chunk_pos).unwrap().facings.clone();
                 let branches = world.branch_network.snapshot_for_chunk(chunk_pos, CHUNK_WIDTH as i32);
 
-                let sender = generator.sender_meshes.lock().unwrap().clone();
-                spawn_mesh_generation_task(chunk_pos, blocks, neighbors, facings, branches, light, generator.version, sender);
+                let sender = generator
+                    .sender_meshes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                let breaking_target = breaking.as_ref().and_then(|b| b.target);
+                spawn_mesh_generation_task(chunk_pos, blocks, neighbors, facings, branches, light, generator.version, breaking_target, sender);
                 mesh_budget -= 1;
             }
         }
@@ -4633,10 +4867,16 @@ pub fn refresh_chunk_campfire_models(
 
     let mut models = Vec::new();
     chunk.blocks.for_each_matching(
-        |b| b == BlockType::Campfire || b == BlockType::SmartLamp || b == BlockType::SmartLampOn, 
+        |b| matches!(b, BlockType::Campfire | BlockType::SmartLamp | BlockType::SmartLampOn | BlockType::Crucible | BlockType::IngotMold | BlockType::CastIngot),
         |x, y, z, block| {
             let scene = if block == BlockType::Campfire {
                 assets.campfire_scene.clone()
+            } else if block == BlockType::Crucible {
+                assets.crucible_scene.clone()
+            } else if block == BlockType::IngotMold {
+                assets.ingot_mold_scene.clone()
+            } else if block == BlockType::CastIngot {
+                assets.ingot_scene.clone()
             } else {
                 assets.light_bulb_scene.clone()
             };
@@ -4656,19 +4896,72 @@ pub fn refresh_chunk_campfire_models(
                 0.0
             };
 
-            let entity = commands.spawn((
+            let mut transform = Transform::from_xyz(
+                base_x + x as f32 + 0.5,
+                y as f32,
+                base_z + z as f32 + 0.5,
+            ).with_rotation(Quat::from_rotation_y(rotation));
+            if block == BlockType::CastIngot {
+                let pos = IVec3::new(
+                    chunk_pos.x * CHUNK_WIDTH as i32 + x as i32,
+                    y as i32,
+                    chunk_pos.y * CHUNK_WIDTH as i32 + z as i32,
+                );
+                let fill = world
+                    .placed_ingots
+                    .get(&pos)
+                    .map_or(1.0, |ingot| {
+                        ingot.mass as f32 / crate::chemistry::INGOT_MOLD_CAPACITY_GRAMS as f32
+                    })
+                    .clamp(0.1, 1.0);
+                transform.scale.y = fill;
+            }
+            let mut entity_commands = commands.spawn((
                 WorldAssetRoot(scene),
-                Transform::from_xyz(
-                    base_x + x as f32 + 0.5,
-                    y as f32,
-                    base_z + z as f32 + 0.5,
-                ).with_rotation(Quat::from_rotation_y(rotation)),
-            )).id();
+                transform,
+            ));
+            if block == BlockType::CastIngot {
+                let pos = IVec3::new(
+                    chunk_pos.x * CHUNK_WIDTH as i32 + x as i32,
+                    y as i32,
+                    chunk_pos.y * CHUNK_WIDTH as i32 + z as i32,
+                );
+                let kind_index = world
+                    .placed_ingots
+                    .get(&pos)
+                    .map_or(crate::chemistry::CastIngotKind::Mixed.to_u8(), |data| {
+                        data.kind.to_u8()
+                    }) as usize;
+                entity_commands.insert(CastIngotMaterialOverride(
+                    assets.cast_ingot_materials[kind_index].clone(),
+                ));
+            }
+            let entity = entity_commands.id();
             // เปลวไฟ campfire เกาะโมเดล (ไม่พึ่ง PointLight แล้ว — campfire เป็นไฟ static)
             if block == BlockType::Campfire {
                 commands.entity(entity).insert(crate::particles::CampfireFlameSource);
             }
             models.push(entity);
+            if matches!(block, BlockType::IngotMold | BlockType::Crucible) {
+                let pos = IVec3::new(
+                    chunk_pos.x * CHUNK_WIDTH as i32 + x as i32,
+                    y as i32,
+                    chunk_pos.y * CHUNK_WIDTH as i32 + z as i32,
+                );
+                let (mesh, kind) = if block == BlockType::Crucible {
+                    (assets.crucible_fill_mesh.clone(), MetalFillKind::Crucible)
+                } else {
+                    (assets.ingot_fill_mesh.clone(), MetalFillKind::IngotMold)
+                };
+                let fill = commands.spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(assets.ingot_fill_materials[0].clone()),
+                    Transform::from_xyz(pos.x as f32 + 0.5, pos.y as f32, pos.z as f32 + 0.5),
+                    Visibility::Hidden,
+                    MetalFill { pos, kind },
+                )).id();
+                models.push(fill);
+            }
         }
     );
     if !models.is_empty() {
@@ -4681,13 +4974,195 @@ pub fn refresh_chunk_campfire_models(
 pub struct BlockModelAssets {
     pub campfire_scene: Handle<WorldAsset>,
     pub light_bulb_scene: Handle<WorldAsset>,
+    pub crucible_scene: Handle<WorldAsset>,
+    pub ingot_mold_scene: Handle<WorldAsset>,
+    pub ingot_scene: Handle<WorldAsset>,
+    pub ingot_fill_mesh: Handle<Mesh>,
+    pub crucible_fill_mesh: Handle<Mesh>,
+    pub ingot_fill_materials: Vec<Handle<StandardMaterial>>,
+    pub cast_ingot_materials: Vec<Handle<StandardMaterial>>,
 }
 
-pub fn setup_campfire_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
+#[derive(Component, Clone)]
+pub struct CastIngotMaterialOverride(pub Handle<StandardMaterial>);
+
+#[derive(Clone, Copy)]
+pub enum MetalFillKind {
+    Crucible,
+    IngotMold,
+}
+
+#[derive(Component)]
+pub struct MetalFill {
+    pub pos: IVec3,
+    pub kind: MetalFillKind,
+}
+
+pub fn setup_campfire_assets(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    const THERMAL_LEVELS: usize = 33;
+    let mut noise_pixels = Vec::with_capacity(32 * 32 * 4);
+    for y in 0..32u32 {
+        for x in 0..32u32 {
+            let mut hash = x.wrapping_mul(0x9E37_79B9)
+                ^ y.wrapping_mul(0x85EB_CA6B)
+                ^ (x + y * 32).wrapping_mul(0xC2B2_AE35);
+            hash ^= hash >> 16;
+            hash = hash.wrapping_mul(0x7FEB_352D);
+            hash ^= hash >> 15;
+            let fine = (hash & 31) as u8;
+            let coarse = (((x / 4) * 13 + (y / 4) * 7) & 15) as u8;
+            let value = 205u8.saturating_add(fine).saturating_add(coarse);
+            noise_pixels.extend_from_slice(&[value, value, value, 255]);
+        }
+    }
+    let metal_noise = images.add(Image::new(
+        bevy::render::render_resource::Extent3d {
+            width: 32,
+            height: 32,
+            depth_or_array_layers: 1,
+        },
+        bevy::render::render_resource::TextureDimension::D2,
+        noise_pixels,
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::default(),
+    ));
+    let ingot_fill_materials = (0..THERMAL_LEVELS)
+        .map(|level| {
+            let heat = level as f32 / (THERMAL_LEVELS - 1) as f32;
+            let hot_color = if heat < 0.55 {
+                let t = heat / 0.55;
+                [0.30 + 0.65 * t, 0.08 + 0.20 * t, 0.04]
+            } else {
+                let t = (heat - 0.55) / 0.45;
+                [0.95 + 0.05 * t, 0.28 + 0.62 * t, 0.04 + 0.38 * t]
+            };
+            let emission = heat.powf(1.6) * 12.0;
+            materials.add(StandardMaterial {
+                base_color: Color::srgb(hot_color[0], hot_color[1], hot_color[2]),
+                base_color_texture: Some(metal_noise.clone()),
+                emissive: LinearRgba::rgb(
+                    hot_color[0] * emission,
+                    hot_color[1] * emission,
+                    hot_color[2] * emission,
+                ),
+                emissive_texture: Some(metal_noise.clone()),
+                metallic: 0.9,
+                perceptual_roughness: 0.32,
+                ..default()
+            })
+        })
+        .collect();
+    let cast_ingot_materials = [
+        Color::srgb(0.72, 0.30, 0.12), // copper
+        Color::srgb(0.42, 0.45, 0.48), // iron
+        Color::srgb(0.58, 0.34, 0.12), // bronze
+        Color::srgb(0.72, 0.57, 0.16), // brass
+        Color::srgb(0.32, 0.36, 0.40), // steel
+        Color::srgb(0.38, 0.28, 0.24), // mixed/impure
+    ]
+    .into_iter()
+    .map(|base_color| {
+        materials.add(StandardMaterial {
+            base_color,
+            base_color_texture: Some(metal_noise.clone()),
+            metallic: 0.85,
+            perceptual_roughness: 0.34,
+            ..default()
+        })
+    })
+    .collect();
     commands.insert_resource(BlockModelAssets {
         campfire_scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("model/campfire.gltf")),
         light_bulb_scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("model/light_blub.gltf")),
+        crucible_scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("model/crucible.gltf")),
+        ingot_mold_scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("model/ingot_mold.gltf")),
+        ingot_scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("model/ingot.gltf")),
+        ingot_fill_mesh: meshes.add(Cuboid::new(9.8 / 16.0, 1.0, 5.8 / 16.0)),
+        crucible_fill_mesh: meshes.add(Cuboid::new(4.4 / 16.0, 1.0, 4.4 / 16.0)),
+        ingot_fill_materials,
+        cast_ingot_materials,
     });
+}
+
+pub fn apply_cast_ingot_materials(
+    mut commands: Commands,
+    roots: Query<(Entity, &CastIngotMaterialOverride)>,
+    children: Query<&Children>,
+    meshes: Query<(), With<Mesh3d>>,
+) {
+    for (root, material) in &roots {
+        let mut pending = vec![root];
+        while let Some(entity) = pending.pop() {
+            if meshes.contains(entity) {
+                commands
+                    .entity(entity)
+                    .insert(MeshMaterial3d(material.0.clone()));
+            }
+            if let Ok(entity_children) = children.get(entity) {
+                pending.extend(entity_children.iter());
+            }
+        }
+    }
+}
+
+pub fn update_ingot_mold_fill_system(
+    world: Res<VoxelWorld>,
+    assets: Res<BlockModelAssets>,
+    mut fills: Query<(
+        &MetalFill,
+        &mut Transform,
+        &mut Visibility,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
+) {
+    for (fill, mut transform, mut visibility, mut material) in &mut fills {
+        let (mass, capacity, temperature, bottom, max_height) = match fill.kind {
+            MetalFillKind::IngotMold => {
+                let Some(data) = world.ingot_molds.get(&fill.pos) else {
+                    *visibility = Visibility::Hidden;
+                    continue;
+                };
+                (
+                    data.total_mass(),
+                    crate::chemistry::INGOT_MOLD_CAPACITY_GRAMS,
+                    crate::thermodynamics::unpack_temperature(data.temp, data.temp_acc),
+                    1.70 / 16.0,
+                    3.10 / 16.0,
+                )
+            }
+            MetalFillKind::Crucible => {
+                let Some(data) = world.crucibles.get(&fill.pos) else {
+                    *visibility = Visibility::Hidden;
+                    continue;
+                };
+                (
+                    data.liquid_mass.iter().copied().sum(),
+                    crate::chemistry::CRUCIBLE_CAPACITY_GRAMS,
+                    crate::thermodynamics::unpack_temperature(data.temp, data.temp_acc),
+                    0.65 / 16.0,
+                    4.35 / 16.0,
+                )
+            }
+        };
+        let ratio = mass as f32 / capacity as f32;
+        if ratio <= 0.0 {
+            *visibility = Visibility::Hidden;
+            continue;
+        }
+        let height = max_height * ratio.clamp(0.0, 1.0);
+        transform.translation.y = fill.pos.y as f32 + bottom + height * 0.5;
+        transform.scale.y = height;
+        let heat = ((temperature - 450.0) / (1_600.0 - 450.0)).clamp(0.0, 1.0);
+        let level = (heat * (assets.ingot_fill_materials.len() - 1) as f32).round() as usize;
+        material.0 = assets.ingot_fill_materials[level].clone();
+        *visibility = Visibility::Inherited;
+    }
 }
 
 pub fn process_generated_chunks_system(
@@ -4711,7 +5186,10 @@ pub fn process_generated_chunks_system(
     // Process Blocks
     let mut received_blocks = Vec::new();
     {
-        let receiver = generator.receiver_blocks.lock().unwrap();
+        let receiver = generator
+            .receiver_blocks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         while let Ok(block_data) = receiver.try_recv() {
             received_blocks.push(block_data);
             if received_blocks.len() >= 2 { break; }
@@ -4774,6 +5252,7 @@ pub fn process_generated_chunks_system(
             light_missing_neighbors: 0,
             emitters,
         });
+
         generator.generating_blocks.remove(&chunk_pos);
 
         // chunk ใหม่โผล่มา = แสงที่ขอบของเพื่อนบ้านอาจเปลี่ยน — แต่ปลุก**เฉพาะตัวที่
@@ -4807,7 +5286,10 @@ pub fn process_generated_chunks_system(
     // Process Meshes
     let mut received_meshes = Vec::new();
     {
-        let receiver = generator.receiver_meshes.lock().unwrap();
+        let receiver = generator
+            .receiver_meshes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         while let Ok(mesh_data) = receiver.try_recv() {
             received_meshes.push(mesh_data);
             if received_meshes.len() >= 1 { break; }
@@ -5195,7 +5677,7 @@ pub struct OpenContainerState {
 pub struct OpenContainer(pub Option<OpenContainerState>);
 
 /// ไอเทมทั้งหมดที่เลือกวางได้ (รายการในหน้าต่างกด E)
-pub const PLACEABLE_ITEMS: [crate::item::Item; 35] = [
+pub const PLACEABLE_ITEMS: [crate::item::Item; 49] = [
     crate::item::Item::Tool(crate::item::ToolType::Chisel),
     crate::item::Item::Tool(crate::item::ToolType::CopperWire),
     crate::item::Item::Tool(crate::item::ToolType::Pickaxe),
@@ -5203,8 +5685,36 @@ pub const PLACEABLE_ITEMS: [crate::item::Item; 35] = [
     crate::item::Item::Tool(crate::item::ToolType::Shovel),
     crate::item::Item::Material(crate::item::MaterialType::Copper),
     crate::item::Item::Material(crate::item::MaterialType::Iron),
+    crate::item::Item::CastIngot(crate::chemistry::CastIngotData {
+        mass: 1_000, composition: [1_000, 0, 0, 0, 0, 0, 0, 0],
+        quality_permille: 1_000, kind: crate::chemistry::CastIngotKind::Copper,
+    }),
+    crate::item::Item::CastIngot(crate::chemistry::CastIngotData {
+        mass: 1_000, composition: [0, 0, 0, 1_000, 0, 0, 0, 0],
+        quality_permille: 1_000, kind: crate::chemistry::CastIngotKind::Iron,
+    }),
+    crate::item::Item::Material(crate::item::MaterialType::Coal),
+    crate::item::Item::Material(crate::item::MaterialType::Stick),
+    crate::item::Item::Material(crate::item::MaterialType::Slag),
+    crate::item::Item::Material(crate::item::MaterialType::Limestone),
+    crate::item::Item::CastIngot(crate::chemistry::CastIngotData {
+        mass: 1_000, composition: [880, 120, 0, 0, 0, 0, 0, 0],
+        quality_permille: 1_000, kind: crate::chemistry::CastIngotKind::Bronze,
+    }),
+    crate::item::Item::CastIngot(crate::chemistry::CastIngotData {
+        mass: 1_000, composition: [700, 0, 300, 0, 0, 0, 0, 0],
+        quality_permille: 1_000, kind: crate::chemistry::CastIngotKind::Brass,
+    }),
+    crate::item::Item::CastIngot(crate::chemistry::CastIngotData {
+        mass: 1_000, composition: [0, 0, 0, 990, 10, 0, 0, 0],
+        quality_permille: 1_000, kind: crate::chemistry::CastIngotKind::Steel,
+    }),
+    crate::item::Item::CastIngot(crate::chemistry::CastIngotData {
+        mass: 1_000, composition: [800, 0, 0, 0, 0, 200, 0, 0],
+        quality_permille: 400, kind: crate::chemistry::CastIngotKind::Mixed,
+    }),
     crate::item::Item::Block(BlockType::Dirt), crate::item::Item::Block(BlockType::Grass),
-    crate::item::Item::Block(BlockType::Stone), crate::item::Item::Block(BlockType::Wood),
+    crate::item::Item::Block(BlockType::Stone), crate::item::Item::Block(BlockType::OakWood),
     crate::item::Item::Block(BlockType::Leaves), crate::item::Item::Block(BlockType::Sand),
     crate::item::Item::Block(BlockType::Water8), crate::item::Item::Block(BlockType::Glowstone),
     crate::item::Item::Block(BlockType::LampRed), crate::item::Item::Block(BlockType::LampGreen),
@@ -5215,8 +5725,10 @@ pub const PLACEABLE_ITEMS: [crate::item::Item; 35] = [
     crate::item::Item::Block(BlockType::Furnace), crate::item::Item::Block(BlockType::Chest),
     crate::item::Item::Block(BlockType::Campfire), crate::item::Item::Block(BlockType::Branch),
     crate::item::Item::Block(BlockType::SnowyGrass), crate::item::Item::Block(BlockType::Snow),
-    crate::item::Item::Block(BlockType::SpruceLog), crate::item::Item::Block(BlockType::SpruceLeaves),
+    crate::item::Item::Block(BlockType::SpruceLog), crate::item::Item::Block(BlockType::SpruceLogDamaged1), crate::item::Item::Block(BlockType::SpruceLogDamaged2), crate::item::Item::Block(BlockType::SpruceLeaves),
     crate::item::Item::Block(BlockType::CopperOre), crate::item::Item::Block(BlockType::IronOre),
+    crate::item::Item::Block(BlockType::Crucible),
+    crate::item::Item::Block(BlockType::IngotMold),
 ];
 
 /// texture ที่ใช้เป็น icon บนช่อง hotbar — เอาหน้าข้างก่อน (grass เห็นเป็น
@@ -5249,6 +5761,30 @@ pub fn spawn_block_model(
     if block == BlockType::Campfire {
         return commands.spawn((
             WorldAssetRoot(campfire_assets.campfire_scene.clone()),
+            Transform::from_translation(pos).with_scale(Vec3::splat(size)),
+            layers,
+        )).id();
+    }
+
+    if block == BlockType::Crucible {
+        return commands.spawn((
+            WorldAssetRoot(campfire_assets.crucible_scene.clone()),
+            Transform::from_translation(pos).with_scale(Vec3::splat(size)),
+            layers,
+        )).id();
+    }
+
+    if block == BlockType::IngotMold {
+        return commands.spawn((
+            WorldAssetRoot(campfire_assets.ingot_mold_scene.clone()),
+            Transform::from_translation(pos).with_scale(Vec3::splat(size)),
+            layers,
+        )).id();
+    }
+
+    if block == BlockType::CastIngot {
+        return commands.spawn((
+            WorldAssetRoot(campfire_assets.ingot_scene.clone()),
             Transform::from_translation(pos).with_scale(Vec3::splat(size)),
             layers,
         )).id();
@@ -5354,13 +5890,14 @@ pub fn start_icon_bake(
 
         // เฉพาะบล็อก (ที่ไม่ใช่หญ้าสูง) กับ Pickaxe ที่จะเรนเดอร์ 3D
         let is_pickaxe = matches!(item, crate::item::Item::Tool(crate::item::ToolType::Pickaxe));
+        let is_cast_ingot = matches!(item, crate::item::Item::CastIngot(_));
         let is_block = match item {
             crate::item::Item::Block(crate::voxel::BlockType::TallGrass) => false,
             crate::item::Item::Block(_) => true,
             _ => false,
         };
         
-        if !is_block && !is_pickaxe {
+        if !is_block && !is_pickaxe && !is_cast_ingot {
             continue;
         }
 
@@ -5384,6 +5921,17 @@ pub fn start_icon_bake(
                 &mut commands, &mut meshes, &mut materials, &block_mats, &campfire_assets,
                 block, Vec3::ZERO, 1.0, render_layer.clone(),
             )
+        } else if let crate::item::Item::CastIngot(data) = item {
+            commands
+                .spawn((
+                    WorldAssetRoot(campfire_assets.ingot_scene.clone()),
+                    Transform::from_translation(Vec3::ZERO),
+                    render_layer.clone(),
+                    CastIngotMaterialOverride(
+                        campfire_assets.cast_ingot_materials[data.kind.to_u8() as usize].clone(),
+                    ),
+                ))
+                .id()
         } else {
             use bevy::gltf::GltfAssetLabel;
             use bevy::light::NotShadowCaster;
@@ -5440,7 +5988,7 @@ pub fn propagate_render_layers(
 ) {
     for (entity, parent) in q_children.iter() {
         if let Ok(layers) = q_parents.get(parent.0) {
-            commands.entity(entity).insert(layers.clone());
+            commands.entity(entity).try_insert(layers.clone());
         }
     }
 }
@@ -5534,6 +6082,8 @@ pub fn hotbar_input_system(
     let item = hotbar.slots[hotbar.selected].map(|s| s.item);
     let block = match item {
         Some(crate::item::Item::Block(b)) => b,
+        Some(crate::item::Item::Crucible(_)) => BlockType::Crucible,
+        Some(crate::item::Item::CastIngot(_)) => BlockType::CastIngot,
         _ => BlockType::Air,
     };
     if selected.0 != block {
@@ -5675,6 +6225,7 @@ pub fn voxel_raycast_system(
 
     let mut hit = false;
     let mut side = 0; // 0 = x, 1 = y, 2 = z
+    let mut precise_normal = None;
 
     for _ in 0..50 {
         let dist = Vec3::new(map_x as f32 + 0.5, map_y as f32 + 0.5, map_z as f32 + 0.5).distance(origin);
@@ -5684,8 +6235,18 @@ pub fn voxel_raycast_system(
 
         let block = world.get_block(map_x, map_y, map_z);
         if block != BlockType::Air && !block.is_water() {
-            hit = true;
-            break;
+            let block_pos = IVec3::new(map_x, map_y, map_z);
+            let (local_min, local_max) = block_collision_box_at(&world, block_pos, block);
+            let base = block_pos.as_vec3();
+            if let Some((distance, normal)) =
+                ray_aabb_hit(origin, dir, base + local_min, base + local_max)
+            {
+                if distance <= max_dist {
+                    hit = true;
+                    precise_normal = Some(normal);
+                    break;
+                }
+            }
         }
 
         if side_dist_x < side_dist_y {
@@ -5715,13 +6276,15 @@ pub fn voxel_raycast_system(
         return;
     }
 
-    let mut normal = IVec3::ZERO;
-    if side == 0 {
-        normal.x = -step_x;
-    } else if side == 1 {
-        normal.y = -step_y;
-    } else {
-        normal.z = -step_z;
+    let mut normal = precise_normal.unwrap_or(IVec3::ZERO);
+    if normal == IVec3::ZERO {
+        if side == 0 {
+            normal.x = -step_x;
+        } else if side == 1 {
+            normal.y = -step_y;
+        } else {
+            normal.z = -step_z;
+        }
     }
 
     let block = world.get_block(map_x, map_y, map_z);
@@ -5746,10 +6309,19 @@ pub fn voxel_raycast_system(
     let offset = normal_f * 0.01;
     let block_pos = Vec3::new(map_x as f32, map_y as f32, map_z as f32);
 
-    let p0 = block_pos + Vec3::from_array(positions[0]) + offset;
-    let p1 = block_pos + Vec3::from_array(positions[1]) + offset;
-    let p2 = block_pos + Vec3::from_array(positions[2]) + offset;
-    let p3 = block_pos + Vec3::from_array(positions[3]) + offset;
+    let (c_min, c_max) = block_collision_box_at(&world, IVec3::new(map_x, map_y, map_z), block);
+    let transform_pos = |p: [f32; 3]| -> Vec3 {
+        Vec3::new(
+            if p[0] == 0.0 { c_min.x } else { c_max.x },
+            if p[1] == 0.0 { c_min.y } else { c_max.y },
+            if p[2] == 0.0 { c_min.z } else { c_max.z },
+        )
+    };
+
+    let p0 = block_pos + transform_pos(positions[0]) + offset;
+    let p1 = block_pos + transform_pos(positions[1]) + offset;
+    let p2 = block_pos + transform_pos(positions[2]) + offset;
+    let p3 = block_pos + transform_pos(positions[3]) + offset;
 
     let color = Color::BLACK;
     gizmos.line(p0, p1, color);
@@ -5903,11 +6475,15 @@ pub fn apply_block_edit(world: &mut VoxelWorld, edit: &crate::network::BlockEdit
                 if new_block != old_block {
                     if new_block == BlockType::Branch {
                         attach_branch_node(world, p);
+                    } else if new_block == BlockType::Crucible {
+                        world.crucibles.insert(p, crate::chemistry::CrucibleData::default());
+                    } else if new_block == BlockType::IngotMold {
+                        world.ingot_molds.insert(p, crate::chemistry::IngotMoldData::default());
                     } else if old_block == BlockType::Branch {
                         let orphans = world.branch_network.detach(p);
                         world.pending_branch_orphans.extend(orphans);
                         queue_leaf_decay_around(world, p);
-                    } else if old_block == BlockType::SpruceLog {
+                    } else if (old_block == BlockType::SpruceLog || old_block == BlockType::SpruceLogDamaged1 || old_block == BlockType::SpruceLogDamaged2) && new_block == BlockType::Air {
                         // ท่อนบนขาดที่ยึด → เข้าคิว cascade + ใบรอบๆ อาจร่วงตาม
                         world.pending_spruce_orphans.insert(p + IVec3::Y);
                         queue_leaf_decay_around(world, p);
@@ -5965,20 +6541,48 @@ pub fn apply_block_edit(world: &mut VoxelWorld, edit: &crate::network::BlockEdit
             world.set_chiseled_sub_voxel(x, y, z, sub[0] as usize, sub[1] as usize, sub[2] as usize, *val);
             Some(IVec3::new(x, y, z))
         }
+        BlockEdit::PlaceContainerBlock { pos, block, contents, crucible_data } => {
+            block_edit::place_container(world, *pos, *block, contents, *crucible_data)
+        }
         BlockEdit::SetContainerSlot { pos, slot, item } => {
-            let [x, y, z] = *pos;
-            let stack = item.and_then(|w| w.to_stack());
-            match world.get_block(x, y, z) {
-                BlockType::Chest if (*slot as usize) < 27 => {
-                    world.set_chest_slot(x, y, z, *slot as usize, stack);
-                    Some(IVec3::new(x, y, z))
-                }
-                BlockType::Furnace if (*slot as usize) < 3 => {
-                    world.set_furnace_slot(x, y, z, *slot as usize, stack);
-                    Some(IVec3::new(x, y, z))
-                }
-                _ => None,
+            block_edit::set_container_slot(world, *pos, *slot, *item)
+        }
+        BlockEdit::AddFurnaceAir { pos } => {
+            block_edit::add_furnace_air(world, *pos)
+        }
+        BlockEdit::SetIngotMold { pos, data } => {
+            let p = IVec3::from_array(*pos);
+            if world.get_block(p.x, p.y, p.z) != BlockType::IngotMold
+                || data.total_mass() > crate::chemistry::INGOT_MOLD_CAPACITY_GRAMS
+            {
+                return None;
             }
+            world.ingot_molds.insert(p, *data);
+            Some(p)
+        }
+        BlockEdit::TakeIngotMold { pos } => {
+            let p = IVec3::from_array(*pos);
+            let mold = world.ingot_molds.get(&p)?;
+            if world.get_block(p.x, p.y, p.z) != BlockType::IngotMold
+                || !crate::chemistry::mold_ready_to_extract(mold)
+            {
+                return None;
+            }
+            world.ingot_molds.insert(p, crate::chemistry::IngotMoldData::default());
+            Some(p)
+        }
+        BlockEdit::PlaceCastIngot { pos, data } => {
+            let p = IVec3::from_array(*pos);
+            if data.mass == 0
+                || data.mass > crate::chemistry::INGOT_MOLD_CAPACITY_GRAMS
+                || data.composition.iter().copied().sum::<u32>() != data.mass
+                || world.get_block(p.x, p.y, p.z) != BlockType::Air
+                || !world.set_block(p.x, p.y, p.z, BlockType::CastIngot)
+            {
+                return None;
+            }
+            world.placed_ingots.insert(p, *data);
+            Some(p)
         }
     }
 }
@@ -6019,6 +6623,7 @@ pub fn remesh_chunks(
     commands: &mut Commands,
     world: &mut VoxelWorld,
     mp: &mut MeshingParams,
+    breaking_target: Option<(IVec3, f32)>,
     chunk_positions: impl IntoIterator<Item = IVec2>,
 ) -> Vec<IVec2> {
     let mut skipped = Vec::new();
@@ -6052,7 +6657,7 @@ pub fn remesh_chunks(
             old_vertices = chunk_data.num_vertices;
             old_indices = chunk_data.num_indices;
 
-            let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors, Some(&chunk_data.chiseled_blocks), Some(&chunk_data.facings), Some(&world.branch_network), light.as_ref());
+            let s = create_mesh_from_blocks(chunk_pos, &chunk_data.blocks, &neighbors, Some(&chunk_data.chiseled_blocks), Some(&chunk_data.facings), Some(&world.branch_network), light.as_ref(), breaking_target);
             chunk_data.num_vertices = s.total_vertices();
             chunk_data.num_indices = s.total_indices();
             chunk_data.num_water_vertices = s.water.positions.len();
@@ -6295,6 +6900,24 @@ pub fn block_interaction_system(
             if net_client.is_none() {
                 active_tnt.0.insert(hit.pos, Timer::from_seconds(fuse, TimerMode::Once));
             }
+        } else if place_pressed
+            && hit.block == BlockType::IngotMold
+            && hotbar.slots[hotbar.selected]
+                .is_some_and(|stack| matches!(stack.item, crate::item::Item::Crucible(_)))
+        {
+            let selected_slot = hotbar.selected;
+            if let Some(stack) = hotbar.slots[selected_slot].as_mut() {
+                if let crate::item::Item::Crucible(mut crucible) = stack.item {
+                    let mold = world.ingot_molds.entry(hit.pos).or_default();
+                    if crate::chemistry::pour_crucible_into_mold(&mut crucible, mold).is_ok() {
+                        stack.item = crate::item::Item::Crucible(crucible);
+                        edit = Some(BlockEdit::SetIngotMold {
+                            pos: hit.pos.to_array(),
+                            data: *mold,
+                        });
+                    }
+                }
+            }
         } else if break_pressed || hold_mining {
             // ของที่ถืออยู่ — ใช้ทั้งคิดความเร็วขุดและกติกา drop (Survival)
             let held_tool = match hotbar.slots[hotbar.selected].map(|s| s.item) {
@@ -6315,6 +6938,25 @@ pub fn block_interaction_system(
                     true
                 } else {
                     breaking.target = Some((hit.pos, progress));
+                    if hit.block == BlockType::Branch {
+                        world.pending_branch_remesh.extend(edit_affected_chunks(hit.pos));
+                    } else if hit.block == BlockType::SpruceLog && progress > 0.33 {
+                        let e = BlockEdit::SetBlock { pos: hit.pos.to_array(), block: BlockType::SpruceLogDamaged1 as u8 };
+                        if let Some(tp) = apply_block_edit(&mut world, &e) {
+                            remesh_chunks(&mut commands, &mut world, &mut mp, None, edit_affected_chunks(tp));
+                            if net_server.is_some() || net_client.is_some() {
+                                net_out.0.push_back((None, e));
+                            }
+                        }
+                    } else if hit.block == BlockType::SpruceLogDamaged1 && progress > 0.66 {
+                        let e = BlockEdit::SetBlock { pos: hit.pos.to_array(), block: BlockType::SpruceLogDamaged2 as u8 };
+                        if let Some(tp) = apply_block_edit(&mut world, &e) {
+                            remesh_chunks(&mut commands, &mut world, &mut mp, None, edit_affected_chunks(tp));
+                            if net_server.is_some() || net_client.is_some() {
+                                net_out.0.push_back((None, e));
+                            }
+                        }
+                    }
                     false
                 }
             } else {
@@ -6354,10 +6996,36 @@ pub fn block_interaction_system(
             // ถึงได้ของ (กติกา Minecraft) มือเปล่า/tool ผิดหมวด = บล็อกหายเปล่า
             let drops_item = !block_requires_tool(hit.block)
                 || held_tool.is_some_and(|t| t.dig_class() == block_dig_class(hit.block));
-            if survival && drops_item {
+            // Crucible is a stateful vessel: always return it with its contents in both
+            // Creative and Survival. Losing it in Creative also destroys molten metal.
+            if hit.block == BlockType::Crucible {
+                let crucible_data = world.crucibles.get(&hit.pos).copied().unwrap_or_default();
+                spawn_events.write(crate::item::SpawnDroppedItemEvent {
+                    item: crate::item::Item::Crucible(crucible_data),
+                    pos: hit.pos.as_vec3() + Vec3::new(0.5, 0.5, 0.5),
+                    velocity: Vec3::new(
+                        (fastrand::f32() - 0.5) * 4.0,
+                        2.0 + fastrand::f32() * 3.0,
+                        (fastrand::f32() - 0.5) * 4.0,
+                    ),
+                });
+            } else if hit.block == BlockType::CastIngot {
+                if let Some(ingot) = world.placed_ingots.get(&hit.pos).copied() {
+                    spawn_events.write(crate::item::SpawnDroppedItemEvent {
+                        item: crate::item::Item::CastIngot(ingot),
+                        pos: hit.pos.as_vec3() + Vec3::new(0.5, 0.3, 0.5),
+                        velocity: Vec3::new(
+                            (fastrand::f32() - 0.5) * 4.0,
+                            2.0 + fastrand::f32() * 3.0,
+                            (fastrand::f32() - 0.5) * 4.0,
+                        ),
+                    });
+                }
+            } else if survival && drops_item {
                 let dropped_item = match hit.block {
                     BlockType::CopperOre => crate::item::Item::Material(crate::item::MaterialType::Copper),
                     BlockType::IronOre => crate::item::Item::Material(crate::item::MaterialType::Iron),
+                    BlockType::SpruceLogDamaged1 | BlockType::SpruceLogDamaged2 => crate::item::Item::Block(BlockType::SpruceLog),
                     _ => crate::item::Item::Block(hit.block),
                 };
                 spawn_events.write(crate::item::SpawnDroppedItemEvent {
@@ -6385,7 +7053,22 @@ pub fn block_interaction_system(
         } else if place_pressed && selected.0 == BlockType::Air {
             // Interact! (กดคลิกขวาด้วยมือเปล่า)
             let current = world.get_block(hit.pos.x, hit.pos.y, hit.pos.z);
-            if current == BlockType::SwitchOff {
+            if current == BlockType::IngotMold {
+                if let Some(ingot) = world
+                    .ingot_molds
+                    .get(&hit.pos)
+                    .and_then(crate::chemistry::cast_ingot_from_mold)
+                {
+                    spawn_events.write(crate::item::SpawnDroppedItemEvent {
+                        item: crate::item::Item::CastIngot(ingot),
+                        pos: hit.pos.as_vec3() + Vec3::new(0.5, 0.6, 0.5),
+                        velocity: Vec3::new(0.0, 2.0, 0.0),
+                    });
+                    edit = Some(BlockEdit::TakeIngotMold {
+                        pos: hit.pos.to_array(),
+                    });
+                }
+            } else if current == BlockType::SwitchOff {
                 edit = Some(BlockEdit::SetBlock {
                     pos: hit.pos.to_array(),
                     block: BlockType::SwitchOn as u8,
@@ -6405,7 +7088,23 @@ pub fn block_interaction_system(
                     placed: BlockType::SwitchOff,
                     replaced: BlockType::SwitchOn,
                 });
-            } else if matches!(current, BlockType::Furnace | BlockType::Chest) {
+            } else if matches!(current, BlockType::Furnace | BlockType::Chest | BlockType::Crucible) {
+                if current == BlockType::Crucible {
+                    if let Some(crate::item::Item::Tool(crate::item::ToolType::SlagSkimmer)) = hotbar.slots[hotbar.selected].map(|s| s.item) {
+                        if let Some(crucible) = world.crucibles.get_mut(&hit.pos) {
+                            let slag = crucible.liquid_mass[crate::chemistry::Element::Slag as usize];
+                            if slag > 0 {
+                                crucible.liquid_mass[crate::chemistry::Element::Slag as usize] = 0;
+                                spawn_events.write(crate::item::SpawnDroppedItemEvent {
+                                    item: crate::item::Item::Material(crate::item::MaterialType::Slag),
+                                    pos: hit.pos.as_vec3() + Vec3::new(0.5, 1.0, 0.5),
+                                    velocity: Vec3::new(0.0, 2.0, 0.0),
+                                });
+                            }
+                        }
+                        return;
+                    }
+                }
                 // เปิดกล่อง — ไม่ใช่การแก้บล็อก ใช้ plumbing เดียวกับหน้าต่างช่องเก็บของ (กด E)
                 open_container.0 = Some(OpenContainerState { pos: hit.pos, kind: current });
                 inventory.0 = true;
@@ -6428,8 +7127,9 @@ pub fn block_interaction_system(
                     let feet = cam.translation - Vec3::Y * crate::camera::EYE_HEIGHT;
                     let pmin = feet - Vec3::new(crate::camera::PLAYER_HALF, 0.0, crate::camera::PLAYER_HALF);
                     let pmax = feet + Vec3::new(crate::camera::PLAYER_HALF, crate::camera::PLAYER_HEIGHT, crate::camera::PLAYER_HALF);
-                    let bmin = p.as_vec3();
-                    let bmax = bmin + Vec3::ONE;
+                    let (local_min, local_max) = block_collision_box(selected.0);
+                    let bmin = p.as_vec3() + local_min;
+                    let bmax = p.as_vec3() + local_max;
                     blocked = pmin.x < bmax.x && pmax.x > bmin.x
                         && pmin.y < bmax.y && pmax.y > bmin.y
                         && pmin.z < bmax.z && pmax.z > bmin.z;
@@ -6456,6 +7156,27 @@ pub fn block_interaction_system(
                         pos: p.to_array(),
                         block: selected.0 as u8,
                         facing,
+                    }
+                } else if selected.0 == BlockType::Crucible {
+                    let mut crucible_data_opt = None;
+                    if let Some(crate::item::Item::Crucible(crucible)) = hotbar.slots[hotbar.selected].as_ref().map(|s| s.item) {
+                        crucible_data_opt = Some(crucible);
+                    }
+                    BlockEdit::PlaceContainerBlock {
+                        pos: p.to_array(),
+                        block: selected.0 as u8,
+                        contents: vec![],
+                        crucible_data: crucible_data_opt,
+                    }
+                } else if selected.0 == BlockType::CastIngot {
+                    let Some(crate::item::Item::CastIngot(data)) =
+                        hotbar.slots[hotbar.selected].map(|stack| stack.item)
+                    else {
+                        return;
+                    };
+                    BlockEdit::PlaceCastIngot {
+                        pos: p.to_array(),
+                        data,
                     }
                 } else {
                     BlockEdit::SetBlock {
@@ -6523,7 +7244,7 @@ pub fn block_interaction_system(
         save_loaded_chunk(&world, edited_chunk);
     }
 
-    remesh_chunks(&mut commands, &mut world, &mut mp, edit_affected_chunks(tp));
+    remesh_chunks(&mut commands, &mut world, &mut mp, None, edit_affected_chunks(tp));
 
     // บล็อกเปลี่ยนเฉพาะใน chunk ที่แก้ — อัปเดต PointLight/โมเดล Campfire เฉพาะตรงนั้น
     refresh_chunk_lamp_lights(&mut commands, &mut world, edited_chunk);
@@ -6927,7 +7648,7 @@ pub fn tnt_detonation_system(
     for cp in &edited_chunks {
         save_loaded_chunk(&world, *cp);
     }
-    remesh_chunks(&mut commands, &mut world, &mut mp, remesh);
+    remesh_chunks(&mut commands, &mut world, &mut mp, None, remesh);
     for cp in edited_chunks {
         refresh_chunk_lamp_lights(&mut commands, &mut world, cp);
         refresh_chunk_campfire_models(&mut commands, &mut world, cp, &campfire_assets);
@@ -7021,7 +7742,11 @@ fn start_nuke(world: &VoxelWorld, center: IVec3, settings: &crate::GameSettings,
         }
     }
     let snapshot = WorldSnapshot { chunks };
-    let sender = jobs.sender.lock().unwrap().clone();
+    let sender = jobs
+        .sender
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
     let cluster = vec![center];
     AsyncComputeTaskPool::get()
         .spawn(async move {
@@ -7059,7 +7784,12 @@ pub fn nuke_apply_system(
 
     // ---- รับผลจาก task ----
     loop {
-        let res = { jobs.receiver.lock().unwrap().try_recv() };
+        let res = {
+            jobs.receiver
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .try_recv()
+        };
         let Ok(res) = res else { break };
         let centerf = res.center.as_vec3() + Vec3::splat(0.5);
 
@@ -7087,7 +7817,7 @@ pub fn nuke_apply_system(
             }
             let edit = BlockEdit::SetBlock { pos: p.to_array(), block: BlockType::TntLit as u8 };
             if apply_block_edit(&mut world, &edit).is_some() {
-                remesh_chunks(&mut commands, &mut world, &mut mp, edit_affected_chunks(*p));
+                remesh_chunks(&mut commands, &mut world, &mut mp, None, edit_affected_chunks(*p));
                 if net_server.is_some() {
                     net_out.0.push_back((None, edit));
                 }
@@ -7169,7 +7899,7 @@ pub fn nuke_apply_system(
             }
 
             save_loaded_chunk(&world, cp);
-            remesh_chunks(&mut commands, &mut world, &mut mp, remesh);
+            remesh_chunks(&mut commands, &mut world, &mut mp, None, remesh);
             refresh_chunk_lamp_lights(&mut commands, &mut world, cp);
             refresh_chunk_campfire_models(&mut commands, &mut world, cp, &campfire_assets);
             // multiplayer: ส่ง chunk ทั้งก้อน (ราย edit เป็นแสนจะล้นท่อ reliable)
@@ -8495,7 +9225,7 @@ pub fn branch_remesh_system(
     // ริมขอบ render distance ไม่มีวันมีเพื่อนบ้านครบ จะวนอยู่ในคิวถาวรและโตขึ้นเรื่อยๆ
     // ตอนผู้เล่นเดิน (เคยเห็นค้างที่ 164 ตัว) — ถ้าเพื่อนบ้านมาถึงทีหลัง การ insert chunk
     // จะตีธง light_dirty ให้ แล้ว relight_system จะเข้าคิว remesh ให้เองอยู่แล้ว
-    let _ = remesh_chunks(&mut commands, &mut world, &mut mp, chunks);
+    let _ = remesh_chunks(&mut commands, &mut world, &mut mp, None, chunks);
 }
 
 #[cfg(test)]
@@ -8535,6 +9265,162 @@ mod tests {
             pos: p.to_array(),
             block: block as u8,
         })
+    }
+
+    fn wire_block(block: BlockType, count: u32) -> crate::item::WireItemStack {
+        crate::item::WireItemStack::from_stack(ItemStack {
+            item: crate::item::Item::Block(block),
+            count: Some(count),
+        })
+    }
+
+    #[test]
+    fn container_payloads_apply_with_their_real_capacities() {
+        let mut world = world_with_one_chunk();
+
+        let chest_pos = IVec3::new(1, 1, 1);
+        let chest_edit = crate::network::BlockEdit::PlaceContainerBlock {
+            pos: chest_pos.to_array(),
+            block: BlockType::Chest as u8,
+            contents: vec![Some(wire_block(BlockType::Dirt, 3)); 27],
+            crucible_data: None,
+        };
+        assert_eq!(apply_block_edit(&mut world, &chest_edit), Some(chest_pos));
+        let chest = world
+            .get_chest_slots(chest_pos.x, chest_pos.y, chest_pos.z)
+            .expect("chest payload should create its storage");
+        assert_eq!(chest.len(), 27);
+        assert_eq!(chest[26].expect("last chest slot").count, Some(3));
+
+        let furnace_pos = IVec3::new(2, 1, 1);
+        let furnace_edit = crate::network::BlockEdit::PlaceContainerBlock {
+            pos: furnace_pos.to_array(),
+            block: BlockType::Furnace as u8,
+            contents: vec![
+                Some(wire_block(BlockType::CopperOre, 1)),
+                Some(wire_block(BlockType::OakWood, 2)),
+            ],
+            crucible_data: None,
+        };
+        assert_eq!(
+            apply_block_edit(&mut world, &furnace_edit),
+            Some(furnace_pos)
+        );
+        let furnace = world
+            .get_furnace_slots(furnace_pos.x, furnace_pos.y, furnace_pos.z)
+            .expect("furnace payload should create its storage");
+        assert_eq!(furnace.len(), 2);
+        assert_eq!(furnace[1].expect("fuel slot").count, Some(2));
+    }
+
+    #[test]
+    fn invalid_container_payloads_are_rejected_without_mutating_the_world() {
+        let mut world = world_with_one_chunk();
+        let pos = IVec3::new(1, 1, 1);
+        let oversized = crate::network::BlockEdit::PlaceContainerBlock {
+            pos: pos.to_array(),
+            block: BlockType::Furnace as u8,
+            contents: vec![None; 3],
+            crucible_data: None,
+        };
+        assert_eq!(apply_block_edit(&mut world, &oversized), None);
+        assert_eq!(world.get_block(pos.x, pos.y, pos.z), BlockType::Air);
+
+        assert_eq!(
+            apply_block_edit(
+                &mut world,
+                &crate::network::BlockEdit::SetBlock {
+                    pos: pos.to_array(),
+                    block: BlockType::Furnace as u8,
+                },
+            ),
+            Some(pos)
+        );
+        let out_of_range_slot = crate::network::BlockEdit::SetContainerSlot {
+            pos: pos.to_array(),
+            slot: 2,
+            item: Some(wire_block(BlockType::Dirt, 1)),
+        };
+        assert_eq!(apply_block_edit(&mut world, &out_of_range_slot), None);
+        assert!(world
+            .get_furnace_slots(pos.x, pos.y, pos.z)
+            .is_none());
+    }
+
+    #[test]
+    fn placed_crucible_preserves_crucible_data() {
+        let mut world = world_with_one_chunk();
+        let pos = IVec3::new(1, 1, 1);
+        let mut expected = crate::chemistry::CrucibleData::default();
+        expected.temp = 875;
+        expected.liquid_mass[crate::chemistry::Element::Copper as usize] = 500;
+        let edit = crate::network::BlockEdit::PlaceContainerBlock {
+            pos: pos.to_array(),
+            block: BlockType::Crucible as u8,
+            contents: Vec::new(),
+            crucible_data: Some(expected),
+        };
+
+        assert_eq!(apply_block_edit(&mut world, &edit), Some(pos));
+        assert_eq!(world.crucibles.get(&pos), Some(&expected));
+    }
+
+    #[test]
+    fn placed_cast_ingot_preserves_mass_and_composition() {
+        let mut world = world_with_one_chunk();
+        let pos = IVec3::new(1, 1, 1);
+        let mut composition = [0; 8];
+        composition[crate::chemistry::Element::Copper as usize] = 640;
+        composition[crate::chemistry::Element::Tin as usize] = 160;
+        let expected = crate::chemistry::CastIngotData {
+            mass: 800,
+            composition,
+            quality_permille: 920,
+            kind: crate::chemistry::CastIngotKind::Bronze,
+        };
+        let edit = crate::network::BlockEdit::PlaceCastIngot {
+            pos: pos.to_array(),
+            data: expected,
+        };
+
+        assert_eq!(apply_block_edit(&mut world, &edit), Some(pos));
+        assert_eq!(world.get_block(pos.x, pos.y, pos.z), BlockType::CastIngot);
+        assert_eq!(world.placed_ingots.get(&pos), Some(&expected));
+
+        assert_eq!(
+            apply_block_edit(
+                &mut world,
+                &crate::network::BlockEdit::SetBlock {
+                    pos: pos.to_array(),
+                    block: BlockType::Air as u8,
+                },
+            ),
+            Some(pos)
+        );
+        assert!(!world.placed_ingots.contains_key(&pos));
+    }
+
+    #[test]
+    fn cast_ingot_raycast_uses_model_sized_bounds() {
+        let (min, max) = block_collision_box(BlockType::CastIngot);
+        let base = Vec3::new(4.0, 2.0, 6.0);
+
+        assert!(ray_aabb_hit(
+            base + Vec3::new(0.05, 0.1, -1.0),
+            Vec3::Z,
+            base + min,
+            base + max,
+        )
+        .is_none());
+
+        let (_, normal) = ray_aabb_hit(
+            base + Vec3::new(0.5, 1.0, 0.5),
+            Vec3::NEG_Y,
+            base + min,
+            base + max,
+        )
+        .unwrap();
+        assert_eq!(normal, IVec3::Y);
     }
 
     /// ทุบกิ่งกลางต้น → ทุกกิ่งเหนือขึ้นไปต้องร่วงตามเป็นทอดๆ ส่วนตอที่ยังติดดินต้องอยู่
@@ -8884,7 +9770,7 @@ svg{ background:var(--panel); border:1px solid var(--rule); border-radius:3px;
     /// ต้องรักษา thickness ของลำต้นไว้ครบ ถ้าหลุดตรงไหน mesh จะ fallback เป็นกิ่งผอม
     #[test]
     fn generated_trunk_keeps_its_thickness_through_the_pipeline() {
-        let noise = crate::NoiseParams { frequency: 0.01, amplitude: 24.0, octaves: 4, seed: 1337 };
+        let noise = crate::NoiseParams { frequency: 0.01, amplitude: 24.0, octaves: 4, seed: 1337, temp_offset: 0.0 };
         let mut checked = 0;
         for cx in 0..12 {
             for cz in 0..12 {
@@ -9156,7 +10042,7 @@ svg{ background:var(--panel); border:1px solid var(--rule); border-radius:3px;
     /// worldgen ต้องได้เขตอุณหภูมิ + ผิว biome หลากหลายเมื่อกวาดพื้นที่กว้าง (เหนือ-ใต้ข้ามเขต)
     #[test]
     fn worldgen_produces_varied_biomes() {
-        let noise = crate::NoiseParams { frequency: 0.01, amplitude: 40.0, octaves: 4, seed: 4242 };
+        let noise = crate::NoiseParams { frequency: 0.01, amplitude: 40.0, octaves: 4, seed: 4242, temp_offset: 0.0 };
         let sampler = TerrainSampler::new(noise);
         let mut zones: std::collections::HashSet<crate::biome::ClimateZone> = Default::default();
         let mut surfaces: std::collections::HashSet<BlockType> = Default::default();
@@ -9540,7 +10426,16 @@ svg{ background:var(--panel); border:1px solid var(--rule); border-radius:3px;
         ];
 
         let chunk_pos = IVec2::new(3, -2);
-        let full = create_mesh_from_blocks(chunk_pos, &main, &neighbors, None, None, None, None);
+        let full = create_mesh_from_blocks(
+            chunk_pos,
+            &main,
+            &neighbors,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         let (water, observed) = create_water_mesh(chunk_pos, &main, &neighbors, 0, CHUNK_HEIGHT - 1);
 
         assert!(!full.water.positions.is_empty(), "ฉากทดสอบต้องมีหน้าน้ำจริง");

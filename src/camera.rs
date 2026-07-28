@@ -14,6 +14,7 @@ pub const EYE_HEIGHT: f32 = 1.62;
 const GRAVITY: f32 = 28.0;
 const JUMP_SPEED: f32 = 8.5;
 const WALK_SPEED: f32 = 5.5;
+const SPRINT_SPEED: f32 = 9.0;
 
 #[derive(Component)]
 pub struct FreeCamera {
@@ -25,6 +26,28 @@ pub struct FreeCamera {
     pub fly: bool,
     pub velocity_y: f32,
     pub third_person: bool,
+}
+
+#[derive(Component)]
+pub struct PlayerStats {
+    // Reserved for the survival damage system; stamina is already active.
+    #[allow(dead_code)]
+    pub health: f32,
+    #[allow(dead_code)]
+    pub max_health: f32,
+    pub stamina: f32,
+    pub max_stamina: f32,
+}
+
+impl Default for PlayerStats {
+    fn default() -> Self {
+        Self {
+            health: 100.0,
+            max_health: 100.0,
+            stamina: 100.0,
+            max_stamina: 100.0,
+        }
+    }
 }
 
 #[derive(Component)]
@@ -137,17 +160,20 @@ pub fn camera_movement_system(
     time: Res<Time>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
     world: Res<VoxelWorld>,
-    mut query: Query<(&mut FreeCamera, &mut Transform)>,
+    mut query: Query<(&mut FreeCamera, &mut Transform, &mut PlayerStats)>,
     paused: Res<crate::Paused>,
     chat: Res<crate::ui::ChatState>,
     typing: Res<crate::EguiTyping>,
     inventory: Res<crate::voxel::InventoryOpen>,
+    settings: Res<crate::GameSettings>,
 ) {
     let input_ok = !paused.0 && !chat.open && !typing.0 && !inventory.0;
     // ปุ่มถูกอ่านเฉพาะตอนคุมตัวละครได้ — ฟิสิกส์ข้างล่างเดินต่อไม่สนใจค่านี้
     let pressed = |key| input_ok && keyboard_input.pressed(key);
 
-    for (mut camera, mut transform) in query.iter_mut() {
+    let survival = settings.game_mode == crate::GameMode::Survival;
+
+    for (mut camera, mut transform, mut stats) in query.iter_mut() {
         if input_ok && keyboard_input.just_pressed(KeyCode::KeyF) {
             camera.fly = !camera.fly;
             camera.velocity_y = 0.0;
@@ -212,8 +238,23 @@ pub fn camera_movement_system(
 
             let dt = time.delta_secs();
             let mut horiz = if direction != Vec3::ZERO {
-                direction.normalize() * WALK_SPEED * dt
+                let want_sprint = pressed(KeyCode::ControlLeft) || pressed(KeyCode::ControlRight);
+                let speed = if want_sprint && (!survival || stats.stamina > 0.0) {
+                    if survival {
+                        stats.stamina = (stats.stamina - 15.0 * dt).max(0.0);
+                    }
+                    SPRINT_SPEED
+                } else {
+                    if survival {
+                        stats.stamina = (stats.stamina + 10.0 * dt).min(stats.max_stamina);
+                    }
+                    WALK_SPEED
+                };
+                direction.normalize() * speed * dt
             } else {
+                if survival {
+                    stats.stamina = (stats.stamina + 15.0 * dt).min(stats.max_stamina);
+                }
                 Vec3::ZERO
             };
             
@@ -320,6 +361,7 @@ pub fn setup_camera(
             pitch,
             ..default()
         },
+        PlayerStats::default(),
         transform,
     )).id();
 

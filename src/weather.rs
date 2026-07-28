@@ -304,7 +304,7 @@ fn auto_weather_system(
 
     // ภูมิอากาศ ณ ตำแหน่ง — temp อิงละติจูด+ฤดู (dynamic_temp), humidity จาก sampler (มี band แล้ว)
     let lat = crate::biome::climate_lat(wz);
-    let temp = crate::biome::dynamic_temp(lat, settings.day_of_year as f32);
+    let temp = crate::biome::dynamic_temp(lat, settings.day_of_year as f32) + settings.noise.temp_offset;
     let sampler = crate::voxel::TerrainSampler::new(settings.noise);
     let humidity = sampler.humidity_raw(wx, wz);
     let alt = p.y as f64 - crate::voxel::SEA_LEVEL as f64;

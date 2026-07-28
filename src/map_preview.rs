@@ -11,7 +11,7 @@ const TEX_SIZE: usize = 256;
 const DISPLAY_SIZE: f32 = 340.0;
 /// ช่วง zoom (world-units ต่อ texel)
 const ZOOM_MIN: f32 = 0.1;
-const ZOOM_MAX: f32 = 64.0;
+const ZOOM_MAX: f32 = 1024.0;
 
 /// โหมดระบายแผนที่
 #[derive(Clone, Copy, PartialEq)]

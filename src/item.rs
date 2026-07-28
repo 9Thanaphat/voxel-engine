@@ -109,7 +109,8 @@ pub enum Item {
     Block(BlockType),
     Tool(ToolType),
     Material(MaterialType),
-    Pot(crate::chemistry::CrucibleData),
+    Crucible(crate::chemistry::CrucibleData),
+    CastIngot(crate::chemistry::CastIngotData),
 }
 
 pub struct FuelProperties {
@@ -142,7 +143,8 @@ pub fn item_to_wire(item: Item) -> (u8, u8) {
         Item::Block(b) => (0, b as u8),
         Item::Tool(t) => (1, t.to_u8()),
         Item::Material(m) => (2, m.to_u8()),
-        Item::Pot(_) => (3, 0),
+        Item::Crucible(_) => (3, 0),
+        Item::CastIngot(data) => (4, data.kind.to_u8()),
     }
 }
 
@@ -151,7 +153,17 @@ pub fn item_from_wire(kind: u8, id: u8) -> Option<Item> {
         0 => Some(Item::Block(BlockType::from_u8(id))),
         1 => ToolType::from_u8(id).map(Item::Tool),
         2 => MaterialType::from_u8(id).map(Item::Material),
-        3 => Some(Item::Pot(crate::chemistry::CrucibleData::default())), // Empty pot if parsed from just u8 (e.g. held network packet)
+        3 => Some(Item::Crucible(crate::chemistry::CrucibleData::default())), // Empty crucible if parsed from just u8
+        // Compact held-item replication only needs a visual category. Inventory
+        // serialization uses WireItemStack and preserves the full payload.
+        4 => crate::chemistry::CastIngotKind::from_u8(id).map(|kind| {
+            Item::CastIngot(crate::chemistry::CastIngotData {
+                mass: 1_000,
+                composition: [0; 8],
+                quality_permille: 1_000,
+                kind,
+            })
+        }),
         _ => None,
     }
 }
@@ -161,17 +173,24 @@ pub struct SimpleItem {
     pub kind: u8,
     pub id: u8,
     pub count: u32,
+    #[serde(default)]
+    pub cast_ingot: Option<crate::chemistry::CastIngotData>,
 }
 
 impl SimpleItem {
     pub fn from_stack(s: ItemStack) -> Self {
         let (kind, id) = item_to_wire(s.item);
-        Self { kind, id, count: s.count.unwrap_or(1) as u32 }
+        let cast_ingot = match s.item {
+            Item::CastIngot(data) => Some(data),
+            _ => None,
+        };
+        Self { kind, id, count: s.count.unwrap_or(1), cast_ingot }
     }
 
     pub fn to_stack(self) -> Option<ItemStack> {
         let item = match self.kind {
-            3 => Item::Pot(crate::chemistry::CrucibleData::default()), // SimpleItem doesn't hold nested pots
+            3 => Item::Crucible(crate::chemistry::CrucibleData::default()), // SimpleItem doesn't hold nested crucibles
+            4 => Item::CastIngot(self.cast_ingot?),
             _ => item_from_wire(self.kind, self.id)?
         };
         Some(crate::voxel::ItemStack { item, count: Some(self.count as u32) })
@@ -185,23 +204,30 @@ pub struct WireItemStack {
     pub kind: u8,
     pub id: u8,
     pub count: Option<u32>,
+    #[serde(default, alias = "pot")]
+    pub crucible: Option<crate::chemistry::CrucibleData>,
     #[serde(default)]
-    pub pot: Option<crate::chemistry::CrucibleData>,
+    pub cast_ingot: Option<crate::chemistry::CastIngotData>,
 }
 
 impl WireItemStack {
     pub fn from_stack(s: ItemStack) -> Self {
         let (kind, id) = item_to_wire(s.item);
-        let pot = match s.item {
-            Item::Pot(contents) => Some(contents),
+        let crucible = match s.item {
+            Item::Crucible(contents) => Some(contents),
             _ => None,
         };
-        Self { kind, id, count: s.count, pot }
+        let cast_ingot = match s.item {
+            Item::CastIngot(data) => Some(data),
+            _ => None,
+        };
+        Self { kind, id, count: s.count, crucible, cast_ingot }
     }
 
     pub fn to_stack(self) -> Option<ItemStack> {
         let item = match self.kind {
-            3 => Item::Pot(self.pot.unwrap_or_default()),
+            3 => Item::Crucible(self.crucible.unwrap_or_default()),
+            4 => Item::CastIngot(self.cast_ingot?),
             _ => item_from_wire(self.kind, self.id)?
         };
         Some(ItemStack { item, count: self.count })
@@ -232,7 +258,8 @@ impl Item {
             Item::Material(MaterialType::BrassIngot) => "Brass Ingot",
             Item::Material(MaterialType::SteelIngot) => "Steel Ingot",
             Item::Material(MaterialType::SlagAlloyIngot) => "Slag Alloy Ingot",
-            Item::Pot(_) => "Pot",
+            Item::Crucible(_) => "Crucible",
+            Item::CastIngot(data) => data.kind.name(),
         }
     }
 
@@ -259,7 +286,8 @@ impl Item {
             Item::Material(MaterialType::BrassIngot) => Some("items/brass_ingot.png"),
             Item::Material(MaterialType::SteelIngot) => Some("items/steel_ingot.png"),
             Item::Material(MaterialType::SlagAlloyIngot) => Some("items/slag_alloy_ingot.png"),
-            Item::Pot(_) => None,
+            Item::Crucible(_) => None,
+            Item::CastIngot(_) => None,
         }
     }
 
@@ -271,7 +299,15 @@ impl Item {
         asset_server: &AssetServer,
     ) -> Option<Handle<Image>> {
         let cache_key = match self {
-            Item::Pot(_) => Item::Block(crate::voxel::BlockType::Pot),
+            Item::Crucible(_) => Item::Block(crate::voxel::BlockType::Crucible),
+            Item::CastIngot(data) => icons
+                .0
+                .keys()
+                .copied()
+                .find(|item| {
+                    matches!(item, Item::CastIngot(cached) if cached.kind == data.kind)
+                })
+                .unwrap_or(*self),
             _ => *self,
         };
 
@@ -287,7 +323,7 @@ impl Item {
     pub fn color(&self) -> [f32; 4] {
         match self {
             Item::Block(_) => [1.0, 1.0, 1.0, 1.0], // block ใช้ tint จาก voxel::hotbar_icon_texture() อีกทีถ้าเป็นใบไม้
-            Item::Tool(_) | Item::Material(_) | Item::Pot(_) => [1.0, 1.0, 1.0, 1.0],
+            Item::Tool(_) | Item::Material(_) | Item::Crucible(_) | Item::CastIngot(_) => [1.0, 1.0, 1.0, 1.0],
         }
     }
 
@@ -296,6 +332,7 @@ impl Item {
             Item::Block(crate::voxel::BlockType::TallGrass) => true,
             Item::Tool(t) if tool_model_path(*t).is_none() => true,
             Item::Material(_) => true,
+            Item::CastIngot(_) => false,
             _ => false,
         }
     }
@@ -372,7 +409,8 @@ fn viewmodel_params(item: Item) -> (f32, Transform) {
         Item::Tool(t) if tool_model_path(t).is_some() => 0.4,
         Item::Tool(_) => 0.35,
         Item::Material(_) => 0.25,
-        Item::Pot(_) => 0.35,
+        Item::Crucible(_) => 0.35,
+        Item::CastIngot(_) => 0.25,
     };
     let tf = Transform::from_translation(Vec3::new(0.4, -0.35, -0.7))
         .with_rotation(Quat::from_rotation_y(-0.5)); // เอียงเข้ากลางจอเล็กน้อย
@@ -530,14 +568,24 @@ pub fn spawn_item_visual(
             commands.entity(entity).insert(transform);
             entity
         }
-        Item::Pot(_) => {
+        Item::Crucible(_) => {
             let entity = crate::voxel::spawn_block_model(
                 commands, meshes, materials, block_mats, campfire_assets,
-                crate::voxel::BlockType::Pot, Vec3::ZERO, size, bevy::camera::visibility::RenderLayers::default(),
+                crate::voxel::BlockType::Crucible, Vec3::ZERO, size, bevy::camera::visibility::RenderLayers::default(),
             );
             commands.entity(entity).insert(transform);
             entity
         }
+        Item::CastIngot(data) => commands
+            .spawn((
+                WorldAssetRoot(campfire_assets.ingot_scene.clone()),
+                transform.with_scale(transform.scale * size),
+                crate::voxel::CastIngotMaterialOverride(
+                    campfire_assets.cast_ingot_materials[data.kind.to_u8() as usize].clone(),
+                ),
+                NotShadowCaster,
+            ))
+            .id(),
         // tool ที่มีโมเดล 3D
         Item::Tool(tool) if tool_model_path(tool).is_some() => {
             use bevy::gltf::GltfAssetLabel;
@@ -569,7 +617,8 @@ fn spawn_dropped_item_system(
             Item::Tool(t) if tool_model_path(t).is_some() => 0.6,
             Item::Tool(_) => 0.5,
             Item::Material(_) => 0.3,
-            Item::Pot(_) => 0.4,
+            Item::Crucible(_) => 0.4,
+            Item::CastIngot(_) => 0.3,
         };
         let entity = spawn_item_visual(
             &mut commands, &mut meshes, &mut materials, &asset_server,
@@ -643,6 +692,45 @@ fn pickup_item_system(
             // เก็บได้บางส่วน — ปรับจำนวนที่เหลือค้างบนพื้นไว้เก็บต่อ
             dropped.count = remaining;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Item, SimpleItem, WireItemStack};
+    use crate::chemistry::{CastIngotData, CastIngotKind, Element};
+    use crate::voxel::ItemStack;
+
+    fn sample_ingot() -> CastIngotData {
+        let mut composition = [0; 8];
+        composition[Element::Copper as usize] = 640;
+        composition[Element::Tin as usize] = 160;
+        CastIngotData {
+            mass: 800,
+            composition,
+            quality_permille: 920,
+            kind: CastIngotKind::Bronze,
+        }
+    }
+
+    #[test]
+    fn cast_ingot_round_trips_through_inventory_wire() {
+        let original = ItemStack {
+            item: Item::CastIngot(sample_ingot()),
+            count: Some(2),
+        };
+        let restored = WireItemStack::from_stack(original).to_stack().unwrap();
+        assert!(restored == original);
+    }
+
+    #[test]
+    fn cast_ingot_round_trips_through_crucible_solid_item() {
+        let original = ItemStack {
+            item: Item::CastIngot(sample_ingot()),
+            count: Some(1),
+        };
+        let restored = SimpleItem::from_stack(original).to_stack().unwrap();
+        assert!(restored == original);
     }
 }
 

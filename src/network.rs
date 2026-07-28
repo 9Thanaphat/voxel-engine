@@ -13,7 +13,7 @@ use crate::voxel::{VoxelWorld, CHUNK_VOLUME, CHUNK_WIDTH};
 pub const SERVER_PORT: u16 = 5000;
 /// ต้องตรงกันทั้ง host และ client ไม่งั้น netcode ปฏิเสธการเชื่อมต่อ
 /// (0003: Position/PlayerPositions เพิ่มของที่ถือ — โครง encode เปลี่ยน)
-pub const PROTOCOL_ID: u64 = 0xB10C_CAFE_0004;
+pub const PROTOCOL_ID: u64 = 0xB10C_CAFE_0008;
 /// id ตัวแทน host ในข้อความ PlayerPositions (client จริงใช้ id ที่ไม่ใช่ 0)
 pub const HOST_PLAYER_ID: u64 = 0;
 
@@ -27,7 +27,12 @@ pub enum BlockEdit {
     /// ฝั่งรับต้อง convert_to_chiseled ก่อนถ้า block ยังไม่ใช่ Chiseled
     SetSubVoxel { pos: [i32; 3], sub: [u8; 3], val: u8 },
     PlaceFacingBlock { pos: [i32; 3], block: u8, facing: u8 },
+    PlaceContainerBlock { pos: [i32; 3], block: u8, contents: Vec<Option<crate::item::WireItemStack>>, crucible_data: Option<crate::chemistry::CrucibleData> },
     SetContainerSlot { pos: [i32; 3], slot: u8, item: Option<crate::item::WireItemStack> },
+    AddFurnaceAir { pos: [i32; 3] },
+    SetIngotMold { pos: [i32; 3], data: crate::chemistry::IngotMoldData },
+    TakeIngotMold { pos: [i32; 3] },
+    PlaceCastIngot { pos: [i32; 3], data: crate::chemistry::CastIngotData },
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -56,6 +61,7 @@ pub enum ServerMessage {
         chiseled: Vec<(u32, Vec<u8>)>,
         facings: Vec<(u32, u8)>,
         containers: Vec<(u32, u8, Vec<Option<crate::item::WireItemStack>>)>,
+        furnaces: Vec<(u32, crate::voxel::WireFurnaceData)>,
         /// โครงกิ่งของ chunk — client generate chunk ที่ไม่มี edit เองจาก seed เดียวกัน
         /// จึงได้โครงตรงกันอยู่แล้ว แต่ chunk ที่ host แก้ไปแล้วต้องส่งของจริงมาให้
         branches: Vec<crate::tree::BranchRecord>,
@@ -222,7 +228,7 @@ pub struct ReceivedChunk {
     pub chiseled: HashMap<usize, Box<[u8; 4096]>>,
     pub facings: HashMap<usize, u8>,
     pub chest_slots: HashMap<usize, Box<[Option<crate::voxel::ItemStack>; 27]>>,
-    pub furnace_slots: HashMap<usize, Box<[Option<crate::voxel::ItemStack>; 3]>>,
+    pub furnace_slots: HashMap<usize, Box<crate::voxel::FurnaceData>>,
     pub branches: Vec<crate::tree::BranchRecord>,
 }
 
@@ -344,7 +350,7 @@ fn chunk_of(pos: IVec3) -> IVec2 {
 
 pub fn edit_pos(edit: &BlockEdit) -> IVec3 {
     match edit {
-        BlockEdit::SetBlock { pos, .. } | BlockEdit::SetSubVoxel { pos, .. } | BlockEdit::PlaceFacingBlock { pos, .. } | BlockEdit::SetContainerSlot { pos, .. } => IVec3::from_array(*pos),
+        BlockEdit::SetBlock { pos, .. } | BlockEdit::SetSubVoxel { pos, .. } | BlockEdit::PlaceFacingBlock { pos, .. } | BlockEdit::PlaceContainerBlock { pos, .. } | BlockEdit::SetContainerSlot { pos, .. } | BlockEdit::AddFurnaceAir { pos } | BlockEdit::SetIngotMold { pos, .. } | BlockEdit::TakeIngotMold { pos } | BlockEdit::PlaceCastIngot { pos, .. } => IVec3::from_array(*pos),
     }
 }
 
@@ -774,16 +780,71 @@ pub fn on_server_event(
 fn validate_edit(edit: &BlockEdit, world: &VoxelWorld) -> bool {
     let (pos, val_ok) = match edit {
         BlockEdit::SetBlock { pos, block } => {
-            (IVec3::from_array(*pos), *block <= 26)
+            (IVec3::from_array(*pos), *block <= 50)
         }
         BlockEdit::SetSubVoxel { pos, val, .. } => {
-            (IVec3::from_array(*pos), *val <= 26)
+            (IVec3::from_array(*pos), *val <= 50)
         }
         BlockEdit::PlaceFacingBlock { pos, block, facing } => {
-            (IVec3::from_array(*pos), *block <= 26 && *facing < 6)
+            (IVec3::from_array(*pos), *block <= 50 && *facing < 6)
         }
-        BlockEdit::SetContainerSlot { pos, .. } => {
+        BlockEdit::PlaceContainerBlock { pos, block, contents, crucible_data } => {
+            let block = crate::voxel::BlockType::from_u8(*block);
+            let contents_decode = contents
+                .iter()
+                .all(|item| item.is_none_or(|item| item.to_stack().is_some()));
+            let payload_ok = match block {
+                crate::voxel::BlockType::Chest => contents.len() <= 27 && crucible_data.is_none(),
+                crate::voxel::BlockType::Furnace => contents.len() <= 2 && crucible_data.is_none(),
+                crate::voxel::BlockType::Crucible => contents.is_empty(),
+                _ => false,
+            };
+            (IVec3::from_array(*pos), contents_decode && payload_ok)
+        }
+        BlockEdit::SetContainerSlot { pos, slot, item } => {
+            let block = world.get_block(pos[0], pos[1], pos[2]);
+            let slot_ok = match block {
+                crate::voxel::BlockType::Chest => *slot < 27,
+                crate::voxel::BlockType::Furnace => *slot < 2,
+                crate::voxel::BlockType::Crucible => *slot < 9,
+                _ => false,
+            };
+            let item_ok = item.is_none_or(|item| item.to_stack().is_some());
+            (IVec3::from_array(*pos), slot_ok && item_ok)
+        }
+        BlockEdit::AddFurnaceAir { pos } => {
             (IVec3::from_array(*pos), true)
+        }
+        BlockEdit::SetIngotMold { pos, data } => {
+            let p = IVec3::from_array(*pos);
+            let current_mass = world.ingot_molds.get(&p).map_or(0, |m| m.total_mass());
+            (
+                p,
+                world.get_block(p.x, p.y, p.z) == crate::voxel::BlockType::IngotMold
+                    && data.total_mass() >= current_mass
+                    && data.total_mass() <= crate::chemistry::INGOT_MOLD_CAPACITY_GRAMS,
+            )
+        }
+        BlockEdit::TakeIngotMold { pos } => {
+            let p = IVec3::from_array(*pos);
+            (
+                p,
+                world.get_block(p.x, p.y, p.z) == crate::voxel::BlockType::IngotMold
+                    && world
+                        .ingot_molds
+                        .get(&p)
+                        .is_some_and(crate::chemistry::mold_ready_to_extract),
+            )
+        }
+        BlockEdit::PlaceCastIngot { pos, data } => {
+            let p = IVec3::from_array(*pos);
+            (
+                p,
+                data.mass > 0
+                    && data.mass <= crate::chemistry::INGOT_MOLD_CAPACITY_GRAMS
+                    && data.composition.iter().copied().sum::<u32>() == data.mass
+                    && world.get_block(p.x, p.y, p.z) == crate::voxel::BlockType::Air,
+            )
         }
     };
     let p = IVec3::from_array(pos.to_array());
@@ -902,6 +963,7 @@ pub fn host_send_queued_chunks(
                         .collect(),
                     facings: Vec::new(),
                     containers: Vec::new(),
+                    furnaces: Vec::new(),
                     branches: world
                         .branch_network
                         .chunk_records(chunk_pos, crate::voxel::CHUNK_WIDTH as i32),
@@ -915,6 +977,7 @@ pub fn host_send_queued_chunks(
                     chiseled: Vec::new(),
                     facings: Vec::new(),
                     containers: Vec::new(),
+                    furnaces: Vec::new(),
                     branches: crate::voxel::load_chunk_tree(chunk_pos),
                 }
             } else {
@@ -1028,7 +1091,7 @@ pub fn client_receive_messages(
                 next_state.set(crate::GameState::InGame);
                 // avatar ของ host และผู้เล่นคนอื่นจะมาถึงเป็น PlayerJoined ต่อจากนี้
             }
-            Some(ServerMessage::ChunkData { chunk_pos, blocks_rle, chiseled, facings, containers, branches }) => {
+            Some(ServerMessage::ChunkData { chunk_pos, blocks_rle, chiseled, facings, containers, furnaces, branches }) => {
                 let pos = IVec2::from_array(chunk_pos);
                 let Some(blocks) = rle_decode(&blocks_rle) else {
                     warn!("ChunkData {pos:?} decode ไม่ผ่าน — ทิ้ง");
@@ -1065,12 +1128,8 @@ pub fn client_receive_messages(
                         }
                         (*i as usize, arr)
                     }).collect(),
-                    furnace_slots: containers.iter().filter(|(_, k, _)| *k == 1).map(|(i, _, slots)| {
-                        let mut arr = Box::new([None; 3]);
-                        for (idx, slot) in slots.iter().enumerate().take(3) {
-                            arr[idx] = (*slot).and_then(|s| s.to_stack());
-                        }
-                        (*i as usize, arr)
+                    furnace_slots: furnaces.into_iter().map(|(i, wire)| {
+                        (i as usize, Box::new(wire.to_data()))
                     }).collect(),
                 });
             }
@@ -1342,9 +1401,14 @@ pub fn apply_incoming_net_edits(
             }
             BlockEdit::SetSubVoxel { .. } => false,
             BlockEdit::PlaceFacingBlock { .. } => false,
+            BlockEdit::PlaceContainerBlock { .. } => false,
             BlockEdit::SetContainerSlot { .. } => false,
+            BlockEdit::AddFurnaceAir { .. } => false,
+            BlockEdit::SetIngotMold { .. } => false,
+            BlockEdit::TakeIngotMold { .. } => false,
+            BlockEdit::PlaceCastIngot { .. } => false,
         };
-        let _affects_mesh = !matches!(edit, BlockEdit::SetContainerSlot { .. });
+        let _affects_mesh = !matches!(edit, BlockEdit::SetContainerSlot { .. } | BlockEdit::SetIngotMold { .. } | BlockEdit::TakeIngotMold { .. });
         let Some(tp) = crate::voxel::apply_block_edit(&mut world, &edit) else { continue };
         // edit จาก client แตะเขตสระ (host เท่านั้นที่มีสระ — client list ว่างเสมอ)
         pools.invalidate_touching(tp);
@@ -1403,7 +1467,7 @@ pub fn apply_incoming_net_edits(
     // chunk ที่เพื่อนบ้านยังโหลดไม่ครบถูก skip — คืนเข้าคิวไว้ลองใหม่เฟรมหน้า
     // ไม่งั้น block data ใหม่แล้วแต่ mesh ค้างภาพเก่า (แพทเทิร์นเดียวกับคิวน้ำ
     // ใน fluid_simulation_system); lamp refresh เลื่อนตามไปรอบที่ remesh สำเร็จ
-    let skipped = crate::voxel::remesh_chunks(&mut commands, &mut world, &mut mp, to_remesh);
+    let skipped = crate::voxel::remesh_chunks(&mut commands, &mut world, &mut mp, None, to_remesh);
     for cp in &skipped {
         edited_chunks.remove(cp);
     }

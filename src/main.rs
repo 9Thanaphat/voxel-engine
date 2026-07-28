@@ -12,6 +12,10 @@ mod world_save;
 mod command;
 pub mod light;
 pub mod tree;
+pub mod chemistry;
+pub mod crafting;
+pub mod smelting;
+pub mod thermodynamics;
 mod sky;
 mod astro;
 mod biome;
@@ -45,6 +49,7 @@ pub struct NoiseParams {
     pub octaves: u32,
     /// seed ของ world gen — คุมทั้งความสูง biome และถ้ำ (ดู `TerrainSampler::new`)
     pub seed: u32,
+    pub temp_offset: f64,
 }
 
 #[derive(Resource)]
@@ -100,6 +105,7 @@ impl Default for GameSettings {
                 amplitude: 40.0,
                 octaves: 4,
                 seed: 1,
+                temp_offset: 0.0,
             },
             time_of_day: 10.0,
             day_of_year: 172, // ~ครีษมายัน (ทางช้างเผือกเด่นคืนหน้าร้อน) เป็นค่าเริ่มโชว์สวย
@@ -289,7 +295,6 @@ fn main() {
         .init_resource::<EguiTyping>()
         .init_resource::<ui::WorldList>()
         .init_resource::<ui::CreateWorldUi>()
-        .init_resource::<voxel::ActivePools>()
         .init_resource::<voxel::BreakingProgress>()
         .init_resource::<Paused>()
         .init_resource::<network::MultiplayerUi>()
@@ -359,6 +364,7 @@ fn main() {
             particles::despawn_finished_fx,
             particles::attach_lamp_sparkles,
             particles::attach_campfire_flames,
+            particles::update_furnace_effects,
         ))
         .add_systems(
             Update,
@@ -377,7 +383,11 @@ fn main() {
                 ui::chat_open_system.run_if(keyboard_free),
                 // E ตอนพิมพ์แชทต้องลงช่องข้อความ ไม่ใช่เปิดช่องเก็บของ
                 ui::inventory_toggle_system.run_if(keyboard_free),
-                ui::inventory_click_system,
+                (
+                    ui::inventory_click_system,
+                    ui::furnace_button_interaction_system,
+                    ui::clear_inventory_button_system,
+                ),
                 ui::container_click_system,
                 // ต้องหลัง cursor_grab_system: ESC ในระบบนั้นปลดล็อคเมาส์ทุกครั้ง
                 // ปิด inventory ด้วย ESC แล้วต้องได้เมาส์ล็อคกลับ ไม่ใช่ค้างเป็นลูกศร
@@ -424,14 +434,20 @@ fn main() {
                 // น้ำ simulate เฉพาะ single player กับ host — client รับ delta จาก host แทน
                 voxel::fluid_simulation_system.run_if(network::is_not_client),
                 // TNT fuse/ระเบิดก็เป็นของ host/single เช่นกัน (ผล broadcast เป็น edit)
-                voxel::tnt_detonation_system.run_if(network::is_not_client),
-                voxel::nuke_apply_system.run_if(network::is_not_client),
+                (
+                    voxel::tnt_detonation_system.run_if(network::is_not_client),
+                    voxel::nuke_apply_system.run_if(network::is_not_client),
+                    smelting::furnace_tick_system.run_if(network::is_not_client),
+                    smelting::crucible_cooling_system.run_if(network::is_not_client),
+                ),
                 voxel::explosion_debug_system,
                 lod::update_lod_tiles,
                 lod::hide_near_overlay,
                 voxel::start_icon_bake,
                 voxel::finish_icon_bake,
                 voxel::propagate_render_layers,
+                voxel::apply_cast_ingot_materials,
+                voxel::update_ingot_mold_fill_system,
                 world_save::auto_save_system,
                 // ทูเพิลของ add_systems รับได้สูงสุด 20 ตัว — ที่เกินจัดเป็นกลุ่มซ้อน
                 (
@@ -519,6 +535,7 @@ fn main() {
                 ui::handle_f2_screenshot,
                 ui::hotbar_item_name_system,
                 ui::quit_after_save,
+                ui::apply_custom_font,
             ),
         )
         .run();

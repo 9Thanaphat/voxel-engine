@@ -6,8 +6,8 @@ dirt.png        - ดิน (ทุกด้าน + ใต้บล็อกห
 grass_top.png   - หญ้า ด้านบน
 grass_side.png  - หญ้า ด้านข้าง
 stone.png       - หิน
-wood_top.png    - ไม้ หน้าตัดบน/ล่าง
-wood_side.png   - ไม้ ด้านข้าง (เปลือก)
+oak_log_top.png    - ไม้โอ๊ค หน้าตัดบน/ล่าง
+oak_log_side.png   - ไม้โอ๊ค ด้านข้าง (เปลือก)
 leaves.png      - ใบไม้
 sand.png        - ทราย
 
