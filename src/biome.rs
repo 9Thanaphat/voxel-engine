@@ -62,7 +62,7 @@ pub fn temp_from_latitude(lat_deg: f64) -> f64 {
 /// ย่อจากสเกลภูมิศาสตร์จริง (~0.0009°/บล็อก, หลักหมื่นบล็อกต่อแถบ) ให้เห็นแถบภายในระยะเดินไหว
 /// ปรับ `LAT_PER_BLOCK` มากขึ้น = แถบยิ่งถี่ (เดินสั้นลงก็เปลี่ยน biome)
 const CLIMATE_ORIGIN_LAT: f64 = 21.0;
-const CLIMATE_LAT_PER_BLOCK: f64 = 0.006; // ~166 บล็อก/องศา
+const CLIMATE_LAT_PER_BLOCK: f64 = 0.0018; // ~555 บล็อก/องศา — แถบ biome กว้าง เดินไกลกว่าจะเปลี่ยนเขต
 /// ละติจูดสูงสุด (ขั้วโลก) ที่คลื่นแกว่งไปถึงก่อนพับกลับ
 const CLIMATE_POLE_LAT: f64 = 66.0;
 
@@ -136,16 +136,18 @@ mod tests {
 
     #[test]
     fn climate_lat_waves_without_pole_deadend() {
-        assert!((climate_lat(0.0) - 21.0).abs() < 1e-9, "spawn = 21°");
-        // เดิน +z ~3500 บล็อก → เข้าใกล้ศูนย์สูตร (แถบไล่ภายในระยะเดินไหว ไม่ใช่หลักหมื่น)
-        assert!(climate_lat(3500.0).abs() < 1.5, "+3500 บล็อก ควรใกล้ศูนย์สูตร");
-        // อยู่ในช่วง ±66° เสมอ ไม่ตันขั้วโลก (พับกลับ)
+        assert!((climate_lat(0.0) - CLIMATE_ORIGIN_LAT).abs() < 1e-9, "spawn = origin lat");
+        // เดิน +z จนถึงศูนย์สูตร (ระยะ = origin / lat-per-block)
+        let to_equator = CLIMATE_ORIGIN_LAT / CLIMATE_LAT_PER_BLOCK;
+        assert!(climate_lat(to_equator).abs() < 1.5, "ถึงระยะนี้ควรใกล้ศูนย์สูตร");
+        // อยู่ในช่วง ±pole เสมอ ไม่ตันขั้วโลก (พับกลับ)
         for z in [-5.0e5, -1234.0, 9.9e4, 5.0e5] {
             let l = climate_lat(z);
-            assert!((-66.0..=66.0).contains(&l), "lat ต้องอยู่ใน ±66°");
+            assert!((-CLIMATE_POLE_LAT..=CLIMATE_POLE_LAT).contains(&l), "lat ต้องอยู่ใน ±pole");
         }
-        // เป็นคาบ: เดินครบ 1 รอบ (4×66/0.006 = 44,000 บล็อก) กลับมาภูมิอากาศเดิม
-        assert!((climate_lat(1234.0) - climate_lat(1234.0 + 44_000.0)).abs() < 1e-6, "ต้องวนเป็นคาบ");
+        // เป็นคาบ: เดินครบ 1 รอบ (4×pole / lat-per-block) กลับมาภูมิอากาศเดิม
+        let period = 4.0 * CLIMATE_POLE_LAT / CLIMATE_LAT_PER_BLOCK;
+        assert!((climate_lat(1234.0) - climate_lat(1234.0 + period)).abs() < 1e-6, "ต้องวนเป็นคาบ");
     }
 
     #[test]

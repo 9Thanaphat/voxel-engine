@@ -32,7 +32,7 @@ pub fn light_opacity(block: BlockType) -> u8 {
     match block {
         BlockType::Glass => 0,
         BlockType::Leaves => 1,
-        b if b.is_water() => 1,
+        b if b.is_fluid() => 1,
         _ => 0, // หญ้าสูง กิ่งไม้ ฯลฯ แสงผ่านหมด
     }
 }
@@ -240,6 +240,8 @@ pub fn emitter_rgb(block: BlockType) -> [u8; 3] {
         LampGreen => [3, 15, 3],
         LampBlue => [4, 5, 15],
         Campfire | TntLit => [14, 6, 2], // ส้มไฟ
+        MagmaRock | LavaSource | Lava1 | Lava2 | Lava3 | Lava4
+        | Lava5 | Lava6 | Lava7 | Lava8 => [15, 6, 1],
         NukeLit => [14, 9, 3],
         _ => [0, 0, 0],
     }

@@ -79,6 +79,10 @@ pub enum MaterialType {
     BrassIngot = 9,
     SteelIngot = 10,
     SlagAlloyIngot = 11,
+    Tin = 12,
+    Zinc = 13,
+    EmptyGlassBottle = 14,
+    SulfuricAcidBottle = 15,
 }
 
 impl MaterialType {
@@ -96,6 +100,10 @@ impl MaterialType {
             9 => Some(MaterialType::BrassIngot),
             10 => Some(MaterialType::SteelIngot),
             11 => Some(MaterialType::SlagAlloyIngot),
+            12 => Some(MaterialType::Tin),
+            13 => Some(MaterialType::Zinc),
+            14 => Some(MaterialType::EmptyGlassBottle),
+            15 => Some(MaterialType::SulfuricAcidBottle),
             _ => None,
         }
     }
@@ -111,6 +119,8 @@ pub enum Item {
     Material(MaterialType),
     Crucible(crate::chemistry::CrucibleData),
     CastIngot(crate::chemistry::CastIngotData),
+    PickaxeHead(crate::chemistry::CastIngotData),
+    CraftedPickaxe(crate::chemistry::CastIngotData),
 }
 
 pub struct FuelProperties {
@@ -122,7 +132,8 @@ impl Item {
     pub fn get_fuel_properties(&self) -> Option<FuelProperties> {
         match self {
             Item::Block(crate::voxel::BlockType::OakWood) => Some(FuelProperties { base_temp: 800.0, base_energy: 1000.0 }),
-            Item::Block(crate::voxel::BlockType::Branch) => Some(FuelProperties { base_temp: 600.0, base_energy: 300.0 }),
+            Item::Block(crate::voxel::BlockType::Branch | crate::voxel::BlockType::MapleBranch) => Some(FuelProperties { base_temp: 600.0, base_energy: 300.0 }),
+            Item::Block(crate::voxel::BlockType::MapleLog) => Some(FuelProperties { base_temp: 800.0, base_energy: 1000.0 }),
             Item::Material(crate::item::MaterialType::Stick) => Some(FuelProperties { base_temp: 600.0, base_energy: 300.0 }),
             Item::Material(crate::item::MaterialType::Coal) => Some(FuelProperties { base_temp: 1200.0, base_energy: 3000.0 }),
             // ... more fuels
@@ -145,6 +156,8 @@ pub fn item_to_wire(item: Item) -> (u8, u8) {
         Item::Material(m) => (2, m.to_u8()),
         Item::Crucible(_) => (3, 0),
         Item::CastIngot(data) => (4, data.kind.to_u8()),
+        Item::PickaxeHead(data) => (5, data.kind.to_u8()),
+        Item::CraftedPickaxe(data) => (6, data.kind.to_u8()),
     }
 }
 
@@ -164,6 +177,23 @@ pub fn item_from_wire(kind: u8, id: u8) -> Option<Item> {
                 kind,
             })
         }),
+        5 => crate::chemistry::CastIngotKind::from_u8(id).map(|kind| {
+            let data = crate::chemistry::CastIngotData {
+                mass: crate::chemistry::PICKAXE_HEAD_MASS_GRAMS,
+                composition: [0; 8],
+                quality_permille: 1_000,
+                kind,
+            };
+            Item::PickaxeHead(data)
+        }),
+        6 => crate::chemistry::CastIngotKind::from_u8(id).map(|kind| {
+            Item::CraftedPickaxe(crate::chemistry::CastIngotData {
+                mass: crate::chemistry::PICKAXE_HEAD_MASS_GRAMS,
+                composition: [0; 8],
+                quality_permille: 1_000,
+                kind,
+            })
+        }),
         _ => None,
     }
 }
@@ -175,6 +205,8 @@ pub struct SimpleItem {
     pub count: u32,
     #[serde(default)]
     pub cast_ingot: Option<crate::chemistry::CastIngotData>,
+    #[serde(default)]
+    pub cast_tool: Option<crate::chemistry::CastIngotData>,
 }
 
 impl SimpleItem {
@@ -184,13 +216,19 @@ impl SimpleItem {
             Item::CastIngot(data) => Some(data),
             _ => None,
         };
-        Self { kind, id, count: s.count.unwrap_or(1), cast_ingot }
+        let cast_tool = match s.item {
+            Item::PickaxeHead(data) | Item::CraftedPickaxe(data) => Some(data),
+            _ => None,
+        };
+        Self { kind, id, count: s.count.unwrap_or(1), cast_ingot, cast_tool }
     }
 
     pub fn to_stack(self) -> Option<ItemStack> {
         let item = match self.kind {
             3 => Item::Crucible(crate::chemistry::CrucibleData::default()), // SimpleItem doesn't hold nested crucibles
             4 => Item::CastIngot(self.cast_ingot?),
+            5 => Item::PickaxeHead(self.cast_tool?),
+            6 => Item::CraftedPickaxe(self.cast_tool?),
             _ => item_from_wire(self.kind, self.id)?
         };
         Some(crate::voxel::ItemStack { item, count: Some(self.count as u32) })
@@ -208,6 +246,8 @@ pub struct WireItemStack {
     pub crucible: Option<crate::chemistry::CrucibleData>,
     #[serde(default)]
     pub cast_ingot: Option<crate::chemistry::CastIngotData>,
+    #[serde(default)]
+    pub cast_tool: Option<crate::chemistry::CastIngotData>,
 }
 
 impl WireItemStack {
@@ -221,13 +261,19 @@ impl WireItemStack {
             Item::CastIngot(data) => Some(data),
             _ => None,
         };
-        Self { kind, id, count: s.count, crucible, cast_ingot }
+        let cast_tool = match s.item {
+            Item::PickaxeHead(data) | Item::CraftedPickaxe(data) => Some(data),
+            _ => None,
+        };
+        Self { kind, id, count: s.count, crucible, cast_ingot, cast_tool }
     }
 
     pub fn to_stack(self) -> Option<ItemStack> {
         let item = match self.kind {
             3 => Item::Crucible(self.crucible.unwrap_or_default()),
             4 => Item::CastIngot(self.cast_ingot?),
+            5 => Item::PickaxeHead(self.cast_tool?),
+            6 => Item::CraftedPickaxe(self.cast_tool?),
             _ => item_from_wire(self.kind, self.id)?
         };
         Some(ItemStack { item, count: self.count })
@@ -237,7 +283,7 @@ impl WireItemStack {
 impl Item {
     /// เลิกใช้ตอน block picker แบบ egui ถูกแทนด้วยกริดไอคอน — เก็บไว้สำหรับ tooltip
     #[allow(dead_code)]
-    pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> String {
         match self {
             Item::Block(b) => crate::voxel::block_name(*b),
             Item::Tool(ToolType::Chisel) => "Chisel",
@@ -258,9 +304,20 @@ impl Item {
             Item::Material(MaterialType::BrassIngot) => "Brass Ingot",
             Item::Material(MaterialType::SteelIngot) => "Steel Ingot",
             Item::Material(MaterialType::SlagAlloyIngot) => "Slag Alloy Ingot",
+            Item::Material(MaterialType::Tin) => "Tin",
+            Item::Material(MaterialType::Zinc) => "Zinc",
+            Item::Material(MaterialType::EmptyGlassBottle) => "Empty Glass Bottle",
+            Item::Material(MaterialType::SulfuricAcidBottle) => "Sulfuric Acid Bottle",
             Item::Crucible(_) => "Crucible",
-            Item::CastIngot(data) => data.kind.name(),
+            Item::CastIngot(data) => return data.kind.name().to_string(),
+            Item::PickaxeHead(data) => {
+                return format!("{} Pickaxe Head", data.kind.material_name())
+            }
+            Item::CraftedPickaxe(data) => {
+                return format!("{} Pickaxe", data.kind.material_name())
+            }
         }
+        .to_string()
     }
 
     /// เลิกใช้กับ UI icon แล้ว (แทนที่ด้วย icon_image ที่ render 3 มิติจริงต่อบล็อก) — ยังใช้กับ
@@ -281,13 +338,18 @@ impl Item {
             Item::Material(MaterialType::IronIngot) => Some("items/iron_ingot.png"),
             Item::Material(MaterialType::Coal) => Some("items/coal.png"),
             Item::Material(MaterialType::Slag) => Some("items/slag.png"),
-            Item::Material(MaterialType::Limestone) => Some("items/limestone.png"),
+            Item::Material(MaterialType::Limestone) => Some("textures/limestone.png"),
             Item::Material(MaterialType::BronzeIngot) => Some("items/bronze_ingot.png"),
             Item::Material(MaterialType::BrassIngot) => Some("items/brass_ingot.png"),
             Item::Material(MaterialType::SteelIngot) => Some("items/steel_ingot.png"),
             Item::Material(MaterialType::SlagAlloyIngot) => Some("items/slag_alloy_ingot.png"),
+            Item::Material(MaterialType::Tin) => Some("items/tin.png"),
+            Item::Material(MaterialType::Zinc) => Some("items/zinc.png"),
+            Item::Material(MaterialType::EmptyGlassBottle) => Some("items/glass_bottle.png"),
+            Item::Material(MaterialType::SulfuricAcidBottle) => Some("items/sulfuric_acid_bottle.png"),
             Item::Crucible(_) => None,
             Item::CastIngot(_) => None,
+            Item::PickaxeHead(_) | Item::CraftedPickaxe(_) => None,
         }
     }
 
@@ -308,6 +370,12 @@ impl Item {
                     matches!(item, Item::CastIngot(cached) if cached.kind == data.kind)
                 })
                 .unwrap_or(*self),
+            Item::PickaxeHead(data) => icons.0.keys().copied().find(|item| {
+                matches!(item, Item::PickaxeHead(cached) if cached.kind == data.kind)
+            }).unwrap_or(*self),
+            Item::CraftedPickaxe(data) => icons.0.keys().copied().find(|item| {
+                matches!(item, Item::CraftedPickaxe(cached) if cached.kind == data.kind)
+            }).unwrap_or(*self),
             _ => *self,
         };
 
@@ -323,7 +391,8 @@ impl Item {
     pub fn color(&self) -> [f32; 4] {
         match self {
             Item::Block(_) => [1.0, 1.0, 1.0, 1.0], // block ใช้ tint จาก voxel::hotbar_icon_texture() อีกทีถ้าเป็นใบไม้
-            Item::Tool(_) | Item::Material(_) | Item::Crucible(_) | Item::CastIngot(_) => [1.0, 1.0, 1.0, 1.0],
+            Item::Tool(_) | Item::Material(_) | Item::Crucible(_) | Item::CastIngot(_)
+            | Item::PickaxeHead(_) | Item::CraftedPickaxe(_) => [1.0, 1.0, 1.0, 1.0],
         }
     }
 
@@ -333,6 +402,7 @@ impl Item {
             Item::Tool(t) if tool_model_path(*t).is_none() => true,
             Item::Material(_) => true,
             Item::CastIngot(_) => false,
+            Item::PickaxeHead(_) | Item::CraftedPickaxe(_) => false,
             _ => false,
         }
     }
@@ -411,6 +481,8 @@ fn viewmodel_params(item: Item) -> (f32, Transform) {
         Item::Material(_) => 0.25,
         Item::Crucible(_) => 0.35,
         Item::CastIngot(_) => 0.25,
+        Item::PickaxeHead(_) => 0.3,
+        Item::CraftedPickaxe(_) => 0.4,
     };
     let tf = Transform::from_translation(Vec3::new(0.4, -0.35, -0.7))
         .with_rotation(Quat::from_rotation_y(-0.5)); // เอียงเข้ากลางจอเล็กน้อย
@@ -504,7 +576,7 @@ fn clear_held_item_view(mut commands: Commands, mut view: ResMut<HeldItemView>) 
 /// มา = คืน None ให้ fallback เป็นแผ่นแบน (กันของล่องหนตอนโมเดลยังไม่มา)
 pub fn tool_model_path(tool: ToolType) -> Option<&'static str> {
     let path = match tool {
-        ToolType::Pickaxe => "items/copper_pickaxe.gltf",
+        ToolType::Pickaxe => "model/pickaxe.gltf",
         _ => return None,
     };
     crate::voxel::project_root()
@@ -586,6 +658,34 @@ pub fn spawn_item_visual(
                 NotShadowCaster,
             ))
             .id(),
+        Item::PickaxeHead(data) => commands
+            .spawn((
+                WorldAssetRoot(asset_server.load(
+                    bevy::gltf::GltfAssetLabel::Scene(0).from_asset("model/pickaxe_head.gltf"),
+                )),
+                transform.with_scale(transform.scale * size),
+                crate::voxel::NamedMaterialOverride {
+                    node_name: "Head",
+                    material: campfire_assets.cast_ingot_materials[data.kind.to_u8() as usize]
+                        .clone(),
+                },
+                crate::voxel::HiddenModelNode("Handle"),
+                NotShadowCaster,
+            ))
+            .id(),
+        Item::CraftedPickaxe(data) => commands
+            .spawn((
+                WorldAssetRoot(asset_server.load(
+                    bevy::gltf::GltfAssetLabel::Scene(0).from_asset("model/pickaxe.gltf"),
+                )),
+                transform.with_scale(transform.scale * size),
+                crate::voxel::NamedMaterialOverride {
+                    node_name: "Head",
+                    material: campfire_assets.cast_ingot_materials[data.kind.to_u8() as usize].clone(),
+                },
+                NotShadowCaster,
+            ))
+            .id(),
         // tool ที่มีโมเดล 3D
         Item::Tool(tool) if tool_model_path(tool).is_some() => {
             use bevy::gltf::GltfAssetLabel;
@@ -619,6 +719,8 @@ fn spawn_dropped_item_system(
             Item::Material(_) => 0.3,
             Item::Crucible(_) => 0.4,
             Item::CastIngot(_) => 0.3,
+            Item::PickaxeHead(_) => 0.4,
+            Item::CraftedPickaxe(_) => 0.6,
         };
         let entity = spawn_item_visual(
             &mut commands, &mut meshes, &mut materials, &asset_server,
@@ -721,6 +823,17 @@ mod tests {
         };
         let restored = WireItemStack::from_stack(original).to_stack().unwrap();
         assert!(restored == original);
+    }
+
+    #[test]
+    fn crafted_pickaxe_round_trips_through_inventory_wire() {
+        let head = sample_ingot();
+        let stack = ItemStack {
+            item: Item::CraftedPickaxe(head),
+            count: Some(1),
+        };
+        let decoded = WireItemStack::from_stack(stack).to_stack().unwrap();
+        assert_eq!(decoded.item, stack.item);
     }
 
     #[test]

@@ -25,6 +25,7 @@ mod weather;
 mod hydro;
 mod map_preview;
 mod benchmark;
+mod volcanism;
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RenderMode {
@@ -50,6 +51,35 @@ pub struct NoiseParams {
     /// seed ของ world gen — คุมทั้งความสูง biome และถ้ำ (ดู `TerrainSampler::new`)
     pub seed: u32,
     pub temp_offset: f64,
+    #[serde(default = "default_continent_scale")]
+    pub continent_scale: f64,
+    #[serde(default = "default_land_ratio")]
+    pub land_ratio: f64,
+    #[serde(default = "default_coast_roughness")]
+    pub coast_roughness: f64,
+    #[serde(default = "default_tectonic_strength")]
+    pub tectonic_strength: f64,
+}
+
+const fn default_continent_scale() -> f64 { 20_000.0 }
+const fn default_land_ratio() -> f64 { 0.45 }
+const fn default_coast_roughness() -> f64 { 0.55 }
+const fn default_tectonic_strength() -> f64 { 0.65 }
+
+impl Default for NoiseParams {
+    fn default() -> Self {
+        Self {
+            frequency: 0.015,
+            amplitude: 40.0,
+            octaves: 4,
+            seed: 1,
+            temp_offset: 0.0,
+            continent_scale: default_continent_scale(),
+            land_ratio: default_land_ratio(),
+            coast_roughness: default_coast_roughness(),
+            tectonic_strength: default_tectonic_strength(),
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -100,13 +130,7 @@ impl Default for GameSettings {
             render_distance: 8,
             render_mode: RenderMode::Full,
             game_mode: GameMode::Creative,
-            noise: NoiseParams {
-                frequency: 0.015,
-                amplitude: 40.0,
-                octaves: 4,
-                seed: 1,
-                temp_offset: 0.0,
-            },
+            noise: NoiseParams::default(),
             time_of_day: 10.0,
             day_of_year: 172, // ~ครีษมายัน (ทางช้างเผือกเด่นคืนหน้าร้อน) เป็นค่าเริ่มโชว์สวย
             year: 0,
@@ -148,6 +172,28 @@ pub struct EguiTyping(pub bool);
 /// ทะลุไปเปลี่ยนช่อง hotbar / ขยับกล้อง
 fn keyboard_free(chat: Res<ui::ChatState>, typing: Res<EguiTyping>) -> bool {
     !chat.open && !typing.0
+}
+
+/// WORKAROUND บั๊ก slab allocator ของ bevy 0.19 (buffer 'general mesh slab N' invalid กลาง
+/// render → crash ตอน mesh churn หนัก เช่น chunk stream พรวดหลังเปิด map/zoom).
+/// บั๊กเกิดตอน slab "โต" = recreate GPU buffer ตัวเก่าที่ draw command ยังอ้างอยู่.
+/// แก้: `min_slab_size == max_slab_size` → slab ไม่โต (เต็มแล้วสร้าง slab ใหม่ ไม่ realloc
+/// ตัวเก่า) แต่ยัง pack หลาย mesh ต่อ slab = batching ยังอยู่ FPS ไม่ตก; mesh ใหญ่เกิน slab
+/// (> large_threshold) ไปใช้ buffer เดี่ยวแทน (ไม่พยายามยัด slab จนล้ม).
+/// `MeshAllocatorPlugin` ทำ `init_resource::<MeshAllocatorSettings>()` ใน **render sub-app**
+/// จึงต้อง override ที่นั่น (ใส่ main app ไม่มีผล) และ build **หลัง** DefaultPlugins.
+struct MeshSlabFixPlugin;
+impl Plugin for MeshSlabFixPlugin {
+    fn build(&self, app: &mut App) {
+        if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+            const SLAB: u64 = 32 * 1024 * 1024; // 32 MiB slab คงที่ (ไม่โต)
+            let mut settings = bevy::render::mesh::allocator::MeshAllocatorSettings::default();
+            settings.slab_allocator_settings.min_slab_size = SLAB;
+            settings.slab_allocator_settings.max_slab_size = SLAB;
+            settings.slab_allocator_settings.large_threshold = SLAB;
+            render_app.world_mut().insert_resource(settings);
+        }
+    }
 }
 
 fn reset_paused(
@@ -278,6 +324,8 @@ fn main() {
         .init_resource::<ui::HeldStack>()
         .init_resource::<voxel::InteractionMode>()
         .init_resource::<voxel::ActiveFluids>()
+        .init_resource::<voxel::ActiveReactiveFluids>()
+        .init_resource::<volcanism::VolcanoRegistry>()
         .init_resource::<voxel::PendingBlockUpdates>()
         .init_resource::<voxel::ActivePools>()
         .init_resource::<voxel::ActiveTnt>()
@@ -291,6 +339,7 @@ fn main() {
         .init_resource::<ui::ShowOptions>()
         .init_resource::<ui::ChatState>()
         .init_resource::<command::CommandQueue>()
+        .init_resource::<voxel::TimeFastForward>()
         .init_resource::<camera::FogState>()
         .init_resource::<EguiTyping>()
         .init_resource::<ui::WorldList>()
@@ -301,6 +350,7 @@ fn main() {
         .init_resource::<network::PendingNetEdits>()
         .init_resource::<network::PendingLocalActions>()
         .init_resource::<network::PendingNetFx>()
+        .init_resource::<network::PendingVolcanoEvents>()
         .init_resource::<network::IncomingNetEdits>()
         .init_resource::<network::IncomingChunkRemesh>()
         .init_resource::<network::PositionSendTimer>()
@@ -335,7 +385,9 @@ fn main() {
                 weather::WeatherPlugin,
                 map_preview::MapPreviewPlugin,
                 bevy::pbr::MaterialPlugin::<voxel::CustomWaterMaterial>::default(),
+                bevy::pbr::MaterialPlugin::<voxel::SeasonalFoliageMaterial>::default(),
                 benchmark::BenchmarkPlugin { enabled: is_benchmark },
+                MeshSlabFixPlugin,
             )
         ))
         .init_state::<GameState>()
@@ -352,6 +404,10 @@ fn main() {
             particles::setup_particles,
             lod::setup_lod,
         ))
+        .add_systems(
+            Startup,
+            camera::spawn_local_player_avatar.after(network::setup_player_model_assets),
+        )
         .add_systems(Update, (
             particles::spawn_block_fx,
             particles::spawn_explosion_fx,
@@ -387,6 +443,8 @@ fn main() {
                     ui::inventory_click_system,
                     ui::furnace_button_interaction_system,
                     ui::clear_inventory_button_system,
+                    ui::craft_recipe_button_system,
+                    ui::update_craftable_recipes,
                 ),
                 ui::container_click_system,
                 // ต้องหลัง cursor_grab_system: ESC ในระบบนั้นปลดล็อคเมาส์ทุกครั้ง
@@ -432,7 +490,12 @@ fn main() {
                 voxel::chunk_unloading_system,
                 voxel::update_sun_system,
                 // น้ำ simulate เฉพาะ single player กับ host — client รับ delta จาก host แทน
-                voxel::fluid_simulation_system.run_if(network::is_not_client),
+                (
+                    voxel::fluid_simulation_system.run_if(network::is_not_client),
+                    voxel::reactive_fluid_system.run_if(network::is_not_client),
+                    voxel::fluid_hazard_system,
+                    voxel::volcano_lifecycle_system.run_if(network::is_not_client),
+                ),
                 // TNT fuse/ระเบิดก็เป็นของ host/single เช่นกัน (ผล broadcast เป็น edit)
                 (
                     voxel::tnt_detonation_system.run_if(network::is_not_client),
@@ -446,7 +509,11 @@ fn main() {
                 voxel::start_icon_bake,
                 voxel::finish_icon_bake,
                 voxel::propagate_render_layers,
-                voxel::apply_cast_ingot_materials,
+                (
+                    voxel::apply_cast_ingot_materials,
+                    voxel::apply_named_materials,
+                    voxel::hide_named_model_nodes,
+                ),
                 voxel::update_ingot_mold_fill_system,
                 world_save::auto_save_system,
                 // ทูเพิลของ add_systems รับได้สูงสุด 20 ตัว — ที่เกินจัดเป็นกลุ่มซ้อน
@@ -472,6 +539,7 @@ fn main() {
                 network::host_send_queued_chunks,
                 network::host_broadcast_edits.after(network::host_receive_client_messages),
                 network::host_broadcast_fx,
+                network::host_broadcast_volcano_events,
                 network::host_broadcast_actions,
                 network::host_broadcast_positions,
             ).run_if(resource_exists::<bevy_renet::RenetServer>),
@@ -502,6 +570,10 @@ fn main() {
             network::auto_host_system,
             network::nameplate_system,
             network::player_rig_setup_system,
+            camera::sync_local_player_avatar
+                .after(network::player_rig_setup_system)
+                .after(camera::camera_movement_system)
+                .after(camera::camera_look_system),
             network::player_animation_system,
             network::update_remote_held_items.after(network::player_rig_setup_system),
         ))

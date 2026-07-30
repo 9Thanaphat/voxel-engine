@@ -7,6 +7,7 @@ fn params() -> NoiseParams {
         octaves: 4,
         seed: 1,
         temp_offset: 0.0,
+        ..Default::default()
     }
 }
 

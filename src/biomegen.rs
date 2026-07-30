@@ -14,15 +14,22 @@ use serde::{Deserialize, Serialize};
 pub enum TreeKind {
     None,
     Broadleaf,
+    Maple,
     Spruce,
 }
 
 impl TreeKind {
-    pub const ALL: [TreeKind; 3] = [TreeKind::None, TreeKind::Broadleaf, TreeKind::Spruce];
+    pub const ALL: [TreeKind; 4] = [
+        TreeKind::None,
+        TreeKind::Broadleaf,
+        TreeKind::Maple,
+        TreeKind::Spruce,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             TreeKind::None => "None",
             TreeKind::Broadleaf => "Broadleaf",
+            TreeKind::Maple => "Maple",
             TreeKind::Spruce => "Spruce",
         }
     }
@@ -81,7 +88,9 @@ impl Default for BiomeConfig {
         };
         Self {
             // ยอดเขาใหญ่มาจาก MOUNT_AMP (ridged) ใน voxel.rs แล้ว — amplitude ที่นี่คือความขรุขระกลาง
-            snow_line: 92,
+            // snow_line = บล็อกเหนือ sea ที่ผิวเริ่มคลุมหิมะจาก "ความสูง" — ตั้งสูงเกิน terrain สูงสุด
+            // = ปิดหิมะ elevation ไว้ก่อน (หิมะเหลือเฉพาะจาก biome หนาว tundra/snowy)
+            snow_line: 4096,
             biomes: vec![
                 // ── ร้อน ── (offset/amplitude หน่วยบล็อก — ผิวยิ่งสูง ใต้ดินยิ่งลึก/gen ช้า)
                 mk("Desert", Hot, 1.0, 3.0, 6.0, sand, sand, None, 0.0),
@@ -91,6 +100,7 @@ impl Default for BiomeConfig {
                 // ── อุ่น ──
                 mk("Plains", Warm, 1.2, 4.0, 6.0, g, d, Broadleaf, 0.1),
                 mk("Temperate Forest", Warm, 1.0, 5.0, 16.0, g, d, Broadleaf, 0.6),
+                mk("Maple Forest", Warm, 0.8, 5.0, 14.0, g, d, Maple, 0.55),
                 mk("Mountains", Warm, 0.6, 10.0, 22.0, g, stone, Broadleaf, 0.2),
                 mk("Ocean", Warm, 1.0, -80.0, 3.0, sand, d, None, 0.0),
                 // ── เย็น ──
@@ -115,7 +125,8 @@ impl BiomeConfig {
 
 /// region noise → 0..1 (หย่อมใหญ่ ~หลายร้อยบล็อกต่อหย่อม)
 fn region_value(region: &Perlin, wx: f64, wz: f64) -> f64 {
-    ((region.get([wx * 0.0005, wz * 0.0005]) + 1.0) * 0.5).clamp(0.0, 1.0)
+    // freq ต่ำ → sub-biome เป็นผืนใหญ่ (~3,300 บล็อก/หย่อม) ไม่แตกเป็นหย่อมเล็ก
+    ((region.get([wx * 0.0003, wz * 0.0003]) + 1.0) * 0.5).clamp(0.0, 1.0)
 }
 
 /// เลือก sub-biome ในเขตด้วย weight (deterministic) — ไม่ alloc

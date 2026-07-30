@@ -53,6 +53,12 @@ impl Default for PlayerStats {
 #[derive(Component)]
 pub struct MainCamera;
 
+#[derive(Component)]
+pub struct LocalPlayerAvatar {
+    previous_position: Vec3,
+    walk_phase: f32,
+}
+
 impl Default for FreeCamera {
     fn default() -> Self {
         Self {
@@ -166,8 +172,9 @@ pub fn camera_movement_system(
     typing: Res<crate::EguiTyping>,
     inventory: Res<crate::voxel::InventoryOpen>,
     settings: Res<crate::GameSettings>,
+    map: Res<crate::map_preview::MapPreviewState>,
 ) {
-    let input_ok = !paused.0 && !chat.open && !typing.0 && !inventory.0;
+    let input_ok = !paused.0 && !chat.open && !typing.0 && !inventory.0 && !map.show_map;
     // ปุ่มถูกอ่านเฉพาะตอนคุมตัวละครได้ — ฟิสิกส์ข้างล่างเดินต่อไม่สนใจค่านี้
     let pressed = |key| input_ok && keyboard_input.pressed(key);
 
@@ -293,6 +300,7 @@ pub fn camera_look_system(
     cursor_query: Query<&CursorOptions, With<PrimaryWindow>>,
     mut mouse_events: MessageReader<MouseMotion>,
     key: Res<ButtonInput<KeyCode>>,
+    world: Res<VoxelWorld>,
     mut query: Query<(&mut FreeCamera, &mut Transform, Option<&Children>)>,
     mut child_query: Query<&mut Transform, (With<MainCamera>, Without<FreeCamera>)>,
 ) {
@@ -310,12 +318,11 @@ pub fn camera_look_system(
         delta += event.delta;
     }
 
-    if delta != Vec2::ZERO {
-        for (mut camera, mut transform, children) in &mut query {
-            if key.just_pressed(KeyCode::F5) {
-                camera.third_person = !camera.third_person;
-            }
-
+    for (mut camera, mut transform, children) in &mut query {
+        if key.just_pressed(KeyCode::F5) {
+            camera.third_person = !camera.third_person;
+        }
+        if delta != Vec2::ZERO {
             camera.yaw -= delta.x * camera.sensitivity;
             camera.pitch -= delta.y * camera.sensitivity;
 
@@ -328,16 +335,131 @@ pub fn camera_look_system(
             // อัปเดต rotation
             transform.rotation = Quat::from_axis_angle(Vec3::Y, camera.yaw)
                 * Quat::from_axis_angle(Vec3::X, camera.pitch);
+        }
 
-            if let Some(children) = children {
-                for &child in children {
-                    if let Ok(mut child_tf) = child_query.get_mut(child) {
-                        if camera.third_person {
-                            child_tf.translation = Vec3::new(0.0, 0.0, 5.0);
-                        } else {
-                            child_tf.translation = Vec3::ZERO;
+        if let Some(children) = children {
+            for &child in children {
+                if let Ok(mut child_tf) = child_query.get_mut(child) {
+                    if camera.third_person {
+                        let desired = 5.0;
+                        let backwards = transform.rotation * Vec3::Z;
+                        let mut allowed = desired;
+                        let mut distance = 0.25;
+                        while distance <= desired {
+                            let p = transform.translation + backwards * distance;
+                            if world
+                                .get_block(
+                                    p.x.floor() as i32,
+                                    p.y.floor() as i32,
+                                    p.z.floor() as i32,
+                                )
+                                .is_solid()
+                            {
+                                allowed = (distance - 0.25).max(0.35);
+                                break;
+                            }
+                            distance += 0.15;
                         }
+                        child_tf.translation = Vec3::new(0.0, 0.15, allowed);
+                    } else {
+                        child_tf.translation = Vec3::ZERO;
                     }
+                }
+            }
+        }
+    }
+}
+
+pub fn spawn_local_player_avatar(
+    mut commands: Commands,
+    models: Res<crate::network::PlayerModelAssets>,
+    existing: Query<(), With<LocalPlayerAvatar>>,
+) {
+    if !existing.is_empty() {
+        return;
+    }
+    commands.spawn((
+        LocalPlayerAvatar {
+            previous_position: Vec3::ZERO,
+            walk_phase: 0.0,
+        },
+        crate::network::PlayerRig::default(),
+        WorldAssetRoot(models.player.clone()),
+        Transform::from_xyz(0.0, -1000.0, 0.0),
+        Visibility::Hidden,
+    ));
+}
+
+pub fn sync_local_player_avatar(
+    time: Res<Time>,
+    game_state: Res<State<crate::GameState>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    player: Query<(&FreeCamera, &Transform)>,
+    mut avatars: Query<
+        (&mut LocalPlayerAvatar, &crate::network::PlayerRig, &mut Transform, &mut Visibility),
+        Without<FreeCamera>,
+    >,
+    mut bones: Query<&mut Transform, (Without<FreeCamera>, Without<LocalPlayerAvatar>)>,
+) {
+    if *game_state.get() != crate::GameState::InGame {
+        for (_, _, _, mut visibility) in &mut avatars {
+            *visibility = Visibility::Hidden;
+        }
+        return;
+    }
+
+    let Some((camera, player_tf)) = player.iter().next() else {
+        return;
+    };
+    let dt = time.delta_secs().max(1e-5);
+    for (mut avatar, rig, mut avatar_tf, mut visibility) in &mut avatars {
+        let center = player_tf.translation
+            - Vec3::Y * (EYE_HEIGHT - PLAYER_HEIGHT * 0.5);
+        let first_sync = avatar_tf.translation.y < -900.0;
+        let horizontal_speed = if first_sync {
+            0.0
+        } else {
+            Vec2::new(
+                center.x - avatar.previous_position.x,
+                center.z - avatar.previous_position.z,
+            )
+            .length()
+                / dt
+        };
+        avatar.previous_position = center;
+        avatar_tf.translation = center;
+        avatar_tf.rotation = Quat::from_rotation_y(camera.yaw);
+        *visibility = if camera.third_person {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+
+        let walking = camera.third_person && horizontal_speed > 0.1;
+        if walking {
+            avatar.walk_phase =
+                (avatar.walk_phase + time.delta_secs() * 10.0) % std::f32::consts::TAU;
+        } else {
+            let settle =
+                (avatar.walk_phase / std::f32::consts::PI).round() * std::f32::consts::PI;
+            avatar.walk_phase +=
+                (settle - avatar.walk_phase) * (time.delta_secs() * 5.0).min(1.0);
+        }
+        let angle = avatar.walk_phase.sin() * 0.6;
+        let mining_angle = if mouse.pressed(MouseButton::Left) {
+            -1.0 + (time.elapsed_secs() * 12.0).sin() * 0.55
+        } else {
+            angle
+        };
+        for (bone, rotation) in [
+            (rig.upper_leg_left, angle),
+            (rig.upper_leg_right, -angle),
+            (rig.upper_arm_left, -angle),
+            (rig.upper_arm_right, mining_angle),
+        ] {
+            if let Some(bone) = bone {
+                if let Ok(mut tf) = bones.get_mut(bone) {
+                    tf.rotation = Quat::from_rotation_x(rotation);
                 }
             }
         }

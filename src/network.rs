@@ -13,7 +13,7 @@ use crate::voxel::{VoxelWorld, CHUNK_VOLUME, CHUNK_WIDTH};
 pub const SERVER_PORT: u16 = 5000;
 /// ต้องตรงกันทั้ง host และ client ไม่งั้น netcode ปฏิเสธการเชื่อมต่อ
 /// (0003: Position/PlayerPositions เพิ่มของที่ถือ — โครง encode เปลี่ยน)
-pub const PROTOCOL_ID: u64 = 0xB10C_CAFE_0008;
+pub const PROTOCOL_ID: u64 = 0xB10C_CAFE_0009;
 /// id ตัวแทน host ในข้อความ PlayerPositions (client จริงใช้ id ที่ไม่ใช่ 0)
 pub const HOST_PLAYER_ID: u64 = 0;
 
@@ -41,6 +41,7 @@ pub enum ServerMessage {
         client_id: u64,
         /// ลำดับผู้เล่น (host = 1, client ตามลำดับ join = 2, 3, ...)
         player_number: u32,
+        worldgen_version: u32,
         noise: crate::NoiseParams,
         spawn_pos: [f32; 3],
         time_of_day: f32,
@@ -75,7 +76,15 @@ pub enum ServerMessage {
     TimeOfDay { hours: f32, day_of_year: u16, year: u32 },
     Weather { kind: crate::weather::WeatherKind, intensity: f32 },
     Explosion(ExplosionWire),
+    VolcanoEvent(VolcanoEventWire),
     PlayerAction { client_id: u64, action: u8 },
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct VolcanoEventWire {
+    pub id: u64,
+    pub state: crate::volcanism::VolcanoState,
+    pub center: [f64; 2],
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -200,6 +209,9 @@ pub struct PendingLocalActions(pub Vec<u8>);
 
 #[derive(Resource, Default)]
 pub struct PendingNetFx(pub Vec<ExplosionWire>);
+
+#[derive(Resource, Default)]
+pub struct PendingVolcanoEvents(pub Vec<VolcanoEventWire>);
 
 /// edit ขาเข้าที่รอ apply + remesh
 #[derive(Resource, Default)]
@@ -524,28 +536,35 @@ pub fn cleanup_remote_players(
 pub fn update_remote_held_items(
     mut commands: Commands,
     mut players: Query<(&RemotePlayer, &mut PlayerRig)>,
+    mut local_players: Query<
+        &mut PlayerRig,
+        (With<crate::camera::LocalPlayerAvatar>, Without<RemotePlayer>),
+    >,
+    hotbar: Res<crate::voxel::Hotbar>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
     block_mats: Res<crate::voxel::BlockMaterials>,
     campfire_assets: Res<crate::voxel::BlockModelAssets>,
 ) {
-    for (rp, mut rig) in players.iter_mut() {
-        // รอ rig พร้อมก่อน (โมเดลเพิ่งโหลด) — เฟรมถัดไปค่อยเกาะ
-        let Some(arm) = rig.upper_arm_right else { continue };
-        if rig.held_item == rp.held {
-            continue;
+    let local_held = hotbar
+        .slots
+        .get(hotbar.selected)
+        .and_then(|slot| slot.map(|stack| stack.item));
+    let mut update_held = |rig: &mut PlayerRig, held: Option<crate::item::Item>| {
+        let Some(arm) = rig.upper_arm_right else { return };
+        if rig.held_item == held {
+            return;
         }
         if let Some(entity) = rig.held_entity.take() {
             commands.entity(entity).despawn();
         }
-        rig.held_item = rp.held;
-        if let Some(item) = rp.held {
+        rig.held_item = held;
+        if let Some(item) = held {
             let size = match item {
                 crate::item::Item::Block(_) => 0.25,
                 _ => 0.6,
             };
-            // ตำแหน่ง/มุมเดียวกับ pickaxe ที่เคย hardcode ติดแขน (จูนแล้วว่าดูดี)
             let tf = Transform::from_xyz(0.0, -0.6, 0.4)
                 .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2));
             let entity = crate::item::spawn_item_visual(
@@ -555,6 +574,14 @@ pub fn update_remote_held_items(
             commands.entity(arm).add_child(entity);
             rig.held_entity = Some(entity);
         }
+    };
+
+    for (rp, mut rig) in players.iter_mut() {
+        // รอ rig พร้อมก่อน (โมเดลเพิ่งโหลด) — เฟรมถัดไปค่อยเกาะ
+        update_held(&mut rig, rp.held);
+    }
+    for mut rig in &mut local_players {
+        update_held(&mut rig, local_held);
     }
 }
 
@@ -713,6 +740,7 @@ pub fn on_server_event(
             let welcome = ServerMessage::Welcome {
                 client_id,
                 player_number,
+                worldgen_version: crate::world_save::WORLDGEN_VERSION,
                 noise: settings.noise,
                 spawn_pos: spawn_pos.to_array(),
                 time_of_day: settings.time_of_day,
@@ -820,7 +848,7 @@ fn validate_edit(edit: &BlockEdit, world: &VoxelWorld) -> bool {
             let current_mass = world.ingot_molds.get(&p).map_or(0, |m| m.total_mass());
             (
                 p,
-                world.get_block(p.x, p.y, p.z) == crate::voxel::BlockType::IngotMold
+                matches!(world.get_block(p.x, p.y, p.z), crate::voxel::BlockType::IngotMold | crate::voxel::BlockType::PickaxeMold)
                     && data.total_mass() >= current_mass
                     && data.total_mass() <= crate::chemistry::INGOT_MOLD_CAPACITY_GRAMS,
             )
@@ -829,11 +857,14 @@ fn validate_edit(edit: &BlockEdit, world: &VoxelWorld) -> bool {
             let p = IVec3::from_array(*pos);
             (
                 p,
-                world.get_block(p.x, p.y, p.z) == crate::voxel::BlockType::IngotMold
-                    && world
-                        .ingot_molds
-                        .get(&p)
-                        .is_some_and(crate::chemistry::mold_ready_to_extract),
+                matches!(world.get_block(p.x, p.y, p.z), crate::voxel::BlockType::IngotMold | crate::voxel::BlockType::PickaxeMold)
+                    && world.ingot_molds.get(&p).is_some_and(|mold| {
+                        if world.get_block(p.x, p.y, p.z) == crate::voxel::BlockType::PickaxeMold {
+                            crate::chemistry::cast_pickaxe_head_from_mold(mold).is_some()
+                        } else {
+                            crate::chemistry::mold_ready_to_extract(mold)
+                        }
+                    }),
             )
         }
         BlockEdit::PlaceCastIngot { pos, data } => {
@@ -1062,14 +1093,19 @@ pub fn client_receive_messages(
     mut chat_ui: ResMut<crate::ui::ChatState>,
     mut fx_writer: MessageWriter<crate::particles::ExplosionFx>,
     // รวมเป็น tuple เดียว — Bevy จำกัด system param ที่ 16 ตัว
-    (mut weather, mut biome_config): (
+    (mut weather, mut biome_config, mut volcanoes): (
         ResMut<crate::weather::Weather>,
         ResMut<crate::biomegen::BiomeConfig>,
+        ResMut<crate::volcanism::VolcanoRegistry>,
     ),
 ) {
     while let Some(bytes) = client.receive_message(DefaultChannel::ReliableOrdered) {
         match decode::<ServerMessage>(&bytes) {
-            Some(ServerMessage::Welcome { client_id: _, player_number, noise, spawn_pos, time_of_day, day_of_year, year, game_mode: _, weather_kind, weather_intensity, biomes }) => {
+            Some(ServerMessage::Welcome { client_id: _, player_number, worldgen_version, noise, spawn_pos, time_of_day, day_of_year, year, game_mode: _, weather_kind, weather_intensity, biomes }) => {
+                if worldgen_version != crate::world_save::WORLDGEN_VERSION {
+                    error!("incompatible worldgen version: host={worldgen_version}, client={}", crate::world_save::WORLDGEN_VERSION);
+                    continue;
+                }
                 client_sync.my_number = player_number;
                 settings.noise = noise;
                 settings.time_of_day = time_of_day;
@@ -1184,6 +1220,14 @@ pub fn client_receive_messages(
                         .collect(),
                     power: wire.power,
                     is_nuke: wire.is_nuke,
+                });
+            }
+            Some(ServerMessage::VolcanoEvent(event)) => {
+                volcanoes.active.insert(event.id, crate::volcanism::VolcanoRuntime {
+                    id: event.id,
+                    state: event.state,
+                    seconds_in_state: 0.0,
+                    pulse_seconds: 0.0,
                 });
             }
             Some(ServerMessage::PlayerAction { client_id, action }) => {
@@ -1602,6 +1646,18 @@ pub fn host_broadcast_fx(
         server.broadcast_message(
             DefaultChannel::ReliableOrdered,
             encode(&ServerMessage::Explosion(fx)),
+        );
+    }
+}
+
+pub fn host_broadcast_volcano_events(
+    mut server: ResMut<RenetServer>,
+    mut pending: ResMut<PendingVolcanoEvents>,
+) {
+    for event in pending.0.drain(..) {
+        server.broadcast_message(
+            DefaultChannel::ReliableOrdered,
+            encode(&ServerMessage::VolcanoEvent(event)),
         );
     }
 }

@@ -10,6 +10,7 @@ pub enum Element {
     Carbon,
     Impurity, // Things that create slag
     Slag,     // Skimmed waste
+    Flux,     // Limestone-derived flux
 }
 
 pub struct ElementData {
@@ -18,7 +19,7 @@ pub struct ElementData {
 }
 
 impl Element {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Copper,
         Self::Tin,
         Self::Zinc,
@@ -26,6 +27,7 @@ impl Element {
         Self::Carbon,
         Self::Impurity,
         Self::Slag,
+        Self::Flux,
     ];
 
     pub fn from_index(index: usize) -> Option<Self> {
@@ -41,6 +43,7 @@ impl Element {
             Element::Carbon => ElementData { melting_point: 3550, name: "Carbon" },
             Element::Impurity => ElementData { melting_point: 800, name: "Impurity" },
             Element::Slag => ElementData { melting_point: 1200, name: "Slag" },
+            Element::Flux => ElementData { melting_point: 825, name: "Flux" },
         }
     }
 }
@@ -57,7 +60,12 @@ pub fn get_item_composition(item: &Item) -> Option<Vec<(Element, u32)>> {
     match item {
         Item::Block(BlockType::CopperOre) | Item::Material(MaterialType::Copper) => Some(vec![(Element::Copper, 800), (Element::Impurity, 200)]),
         Item::Block(BlockType::IronOre) | Item::Material(MaterialType::Iron) => Some(vec![(Element::Iron, 850), (Element::Impurity, 150)]),
+        Item::Block(BlockType::TinOre) | Item::Material(MaterialType::Tin) => Some(vec![(Element::Tin, 900), (Element::Impurity, 100)]),
+        Item::Block(BlockType::ZincOre) | Item::Material(MaterialType::Zinc) => Some(vec![(Element::Zinc, 900), (Element::Impurity, 100)]),
         Item::Material(MaterialType::Coal) => Some(vec![(Element::Carbon, 950), (Element::Impurity, 50)]),
+        Item::Block(BlockType::Limestone) | Item::Material(MaterialType::Limestone) => {
+            Some(vec![(Element::Flux, 1000)])
+        }
         Item::Material(MaterialType::CopperIngot) => Some(vec![(Element::Copper, 1000)]),
         Item::Material(MaterialType::IronIngot) => Some(vec![(Element::Iron, 1000)]),
         Item::Material(MaterialType::BronzeIngot) => {
@@ -82,9 +90,6 @@ pub fn get_item_composition(item: &Item) -> Option<Vec<(Element, u32)>> {
                 })
                 .collect(),
         ),
-        // Limestone (CaCO3) acts as a Flux, we represent it as Carbon + Flux property in the smelting logic
-        // But for now, let's just make it react with Impurity directly in the smelting logic.
-        // We'll give it a special composition or handle it manually.
         _ => None,
     }
 }
@@ -161,6 +166,7 @@ impl IngotMoldData {
 
 pub const INGOT_SAFE_REMOVAL_TEMP_C: f32 = 200.0;
 pub const MIN_CAST_INGOT_MASS_GRAMS: u32 = 100;
+pub const PICKAXE_HEAD_MASS_GRAMS: u32 = 1_000;
 
 pub fn mold_ready_to_extract(mold: &IngotMoldData) -> bool {
     if mold.total_mass() < MIN_CAST_INGOT_MASS_GRAMS {
@@ -183,6 +189,17 @@ pub enum CastIngotKind {
 }
 
 impl CastIngotKind {
+    pub fn material_name(self) -> &'static str {
+        match self {
+            Self::Copper => "Copper",
+            Self::Iron => "Iron",
+            Self::Bronze => "Bronze",
+            Self::Brass => "Brass",
+            Self::Steel => "Steel",
+            Self::Mixed => "Mixed Metal",
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Copper => "Cast Copper Ingot",
@@ -249,7 +266,7 @@ pub fn cast_ingot_from_mold(mold: &IngotMoldData) -> Option<CastIngotData> {
     let zinc = fraction(Element::Zinc);
     let iron = fraction(Element::Iron);
     let carbon = fraction(Element::Carbon);
-    let waste = fraction(Element::Impurity) + fraction(Element::Slag);
+    let waste = fraction(Element::Impurity) + fraction(Element::Slag) + fraction(Element::Flux);
 
     let kind = if copper >= 0.70 && (0.05..=0.30).contains(&tin) {
         CastIngotKind::Bronze
@@ -278,6 +295,14 @@ pub fn cast_ingot_from_mold(mold: &IngotMoldData) -> Option<CastIngotData> {
         quality_permille: (base_quality.clamp(0.0, 1.0) * 1_000.0).round() as u16,
         kind,
     })
+}
+
+/// A tool head must fill the mold completely; partial pours remain in the mold
+/// until topped up, so they cannot create undersized but visually identical tools.
+pub fn cast_pickaxe_head_from_mold(mold: &IngotMoldData) -> Option<CastIngotData> {
+    (mold.total_mass() == PICKAXE_HEAD_MASS_GRAMS)
+        .then(|| cast_ingot_from_mold(mold))
+        .flatten()
 }
 
 pub fn liquid_melting_point(mass: &[u32; 8]) -> Option<u16> {
@@ -370,6 +395,24 @@ mod tests {
     }
 
     #[test]
+    fn survival_metallurgy_inputs_have_expected_compositions() {
+        use crate::item::{Item, MaterialType};
+
+        assert_eq!(
+            super::get_item_composition(&Item::Material(MaterialType::Tin)),
+            Some(vec![(Element::Tin, 900), (Element::Impurity, 100)])
+        );
+        assert_eq!(
+            super::get_item_composition(&Item::Material(MaterialType::Zinc)),
+            Some(vec![(Element::Zinc, 900), (Element::Impurity, 100)])
+        );
+        assert_eq!(
+            super::get_item_composition(&Item::Material(MaterialType::Limestone)),
+            Some(vec![(Element::Flux, 1000)])
+        );
+    }
+
+    #[test]
     fn crucible_capacity_counts_solid_and_liquid_mass() {
         let mut crucible = CrucibleData::default();
         crucible.solid_contents[0] = Some(crate::item::SimpleItem::from_stack(
@@ -426,5 +469,17 @@ mod tests {
 
         mold.metal_mass[Element::Copper as usize] = 700;
         assert_eq!(super::cast_ingot_from_mold(&mold).unwrap().mass, 800);
+    }
+
+    #[test]
+    fn pickaxe_head_requires_a_full_cool_mold() {
+        let mut mold = IngotMoldData::default();
+        mold.metal_mass[Element::Copper as usize] = 999;
+        assert!(super::cast_pickaxe_head_from_mold(&mold).is_none());
+        mold.metal_mass[Element::Copper as usize] = 1_000;
+        assert_eq!(
+            super::cast_pickaxe_head_from_mold(&mold).unwrap().mass,
+            super::PICKAXE_HEAD_MASS_GRAMS
+        );
     }
 }

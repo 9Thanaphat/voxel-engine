@@ -105,9 +105,9 @@ fn block_mat(b: BlockType) -> Mat {
     use BlockType::*;
     match b {
         Glass => Mat::Glass,
-        OakWood | Chest | Tnt | TntLit => Mat::Wood,
+        OakWood | MapleLog | Chest | Tnt | TntLit => Mat::Wood,
         Dirt | Sand => Mat::Dirt,
-        Grass | Leaves | TallGrass | Branch | Campfire => Mat::Grass,
+        Grass | Leaves | MapleLeaves | TallGrass | Branch | MapleBranch | Campfire => Mat::Grass,
         // ที่เหลือ (Stone/IronBlock/Glowstone/Lamp*/Chiseled/Furnace/Switch*/SmartLamp*/Nuke*) = หิน
         _ => Mat::Stone,
     }

@@ -20,13 +20,17 @@ const HELP: &[&str] = &[
     "/gamemode <creative|survival> - switch mode (this client only)",
     "/give <block|tool> [count] - put an item in the selected slot (tools: pickaxe, axe, shovel, chisel, wire)",
     "/setblock <x> <y> <z> <block> - place a block (host only)",
-    "/time <0-24> - set time of day (host only)",
+    "/time <0-24> - fast-forward to time of day (host only)",
+    "/set day <1-365> - set day of year (host only)",
     "/date <0-364> - set day of year (0 = spring equinox, host only)",
     "/daynight <speed> - day-night cycle speed (1 = normal, 0 = frozen, host only)",
     "/weather <clear|rain|snow> [intensity] - set weather (host only)",
     "/seed - show the world seed",
+    "/locate <volcano|hydrothermal> - find the nearest volcanic landmark",
+    "/volcano <status|erupt|unrest|cooling|dormant> - inspect/control nearest volcano (host only)",
     "/chunkborders - toggle chunk boundary grid (debug, this client only)",
     "/waterflow - toggle water flow direction arrows (debug, this client only)",
+    "/xray [on|off] - toggle terrain X-ray + fullbright (debug, this client only)",
     "/fog <clear|morning|dense> - change fog atmosphere (this client only)",
 ];
 
@@ -34,6 +38,7 @@ const HELP: &[&str] = &[
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct CommandWorld<'w, 's> {
     pub settings: ResMut<'w, crate::GameSettings>,
+    pub fast_time: ResMut<'w, crate::voxel::TimeFastForward>,
     pub hotbar: ResMut<'w, crate::voxel::Hotbar>,
     pub pending: ResMut<'w, crate::network::PendingNetEdits>,
     pub incoming: ResMut<'w, crate::network::IncomingNetEdits>,
@@ -41,6 +46,9 @@ pub struct CommandWorld<'w, 's> {
     pub weather: ResMut<'w, crate::weather::Weather>,
     pub auto_weather: ResMut<'w, crate::weather::AutoWeather>,
     pub fog: ResMut<'w, crate::camera::FogState>,
+    pub voxel_world: ResMut<'w, crate::voxel::VoxelWorld>,
+    pub volcanoes: ResMut<'w, crate::volcanism::VolcanoRegistry>,
+    pub volcano_events: ResMut<'w, crate::network::PendingVolcanoEvents>,
 }
 
 pub fn run_commands(
@@ -108,10 +116,19 @@ fn dispatch(
             }
         }
         "seed" => chat.push_system(format!("Seed: {}", world.settings.noise.seed)),
+        "locate" => cmd_locate(&args, chat, world),
+        "volcano" => cmd_volcano(&args, chat, world, is_client),
         "tp" => cmd_tp(&args, chat, world),
         "gamemode" => cmd_gamemode(&args, chat, world),
         "give" => cmd_give(&args, chat, world),
-        "time" => cmd_time(&args, chat, world, server, is_client),
+        "time" => cmd_time(&args, chat, world, is_client),
+        "set" if args
+            .first()
+            .is_some_and(|arg| arg.eq_ignore_ascii_case("day")) =>
+        {
+            cmd_set_day(&args[1..], chat, world, server, is_client)
+        }
+        "setday" | "day" => cmd_set_day(&args, chat, world, server, is_client),
         "date" => cmd_date(&args, chat, world, server, is_client),
         "daynight" => cmd_daynight(&args, chat, world, is_client),
         "weather" => cmd_weather(&args, chat, world, server, is_client),
@@ -127,9 +144,233 @@ fn dispatch(
             let state = if world.settings.show_water_flow { "on" } else { "off" };
             chat.push_system(format!("Water flow debug arrows {state}"));
         }
+        "xray" => cmd_xray(&args, chat, world),
         "fog" => cmd_fog(&args, chat, world),
         other => chat.push_error(format!("unknown command '{other}' - try /help")),
     }
+}
+
+fn nearest_generated_volcano(
+    settings: &crate::GameSettings,
+    origin: Vec3,
+) -> Option<crate::volcanism::VolcanoDescriptor> {
+    let sampler = crate::voxel::TerrainSampler::new(settings.noise);
+    crate::volcanism::volcanoes_nearby(
+        settings.noise.seed,
+        origin.x as f64,
+        origin.z as f64,
+        32,
+    )
+    .into_iter()
+    .filter(|volcano| {
+        sampler
+            .volcano_sample(volcano.center.x, volcano.center.y)
+            .descriptor
+            .is_some()
+    })
+    .min_by(|a, b| {
+        let distance_sq = |volcano: &crate::volcanism::VolcanoDescriptor| {
+            let dx = volcano.center.x - origin.x as f64;
+            let dz = volcano.center.y - origin.z as f64;
+            dx * dx + dz * dz
+        };
+        distance_sq(a).total_cmp(&distance_sq(b))
+    })
+}
+
+fn volcano_state_name(state: crate::volcanism::VolcanoState) -> &'static str {
+    match state {
+        crate::volcanism::VolcanoState::Dormant => "dormant",
+        crate::volcanism::VolcanoState::Unrest => "unrest",
+        crate::volcanism::VolcanoState::Erupting => "erupting",
+        crate::volcanism::VolcanoState::Cooling => "cooling",
+    }
+}
+
+fn cmd_volcano(
+    args: &[&str],
+    chat: &mut crate::ui::ChatState,
+    world: &mut CommandWorld,
+    is_client: bool,
+) {
+    let Some(action) = args.first().map(|arg| arg.to_ascii_lowercase()) else {
+        chat.push_error("usage: /volcano <status|erupt|unrest|cooling|dormant>");
+        return;
+    };
+    if args.len() != 1 {
+        chat.push_error("usage: /volcano <status|erupt|unrest|cooling|dormant>");
+        return;
+    }
+    let Some(camera) = world.camera.iter().next() else {
+        chat.push_error("no camera position available");
+        return;
+    };
+    let origin = camera.translation;
+    let Some(volcano) = nearest_generated_volcano(&world.settings, origin) else {
+        chat.push_error("no volcano found within 50,000 blocks");
+        return;
+    };
+    let dx = volcano.center.x - origin.x as f64;
+    let dz = volcano.center.y - origin.z as f64;
+    let distance = (dx * dx + dz * dz).sqrt().round() as i32;
+
+    if action == "status" {
+        let (state, seconds) = world
+            .volcanoes
+            .active
+            .get(&volcano.id)
+            .map_or((crate::volcanism::VolcanoState::Dormant, 0.0), |runtime| {
+                (runtime.state, runtime.seconds_in_state)
+            });
+        chat.push_system(format!(
+            "Nearest volcano is {} ({seconds:.0}s in state), {distance} blocks away at X={} Z={}",
+            volcano_state_name(state),
+            volcano.center.x.round() as i32,
+            volcano.center.y.round() as i32,
+        ));
+        return;
+    }
+    if is_client {
+        chat.push_error("/volcano state changes are host only");
+        return;
+    }
+
+    let state = match action.as_str() {
+        "erupt" | "erupting" => crate::volcanism::VolcanoState::Erupting,
+        "unrest" => crate::volcanism::VolcanoState::Unrest,
+        "cool" | "cooling" => crate::volcanism::VolcanoState::Cooling,
+        "dormant" | "stop" => crate::volcanism::VolcanoState::Dormant,
+        _ => {
+            chat.push_error("usage: /volcano <status|erupt|unrest|cooling|dormant>");
+            return;
+        }
+    };
+    world.volcanoes.active.insert(
+        volcano.id,
+        crate::volcanism::VolcanoRuntime {
+            id: volcano.id,
+            state,
+            seconds_in_state: 0.0,
+            pulse_seconds: 0.0,
+        },
+    );
+    world.volcano_events.0.push(crate::network::VolcanoEventWire {
+        id: volcano.id,
+        state,
+        center: [volcano.center.x, volcano.center.y],
+    });
+    chat.push_system(format!(
+        "Set nearest volcano to {} at X={} Z={} ({distance} blocks away)",
+        volcano_state_name(state),
+        volcano.center.x.round() as i32,
+        volcano.center.y.round() as i32,
+    ));
+}
+
+fn cmd_locate(
+    args: &[&str],
+    chat: &mut crate::ui::ChatState,
+    world: &mut CommandWorld,
+) {
+    let Some(kind) = args.first().map(|arg| arg.to_ascii_lowercase()) else {
+        chat.push_error("usage: /locate <volcano|hydrothermal>");
+        return;
+    };
+    if args.len() != 1 || !matches!(kind.as_str(), "volcano" | "hydrothermal" | "acid") {
+        chat.push_error("usage: /locate <volcano|hydrothermal>");
+        return;
+    }
+    let Some(camera) = world.camera.iter().next() else {
+        chat.push_error("no camera position available");
+        return;
+    };
+
+    let origin = camera.translation;
+    let sampler = crate::voxel::TerrainSampler::new(world.settings.noise);
+    let candidates = crate::volcanism::volcanoes_nearby(
+        world.settings.noise.seed,
+        origin.x as f64,
+        origin.z as f64,
+        32,
+    );
+
+    let mut nearest: Option<(f64, f64, f64)> = None;
+    for volcano in candidates {
+        if sampler
+            .volcano_sample(volcano.center.x, volcano.center.y)
+            .descriptor
+            .is_none()
+        {
+            continue;
+        }
+        let targets: Vec<_> = if kind == "volcano" {
+            vec![volcano.center]
+        } else {
+            crate::volcanism::hydrothermal_pool_centers(volcano)
+                .into_iter()
+                .filter(|center| {
+                    sampler
+                        .hydrothermal_sample(center.x, center.y)
+                        .pool
+                        > 0.9
+                })
+                .collect()
+        };
+        for target in targets {
+            let dx = target.x - origin.x as f64;
+            let dz = target.y - origin.z as f64;
+            let distance_sq = dx * dx + dz * dz;
+            if nearest.is_none_or(|(best, _, _)| distance_sq < best) {
+                nearest = Some((distance_sq, target.x, target.y));
+            }
+        }
+    }
+
+    let Some((distance_sq, x, z)) = nearest else {
+        chat.push_error("no matching landmark found within 50,000 blocks");
+        return;
+    };
+    let y = sampler.height(x, z) + 2;
+    let label = if kind == "volcano" {
+        "volcano"
+    } else {
+        "hydrothermal pool"
+    };
+    chat.push_system(format!(
+        "Nearest {label}: X={} Y={y} Z={} ({} blocks) — /tp {} {y} {}",
+        x.round() as i32,
+        z.round() as i32,
+        distance_sq.sqrt().round() as i32,
+        x.round() as i32,
+        z.round() as i32,
+    ));
+}
+
+fn cmd_xray(args: &[&str], chat: &mut crate::ui::ChatState, world: &mut CommandWorld) {
+    use std::sync::atomic::Ordering;
+
+    let current = crate::voxel::DEBUG_XRAY_ENABLED.load(Ordering::Relaxed);
+    let enabled = match args.first().map(|arg| arg.to_ascii_lowercase()) {
+        None => !current,
+        Some(value) if value == "on" || value == "true" || value == "1" => true,
+        Some(value) if value == "off" || value == "false" || value == "0" => false,
+        _ => {
+            chat.push_error("usage: /xray [on|off]");
+            return;
+        }
+    };
+    if enabled == current {
+        chat.push_system(format!("X-ray already {}", if enabled { "on" } else { "off" }));
+        return;
+    }
+
+    crate::voxel::DEBUG_XRAY_ENABLED.store(enabled, Ordering::Relaxed);
+    let loaded: Vec<IVec2> = world.voxel_world.chunks.keys().copied().collect();
+    world.voxel_world.pending_branch_remesh.extend(loaded);
+    chat.push_system(format!(
+        "X-ray {} — remeshing loaded chunks",
+        if enabled { "on (terrain hidden, fullbright)" } else { "off" }
+    ));
 }
 
 /// 3 args = พิกัดบล็อก, 2 args = lat/lon (ใช้เส้นทางเดียวกับ GPS teleport ใน settings)
@@ -243,7 +484,6 @@ fn cmd_time(
     args: &[&str],
     chat: &mut crate::ui::ChatState,
     world: &mut CommandWorld,
-    server: Option<&mut bevy_renet::RenetServer>,
     is_client: bool,
 ) {
     if is_client {
@@ -258,23 +498,70 @@ fn cmd_time(
         chat.push_error("time must be between 0 and 24");
         return;
     }
-    world.settings.time_of_day = hours;
-    broadcast_time(server, world);
-    chat.push_system(format!("Time set to {hours:.1}"));
+    let target = hours.rem_euclid(24.0);
+    world.fast_time.start(target);
+    chat.push_system(format!("Fast-forwarding to {target:.1}"));
 }
 
 /// broadcast เวลา+ปฏิทินปัจจุบันให้ client ที่ต่ออยู่ (time sync ไม่มี periodic — ต้องยิงเอง)
-fn broadcast_time(server: Option<&mut bevy_renet::RenetServer>, world: &CommandWorld) {
+pub(crate) fn broadcast_time(
+    server: Option<&mut bevy_renet::RenetServer>,
+    settings: &crate::GameSettings,
+) {
     if let Some(server) = server {
         server.broadcast_message(
             bevy_renet::renet::DefaultChannel::ReliableOrdered,
             crate::network::encode(&crate::network::ServerMessage::TimeOfDay {
-                hours: world.settings.time_of_day,
-                day_of_year: world.settings.day_of_year,
-                year: world.settings.year,
+                hours: settings.time_of_day,
+                day_of_year: settings.day_of_year,
+                year: settings.year,
             }),
         );
     }
+}
+
+fn cmd_set_day(
+    args: &[&str],
+    chat: &mut crate::ui::ChatState,
+    world: &mut CommandWorld,
+    server: Option<&mut bevy_renet::RenetServer>,
+    is_client: bool,
+) {
+    if is_client {
+        chat.push_error("/set day is host only");
+        return;
+    }
+    let Some(day) = args
+        .first()
+        .and_then(|value| value.parse::<u16>().ok())
+        .and_then(one_based_day_to_internal)
+    else {
+        chat.push_error("usage: /set day <1-365>");
+        return;
+    };
+
+    world.settings.day_of_year = day;
+    crate::voxel::CURRENT_DAY_OF_YEAR
+        .store(day as u32, std::sync::atomic::Ordering::Relaxed);
+    broadcast_time(server, &world.settings);
+    chat.push_system(format!("Day set to {}", day + 1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::one_based_day_to_internal;
+
+    #[test]
+    fn set_day_uses_player_facing_one_based_days() {
+        assert_eq!(one_based_day_to_internal(1), Some(0));
+        assert_eq!(one_based_day_to_internal(365), Some(364));
+        assert_eq!(one_based_day_to_internal(0), None);
+        assert_eq!(one_based_day_to_internal(366), None);
+    }
+}
+
+fn one_based_day_to_internal(day: u16) -> Option<u16> {
+    (1..=365).contains(&day).then(|| day - 1)
 }
 
 /// ตั้งวันในปี 0..364 (0 = วสันตวิษุวัต) — คุมฤดู/ท้องฟ้ากลางคืน host only เหมือน /time
@@ -299,7 +586,9 @@ fn cmd_date(
         return;
     }
     world.settings.day_of_year = day as u16;
-    broadcast_time(server, world);
+    crate::voxel::CURRENT_DAY_OF_YEAR
+        .store(day as u32, std::sync::atomic::Ordering::Relaxed);
+    broadcast_time(server, &world.settings);
     chat.push_system(format!("Date set to day {day} of the year"));
 }
 

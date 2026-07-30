@@ -1,6 +1,17 @@
 use bevy::prelude::*;
 use crate::voxel::{VoxelWorld, CHUNK_HEIGHT, CHUNK_WIDTH};
 
+fn react_flux_with_impurity(liquid_mass: &mut [u32; 8]) -> u32 {
+    let flux_index = crate::chemistry::Element::Flux as usize;
+    let impurity_index = crate::chemistry::Element::Impurity as usize;
+    let slag_index = crate::chemistry::Element::Slag as usize;
+    let reaction_amount = liquid_mass[flux_index].min(liquid_mass[impurity_index] / 3);
+    liquid_mass[flux_index] -= reaction_amount;
+    liquid_mass[impurity_index] -= reaction_amount * 3;
+    liquid_mass[slag_index] += reaction_amount * 4;
+    reaction_amount
+}
+
 pub fn furnace_tick_system(
     mut world: ResMut<VoxelWorld>,
     time: Res<Time>,
@@ -146,18 +157,9 @@ pub fn furnace_tick_system(
                         }
                     }
                     
-                    // 3. Flux Reaction (Limestone -> Slag)
-                    let carbon = crucible_data.liquid_mass[crate::chemistry::Element::Carbon as usize];
-                    let impurity = crucible_data.liquid_mass[crate::chemistry::Element::Impurity as usize];
-                    if carbon > 0 && impurity > 0 {
-                        // 1g of Carbon reacts with 3g of Impurity to form 4g of Slag
-                        let reaction_amount = carbon.min(impurity / 3);
-                        if reaction_amount > 0 {
-                            crucible_data.liquid_mass[crate::chemistry::Element::Carbon as usize] -= reaction_amount;
-                            crucible_data.liquid_mass[crate::chemistry::Element::Impurity as usize] -= reaction_amount * 3;
-                            crucible_data.liquid_mass[crate::chemistry::Element::Slag as usize] += reaction_amount * 4;
-                        }
-                    }
+                    // 3. Flux reaction: limestone-derived flux binds ore impurity as slag.
+                    // Carbon remains available for steel instead of being consumed as fake flux.
+                    react_flux_with_impurity(&mut crucible_data.liquid_mass);
                 }
             }
         }
@@ -229,4 +231,24 @@ fn cool_crucible(crucible: &mut crate::chemistry::CrucibleData, ambient: f32, dt
         &mut crucible.temp,
         &mut crucible.temp_acc,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::react_flux_with_impurity;
+    use crate::chemistry::Element;
+
+    #[test]
+    fn limestone_flux_converts_impurity_to_slag_and_conserves_mass() {
+        let mut mass = [0u32; 8];
+        mass[Element::Flux as usize] = 100;
+        mass[Element::Impurity as usize] = 240;
+        let before: u32 = mass.iter().sum();
+
+        assert_eq!(react_flux_with_impurity(&mut mass), 80);
+        assert_eq!(mass[Element::Flux as usize], 20);
+        assert_eq!(mass[Element::Impurity as usize], 0);
+        assert_eq!(mass[Element::Slag as usize], 320);
+        assert_eq!(mass.iter().sum::<u32>(), before);
+    }
 }

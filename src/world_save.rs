@@ -9,6 +9,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+pub const WORLDGEN_VERSION: u32 = 2;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WorldMeta {
     pub name: String,
@@ -16,6 +18,8 @@ pub struct WorldMeta {
     /// true = Survival, false = Creative (เก็บเป็น bool ให้ไฟล์เก่าอ่านง่าย)
     pub survival: bool,
     pub created_unix: u64,
+    #[serde(default)]
+    pub worldgen_version: u32,
 }
 
 impl WorldMeta {
@@ -41,6 +45,8 @@ pub fn worlds_root() -> PathBuf {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct WorldGenPreset {
+    #[serde(default)]
+    pub worldgen_version: u32,
     pub render_mode: crate::RenderMode,
     pub noise: crate::NoiseParams,
     pub render_distance: i32,
@@ -49,6 +55,7 @@ pub struct WorldGenPreset {
 impl WorldGenPreset {
     pub fn from_settings(s: &crate::GameSettings) -> Self {
         Self {
+            worldgen_version: WORLDGEN_VERSION,
             render_mode: s.render_mode,
             noise: s.noise,
             render_distance: s.render_distance,
@@ -169,11 +176,71 @@ pub fn create_world(name: &str, seed: u32, survival: bool) -> std::io::Result<(P
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
+        worldgen_version: WORLDGEN_VERSION,
     };
     let json = serde_json::to_vec_pretty(&meta)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(dir.join(META_FILE), json)?;
     Ok((dir, meta))
+}
+
+/// Old generated chunks cannot be mixed with a new terrain topology. Keep only
+/// the world's identity and seed, then regenerate every gameplay file.
+pub fn migrate_world_if_needed(dir: &Path) -> std::io::Result<bool> {
+    let meta_path = dir.join(META_FILE);
+    let bytes = std::fs::read(&meta_path)?;
+    let mut meta: WorldMeta = serde_json::from_slice(&bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if meta.worldgen_version == WORLDGEN_VERSION {
+        return Ok(false);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path == meta_path {
+            continue;
+        }
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)?;
+        } else {
+            std::fs::remove_file(path)?;
+        }
+    }
+    meta.worldgen_version = WORLDGEN_VERSION;
+    let json = serde_json::to_vec_pretty(&meta)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(meta_path, json)?;
+    Ok(true)
+}
+
+pub fn migrate_legacy_dev_world_if_needed(dir: &Path) -> std::io::Result<bool> {
+    let marker = dir.join(".worldgen_version");
+    let version = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    if version == Some(WORLDGEN_VERSION) {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(dir)?;
+    const STATE_FILES: [&str; 6] = [
+        "player.json",
+        "electricity.bin",
+        "metallurgy.bin",
+        "volcanoes.bin",
+        "tree_network.json",
+        "branches.json",
+    ];
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if name.starts_with("chunk_") || STATE_FILES.contains(&name) {
+            std::fs::remove_file(path)?;
+        }
+    }
+    std::fs::write(marker, WORLDGEN_VERSION.to_string())?;
+    Ok(true)
 }
 
 /// ลบทั้งโฟลเดอร์โลก — ปฏิเสธ path ที่ไม่ได้อยู่ใต้ saves/ หรือไม่มี world.json
@@ -414,6 +481,7 @@ pub fn auto_save_system(
     hotbar: bevy::prelude::Res<crate::voxel::Hotbar>,
     settings: bevy::prelude::Res<crate::GameSettings>,
     world: bevy::prelude::Res<crate::voxel::VoxelWorld>,
+    volcanoes: bevy::prelude::Res<crate::volcanism::VolcanoRegistry>,
     mut chat: bevy::prelude::ResMut<crate::ui::ChatState>,
 ) {
     *timer += time.delta_secs();
@@ -423,6 +491,7 @@ pub fn auto_save_system(
             save_player_and_electricity(&grid, transform, camera, &hotbar, &settings, &world);
             let (fov, fly) = camera_fov_speed(&camera_q, &proj_q);
             save_user_prefs(&settings, fov, fly);
+            save_volcano_registry(&volcanoes);
             chat.push_system("Auto-saved game.");
         }
     }
@@ -435,11 +504,13 @@ pub fn save_on_exit_system(
     hotbar: bevy::prelude::Res<crate::voxel::Hotbar>,
     settings: bevy::prelude::Res<crate::GameSettings>,
     world: bevy::prelude::Res<crate::voxel::VoxelWorld>,
+    volcanoes: bevy::prelude::Res<crate::volcanism::VolcanoRegistry>,
 ) {
     if let Ok((transform, camera)) = camera_q.single() {
         save_player_and_electricity(&grid, transform, camera, &hotbar, &settings, &world);
         let (fov, fly) = camera_fov_speed(&camera_q, &proj_q);
         save_user_prefs(&settings, fov, fly);
+        save_volcano_registry(&volcanoes);
     }
 }
 
@@ -451,8 +522,16 @@ pub fn load_game_system(
     mut world: bevy::prelude::ResMut<crate::voxel::VoxelWorld>,
     mut settings: bevy::prelude::ResMut<crate::GameSettings>,
     net_client: Option<bevy::prelude::Res<bevy_renet::RenetClient>>,
+    mut volcanoes: bevy::prelude::ResMut<crate::volcanism::VolcanoRegistry>,
 ) {
     let dir = crate::voxel::active_save_dir();
+        if net_client.is_none() {
+            if let Ok(bytes) = std::fs::read(dir.join("volcanoes.bin")) {
+                if let Ok(loaded) = bincode::deserialize::<crate::volcanism::VolcanoRegistry>(&bytes) {
+                    *volcanoes = loaded;
+                }
+            }
+        }
         if let Ok(bytes) = std::fs::read(dir.join("metallurgy.bin")) {
             type MetallurgySave = (
                 std::collections::HashMap<bevy::prelude::IVec3, crate::chemistry::CrucibleData>,
@@ -471,8 +550,10 @@ pub fn load_game_system(
                 topo_writer.write(crate::electricity::PowerTopologyChanged);
             }
         }
+        let mut loaded_player = false;
         if let Ok(json) = std::fs::read_to_string(dir.join("player.json")) {
             if let Ok(data) = serde_json::from_str::<PlayerSaveData>(&json) {
+                loaded_player = true;
                 if let Ok((mut transform, mut camera)) = camera_q.single_mut() {
                     transform.translation = bevy::prelude::Vec3::from(data.position);
                     camera.pitch = data.pitch;
@@ -499,8 +580,21 @@ pub fn load_game_system(
                 }
             }
         }
+        if !loaded_player && net_client.is_none() {
+            if let Ok((mut transform, _)) = camera_q.single_mut() {
+                transform.translation = crate::voxel::safe_mainland_spawn(settings.noise);
+            }
+        }
         // โครงกิ่งย้ายไปเก็บต่อ chunk (chunk_x_z.tree.bin) แล้ว — อ่าน JSON ก้อนเก่า
         // ครั้งเดียวเพื่อไม่ให้กิ่งที่ผู้เล่นเคยวางในโลกเดิมเสียโครงไป ข้อมูลจะย้ายเข้า
         // ไฟล์ต่อ chunk เองตอน chunk นั้นถูกเซฟครั้งถัดไป และไม่มีการเขียน JSON กลับอีก
         world.branch_network = crate::tree::BranchNetwork::load(&dir);
+}
+
+fn save_volcano_registry(registry: &crate::volcanism::VolcanoRegistry) {
+    let dir = crate::voxel::active_save_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(bytes) = bincode::serialize(registry) {
+        let _ = std::fs::write(dir.join("volcanoes.bin"), bytes);
+    }
 }

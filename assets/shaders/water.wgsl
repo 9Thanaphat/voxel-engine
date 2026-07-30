@@ -57,6 +57,23 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let world_pos = in.world_position.xyz;
     let geometric_normal = normalize(in.world_normal);
     let is_waterfall = abs(geometric_normal.y) < 0.5;
+    let is_lava = in.uv_b.y < -0.5;
+
+    // Lava shares the fluid mesh pipeline but deliberately not the optical
+    // model of water: broad, slow-moving cells, cooling crust and full opacity.
+    if is_lava {
+        let lava_p = select(world_pos.xz, vec2<f32>(world_pos.x + world_pos.z, world_pos.y), is_waterfall);
+        let drift = vec2<f32>(time * 0.018, time * -0.011);
+        let broad = detail_noise(lava_p * 0.32 + drift);
+        let crust = detail_noise(lava_p * 0.72 - drift * 0.55);
+        let hot = smoothstep(0.58, 0.82, broad * 0.72 + crust * 0.28);
+        let vein = smoothstep(0.70, 0.90, crust);
+        let face_light = clamp(max(in.color.r, max(in.color.g, in.color.b)) * 1.15, 0.42, 1.18);
+        var lava_rgb = mix(vec3<f32>(0.20, 0.018, 0.002), vec3<f32>(1.0, 0.16, 0.006), hot);
+        lava_rgb = mix(lava_rgb, vec3<f32>(1.0, 0.62, 0.035), vein * hot * 0.72);
+        lava_rgb *= face_light;
+        return vec4<f32>(lava_rgb, 1.0);
+    }
 
     let raw_speed = length(in.uv);
     let flow_speed = clamp(sqrt(raw_speed) * material.tuning.x, 0.0, 2.4);

@@ -101,6 +101,15 @@ pub struct HeldStackIcon;
 #[derive(Component)]
 pub struct ClearInventoryButton;
 
+#[derive(Component)]
+pub struct CraftRecipeButton(pub usize);
+
+#[derive(Component)]
+pub struct CraftRecipeLabel(pub usize);
+
+#[derive(Component)]
+pub struct CraftingRecipePanel;
+
 /// ป้ายชื่อ item เด้งเหนือ hotbar ตอนสลับช่อง (จางหายเอง) — ตัวครอบ (คุม Visibility)
 #[derive(Component)]
 pub struct HotbarItemNameRoot;
@@ -793,6 +802,62 @@ pub fn setup_ui(mut commands: Commands) {
             root.spawn((
                 Node {
                     position_type: PositionType::Absolute,
+                    left: Val::Px(40.0),
+                    top: Val::Px(40.0),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Stretch,
+                    padding: UiRect::all(Val::Px(12.0)),
+                    row_gap: Val::Px(6.0),
+                    border: UiRect::all(Val::Px(3.0)),
+                    min_width: Val::Px(250.0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.08, 0.08, 0.11, 0.96)),
+                BorderColor::all(Color::srgba(0.2, 0.2, 0.2, 0.8)),
+                CraftingRecipePanel,
+                Visibility::Hidden,
+            ))
+            .with_children(|recipes_panel| {
+                recipes_panel.spawn((
+                    Text::new("Craftable"),
+                    TextFont {
+                        font_size: bevy::text::FontSize::Px(18.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgba(0.9, 0.9, 0.9, 0.9)),
+                ));
+                for recipe in crate::crafting::get_recipes() {
+                    let label = recipe.label();
+                    recipes_panel
+                        .spawn((
+                            Button,
+                            Node {
+                                padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
+                                border: UiRect::all(Val::Px(2.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgba(0.12, 0.38, 0.18, 0.95)),
+                            BorderColor::all(Color::srgba(0.30, 0.80, 0.40, 1.0)),
+                            CraftRecipeButton(recipe.id),
+                            Visibility::Hidden,
+                        ))
+                        .with_children(|button| {
+                            button.spawn((
+                                Text::new(label),
+                                TextFont {
+                                    font_size: bevy::text::FontSize::Px(15.0),
+                                    ..default()
+                                },
+                                TextColor(Color::WHITE),
+                                CraftRecipeLabel(recipe.id),
+                            ));
+                        });
+                }
+            });
+
+            root.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
                     right: Val::Px(40.0),
                     top: Val::Px(40.0),
                     flex_direction: FlexDirection::Column,
@@ -1374,6 +1439,78 @@ pub fn clear_inventory_button_system(
             Interaction::None => {
                 color.0 = Color::srgba(0.45, 0.10, 0.10, 0.95);
             }
+        }
+    }
+}
+
+pub fn craft_recipe_button_system(
+    open: Res<crate::voxel::InventoryOpen>,
+    mut hotbar: ResMut<crate::voxel::Hotbar>,
+    mut buttons: Query<
+        (&CraftRecipeButton, &Interaction, &mut BackgroundColor),
+        Changed<Interaction>,
+    >,
+) {
+    if !open.0 {
+        return;
+    }
+    for (button, interaction, mut color) in &mut buttons {
+        match *interaction {
+            Interaction::Pressed => {
+                let recipes = crate::crafting::get_recipes();
+                let Some(recipe) = recipes.iter().find(|recipe| recipe.id == button.0) else {
+                    continue;
+                };
+                if let Some(output) = crate::crafting::craft(recipe, &mut hotbar.slots) {
+                    let leftover = insert_into(
+                        &mut hotbar.slots,
+                        0..crate::voxel::TOTAL_SLOTS,
+                        output,
+                    );
+                    debug_assert!(leftover.is_none(), "recipe consumed two slots, so output must fit");
+                    color.0 = Color::srgba(0.15, 0.60, 0.25, 1.0);
+                } else {
+                    color.0 = Color::srgba(0.45, 0.16, 0.12, 1.0);
+                }
+            }
+            Interaction::Hovered => color.0 = Color::srgba(0.16, 0.48, 0.24, 1.0),
+            Interaction::None => color.0 = Color::srgba(0.12, 0.38, 0.18, 0.95),
+        }
+    }
+}
+
+pub fn update_craftable_recipes(
+    open: Res<crate::voxel::InventoryOpen>,
+    hotbar: Res<crate::voxel::Hotbar>,
+    mut panels: Query<&mut Visibility, With<CraftingRecipePanel>>,
+    mut buttons: Query<(&CraftRecipeButton, &mut Visibility), Without<CraftingRecipePanel>>,
+    mut labels: Query<(&CraftRecipeLabel, &mut Text)>,
+) {
+    let recipes = crate::crafting::get_recipes();
+    let mut any_craftable = false;
+    for (button, mut visibility) in &mut buttons {
+        let craftable = open.0
+            && recipes
+                .iter()
+                .find(|recipe| recipe.id == button.0)
+                .is_some_and(|recipe| crate::crafting::can_craft(recipe, &hotbar.slots));
+        *visibility = if craftable {
+            any_craftable = true;
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+    for mut visibility in &mut panels {
+        *visibility = if open.0 && any_craftable {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+    for (label, mut text) in &mut labels {
+        if let Some(recipe) = recipes.iter().find(|recipe| recipe.id == label.0) {
+            text.0 = recipe.label_for_inventory(&hotbar.slots);
         }
     }
 }
@@ -2075,7 +2212,13 @@ pub fn update_underwater_overlay(
 
 pub fn format_item(item: &crate::item::Item) -> String {
     let mut s = item.name().to_string();
-    if let crate::item::Item::CastIngot(ingot) = item {
+    let cast_data = match item {
+        crate::item::Item::CastIngot(data)
+        | crate::item::Item::PickaxeHead(data)
+        | crate::item::Item::CraftedPickaxe(data) => Some(data),
+        _ => None,
+    };
+    if let Some(ingot) = cast_data {
         s.push_str(&format!(
             "\nMass: {} g\nQuality: {:.1}%\nComposition:",
             ingot.mass,
@@ -2094,6 +2237,12 @@ pub fn format_item(item: &crate::item::Item) -> String {
                 ));
             }
         }
+    }
+    if let crate::item::Item::CraftedPickaxe(_) = item {
+        s.push_str(&format!(
+            "\nTool class: Pickaxe\nMining speed: {:.1}x",
+            crate::item::ToolType::Pickaxe.dig_speed(),
+        ));
     }
     if matches!(
         item,
@@ -2586,8 +2735,19 @@ fn enter_world(
     settings.year = 0;
 
     match save_dir {
-        Some(dir) => crate::voxel::set_active_save_dir(Some(dir)),
-        None => crate::voxel::set_legacy_save_dir(),
+        Some(dir) => {
+            if let Err(error) = crate::world_save::migrate_world_if_needed(&dir) {
+                eprintln!("world migration failed for {}: {error}", dir.display());
+            }
+            crate::voxel::set_active_save_dir(Some(dir))
+        }
+        None => {
+            crate::voxel::set_legacy_save_dir();
+            let dir = crate::voxel::active_save_dir();
+            if let Err(error) = crate::world_save::migrate_legacy_dev_world_if_needed(&dir) {
+                eprintln!("dev world migration failed for {}: {error}", dir.display());
+            }
+        }
     }
 
     // สำคัญ: ล้างโลกใน memory จาก world ก่อนหน้า ไม่งั้น chunk เก่าค้างข้ามโลก
@@ -3410,7 +3570,10 @@ pub fn update_block_target_text(
 ) {
     if let Ok(mut text) = text_query.single_mut() {
         let looking_at = match target.0 {
-            Some(hit) if hit.block == crate::voxel::BlockType::IngotMold => {
+            Some(hit) if matches!(
+                hit.block,
+                crate::voxel::BlockType::IngotMold | crate::voxel::BlockType::PickaxeMold
+            ) => {
                 let data = world.ingot_molds.get(&hit.pos).copied().unwrap_or_default();
                 let mass = data.total_mass();
                 let capacity = crate::chemistry::INGOT_MOLD_CAPACITY_GRAMS;
@@ -3429,7 +3592,12 @@ pub fn update_block_target_text(
                     Some(point) if metal_temp + 50.0 >= point as f32 => "Solidifying",
                     Some(_) => "Solid",
                 };
-                let extraction = if crate::chemistry::mold_ready_to_extract(&data) {
+                let extraction_ready = if hit.block == crate::voxel::BlockType::PickaxeMold {
+                    crate::chemistry::cast_pickaxe_head_from_mold(&data).is_some()
+                } else {
+                    crate::chemistry::mold_ready_to_extract(&data)
+                };
+                let extraction = if extraction_ready {
                     "Ready — right-click with empty hand"
                 } else if mass < crate::chemistry::MIN_CAST_INGOT_MASS_GRAMS {
                     "Not ready — less than 100 g"
@@ -4155,6 +4323,23 @@ pub fn egui_settings_system(
         regen |= ui.add(
             bevy_egui::egui::Slider::new(&mut settings.noise.octaves, 1..=8)
                 .text("Noise Octaves"),
+        ).drag_stopped();
+        regen |= ui.add(
+            bevy_egui::egui::Slider::new(&mut settings.noise.continent_scale, 4_000.0..=80_000.0)
+                .logarithmic(true)
+                .text("Continent Scale"),
+        ).drag_stopped();
+        regen |= ui.add(
+            bevy_egui::egui::Slider::new(&mut settings.noise.land_ratio, 0.1..=0.9)
+                .text("Land Ratio"),
+        ).drag_stopped();
+        regen |= ui.add(
+            bevy_egui::egui::Slider::new(&mut settings.noise.coast_roughness, 0.0..=1.0)
+                .text("Coast Roughness"),
+        ).drag_stopped();
+        regen |= ui.add(
+            bevy_egui::egui::Slider::new(&mut settings.noise.tectonic_strength, 0.0..=1.0)
+                .text("Tectonic Strength"),
         ).drag_stopped();
 
         ui.horizontal(|ui| {

@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::Write;
 
 use crate::camera::FreeCamera;
-use crate::voxel::VoxelWorld;
+use crate::voxel::{ChunkGenerator, VoxelWorld};
 
 #[derive(Resource)]
 pub struct BenchmarkState {
@@ -90,18 +90,20 @@ fn collect_metrics(
         return;
     }
 
-    if let Some(fps_diag) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FRAME_TIME) {
-        if let Some(value) = fps_diag.value() {
-            // value is in milliseconds
-            state.frame_times.push(value);
-        }
-    }
+    // The diagnostic can be unavailable for a frame depending on system order.
+    // Falling back to Time keeps headless/CI benchmark runs from producing no file.
+    let frame_ms = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
+        .and_then(|diagnostic| diagnostic.value())
+        .unwrap_or_else(|| time.delta_secs_f64() * 1000.0);
+    state.frame_times.push(frame_ms);
 }
 
 fn check_benchmark_end(
     state: Res<BenchmarkState>,
     time: Res<Time>,
     world: Option<Res<VoxelWorld>>,
+    generator: Option<Res<ChunkGenerator>>,
     mut app_exit_events: MessageWriter<bevy::app::AppExit>,
 ) {
     if !state.is_started {
@@ -113,6 +115,9 @@ fn check_benchmark_end(
         
         let mut sorted_times = state.frame_times.clone();
         sorted_times.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)); // Sort descending (worst frame times first)
+        if sorted_times.is_empty() {
+            sorted_times.push(time.delta_secs_f64() * 1000.0);
+        }
         
         let total_frames = sorted_times.len();
         
@@ -132,11 +137,76 @@ fn check_benchmark_end(
             let zero_one_percent_avg_time = sorted_times.iter().take(zero_one_percent_count).sum::<f64>() / zero_one_percent_count as f64;
             let fps_0_1_percent_low = 1000.0 / zero_one_percent_avg_time;
             
-            let chunks_generated = world.map(|w| w.chunks.len()).unwrap_or(0);
+            let chunks_loaded = world.as_ref().map(|w| w.chunks.len()).unwrap_or(0);
+            let meshes_visible = world.as_ref().map(|w| w.generated_chunks.len()).unwrap_or(0);
+            let (
+                block_avg_ms,
+                light_avg_ms,
+                mesh_avg_ms,
+                block_integrate_ms,
+                light_integrate_ms,
+                mesh_integrate_ms,
+                max_pending_blocks,
+                max_pending_lights,
+                max_pending_meshes,
+            ) = generator.as_ref().map_or(
+                (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0),
+                |g| {
+                    let s = &g.stats;
+                    let avg = |micros: u64, jobs: u64| {
+                        if jobs == 0 { 0.0 } else { micros as f64 / jobs as f64 / 1000.0 }
+                    };
+                    (
+                        avg(s.block_work_micros, s.block_jobs),
+                        avg(s.light_work_micros, s.light_jobs),
+                        avg(s.mesh_work_micros, s.mesh_jobs),
+                        s.block_integrate_micros as f64 / 1000.0,
+                        s.light_integrate_micros as f64 / 1000.0,
+                        s.mesh_integrate_micros as f64 / 1000.0,
+                        s.max_pending_blocks,
+                        s.max_pending_lights,
+                        s.max_pending_meshes,
+                    )
+                },
+            );
             
             let json_output = format!(
-                "{{\n  \"duration_seconds\": {:.2},\n  \"total_frames\": {},\n  \"fps_average\": {:.2},\n  \"fps_1_percent_low\": {:.2},\n  \"fps_0_1_percent_low\": {:.2},\n  \"chunks_generated\": {}\n}}\n",
-                elapsed - 5.0, total_frames, avg_fps, fps_1_percent_low, fps_0_1_percent_low, chunks_generated
+                concat!(
+                    "{{\n",
+                    "  \"duration_seconds\": {:.2},\n",
+                    "  \"total_frames\": {},\n",
+                    "  \"fps_average\": {:.2},\n",
+                    "  \"fps_1_percent_low\": {:.2},\n",
+                    "  \"fps_0_1_percent_low\": {:.2},\n",
+                    "  \"chunks_loaded\": {},\n",
+                    "  \"meshes_visible\": {},\n",
+                    "  \"block_job_average_ms\": {:.3},\n",
+                    "  \"light_job_average_ms\": {:.3},\n",
+                    "  \"mesh_job_average_ms\": {:.3},\n",
+                    "  \"block_integrate_total_ms\": {:.3},\n",
+                    "  \"light_integrate_total_ms\": {:.3},\n",
+                    "  \"mesh_integrate_total_ms\": {:.3},\n",
+                    "  \"max_pending_blocks\": {},\n",
+                    "  \"max_pending_lights\": {},\n",
+                    "  \"max_pending_meshes\": {}\n",
+                    "}}\n"
+                ),
+                elapsed - 5.0,
+                total_frames,
+                avg_fps,
+                fps_1_percent_low,
+                fps_0_1_percent_low,
+                chunks_loaded,
+                meshes_visible,
+                block_avg_ms,
+                light_avg_ms,
+                mesh_avg_ms,
+                block_integrate_ms,
+                light_integrate_ms,
+                mesh_integrate_ms,
+                max_pending_blocks,
+                max_pending_lights,
+                max_pending_meshes,
             );
             
             let timestamp = SystemTime::now()
@@ -147,6 +217,10 @@ fn check_benchmark_end(
             if let Ok(mut file) = File::create(&filename) {
                 let _ = file.write_all(json_output.as_bytes());
                 println!("Benchmark results saved to {}", filename);
+                println!("{}", json_output);
+            } else {
+                eprintln!("Could not create benchmark result file: {}", filename);
+                eprintln!("{}", json_output);
             }
         }
         

@@ -105,6 +105,9 @@ pub struct RiverPoint {
     pub surface: f32,
     /// ความลึกร่อง (บล็อก)
     pub depth: f32,
+    /// Total valley radius (channel plus banks), used to keep incision proportional
+    /// to valley width instead of cutting a narrow vertical wall through mountains.
+    pub valley_radius: f32,
     /// ทิศไหล (หน่วยเดียว, x=แกน X โลก, y=แกน Z โลก)
     pub flow: Vec2,
     /// ความเร็ว 0..1 (ชันกว่า=เร็วกว่า)
@@ -278,6 +281,7 @@ impl Tile {
             valley_mask: (1.0 - dist / (s.width + self.tuning.valley_margin)).clamp(0.0, 1.0),
             surface: lerp(s.surf_a, s.surf_b, t),
             depth: self.tuning.depth,
+            valley_radius: s.width + self.tuning.valley_margin,
             flow: s.flow,
             speed: s.speed,
         })
@@ -394,6 +398,21 @@ impl Tile {
             let (wx, wz) = cell_world(i % n, i / n);
             Vec2::new(wx as f32, wz as f32)
         };
+        // relax ตำแหน่งจุดกลาง cell เข้าหาเพื่อน up/down (Laplacian 1 pass) — คลาย
+        // staircase ของ path D8 ก่อนเข้า Catmull-Rom → แม่น้ำโค้งเนียนไม่หักมุม
+        let rcenter = |i: usize| -> Vec2 {
+            let mut sum = center(i) * 2.0;
+            let mut w = 2.0f32;
+            if up[i] != usize::MAX {
+                sum += center(up[i]);
+                w += 1.0;
+            }
+            if down[i] != usize::MAX {
+                sum += center(down[i]);
+                w += 1.0;
+            }
+            sum / w
+        };
         let width_of = |a: f32| {
             lerp(
                 tuning.width_min,
@@ -406,7 +425,7 @@ impl Tile {
         let mut buckets: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         let lo = APRON - 1;
         let hi = APRON + TILE; // local idx ของ inner cells = [APRON, APRON+TILE)
-        const SUB: usize = 4; // จำนวนช่วงย่อยต่อ cell (มากขึ้น=โค้งเนียนขึ้น)
+        const SUB: usize = 6; // จำนวนช่วงย่อยต่อ cell (มากขึ้น=โค้งเนียนขึ้น)
         for z in 0..n {
             for x in 0..n {
                 let (lx, lz) = (x as i32, z as i32);
@@ -422,11 +441,11 @@ impl Tile {
                     continue;
                 }
                 // 4 จุดคุมเส้นโค้ง: up → นี่ → down → down-down (ปลายที่ขาดใช้ extrapolate)
-                let p1 = center(ci);
-                let p2 = center(d);
-                let p0 = if up[ci] != usize::MAX { center(up[ci]) } else { p1 * 2.0 - p2 };
+                let p1 = rcenter(ci);
+                let p2 = rcenter(d);
+                let p0 = if up[ci] != usize::MAX { rcenter(up[ci]) } else { p1 * 2.0 - p2 };
                 let dd = down[d];
-                let p3 = if dd != usize::MAX { center(dd) } else { p2 * 2.0 - p1 };
+                let p3 = if dd != usize::MAX { rcenter(dd) } else { p2 * 2.0 - p1 };
 
                 let (surf1, surf2) = (surface[ci], surface[d]);
                 let (w1, w2) = (width_of(acc[ci]), width_of(acc[d]));
@@ -529,7 +548,7 @@ mod tests {
     use super::*;
 
     fn params() -> NoiseParams {
-        NoiseParams { frequency: 0.015, amplitude: 40.0, octaves: 4, seed: 1, temp_offset: 0.0 }
+        NoiseParams { frequency: 0.015, amplitude: 40.0, octaves: 4, seed: 1, temp_offset: 0.0, ..Default::default() }
     }
 
     #[test]

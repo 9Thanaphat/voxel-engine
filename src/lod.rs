@@ -47,11 +47,12 @@ impl HeightSourceSpec {
 /// แหล่งความสูงจริงที่ใช้ใน task
 struct HeightSource {
     sampler: TerrainSampler,
+    world_seed: u32,
 }
 
 impl HeightSource {
     fn build(spec: HeightSourceSpec) -> Option<Self> {
-        Some(Self { sampler: TerrainSampler::new(spec.noise) })
+        Some(Self { sampler: TerrainSampler::new(spec.noise), world_seed: spec.noise.seed })
     }
 
     /// ความสูงผิว (หน่วย y บล็อก)
@@ -76,7 +77,19 @@ impl HeightSource {
     /// สีหน้าบนของ "บล็อกหยาบ": น้ำ (OSM) → สีน้ำ, ไม่งั้นหญ้า/ทราย ให้ตรง palette
     /// กับ chunk ใกล้ๆ (หญ้า = สีเฉลี่ย texture lod_grass(), ทราย/น้ำ = block_color)
     fn top_color(&self, wx: f64, wz: f64, h: f32) -> [f32; 4] {
-        if self.is_water(wx, wz) {
+        let hydrothermal = self.sampler.hydrothermal_sample(wx, wz);
+        let volcano = self.sampler.volcano_sample(wx, wz);
+        if hydrothermal.pool > 0.05 {
+            block_color(BlockType::SulfuricAcidSource)
+        } else if hydrothermal.altered > 0.12 {
+            block_color(BlockType::AlteredRock)
+        } else if volcano.crater > 0.45 {
+            block_color(BlockType::MagmaRock)
+        } else if volcano.cone > 0.48 {
+            block_color(BlockType::Basalt)
+        } else if volcano.cone > 0.0 {
+            block_color(BlockType::VolcanicAsh)
+        } else if self.is_water(wx, wz) {
             block_color(BlockType::Water)
         } else if self.is_sandy(wx, wz, h) {
             block_color(BlockType::Sand)
@@ -86,6 +99,14 @@ impl HeightSource {
             lerp4(lod_grass(), lod_forest(), f * 0.8)
         }
     }
+
+    fn foliage_color(&self, wx: f64, wz: f64) -> [f32; 3] {
+        let lat = crate::biome::climate_lat(wz);
+        crate::biome::foliage_color(
+            crate::biome::temp_from_latitude(lat),
+            self.sampler.humidity_raw(wx, wz),
+        )
+    }
 }
 
 pub struct LodTileResult {
@@ -94,6 +115,7 @@ pub struct LodTileResult {
     version: u32,
     buf: MeshBuf,
     overlay: MeshBuf,
+    foliage: MeshBuf,
 }
 
 /// overlay (น้ำ/ต้นไม้) ของ tile — ซ่อนเมื่ออยู่ในเขต chunk จริง (เก็บ center world ไว้เช็คระยะ)
@@ -278,7 +300,7 @@ const SHADE_Z: f32 = 0.6;
 /// เกมนี้ตอนมองใกล้ ไม่ใช่เนินโค้งมนแบบ terrain LOD ทั่วไป
 /// คืน (terrain, overlay) — overlay = น้ำ + ต้นไม้ ที่ระบบ hide_near_overlay ซ่อนในเขต chunk จริง
 /// (chunk จริงเรนเดอร์น้ำ/ต้นไม้ของจริงแทน — LOD overlay ไม่ทับให้ค้าง/ทะลุ)
-fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> (MeshBuf, MeshBuf) {
+fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> (MeshBuf, MeshBuf, MeshBuf) {
     let (cell, tile_size, _) = LOD_RINGS[ring];
     let n = (tile_size as f32 / cell) as usize; // จำนวน cell ต่อด้าน
     let origin_x = coord.x as f64 * tile_size as f64;
@@ -323,7 +345,8 @@ fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> (MeshBuf, Mes
 
     let water = block_color(BlockType::Water);
     let mut buf = MeshBuf::default();
-    let mut overlay = MeshBuf::default(); // น้ำ + ต้นไม้ (ซ่อนตอนใกล้ chunk จริง)
+    let mut overlay = MeshBuf::default(); // น้ำ + ลำต้น (ซ่อนตอนใกล้ chunk จริง)
+    let mut foliage = MeshBuf::default();
 
     for j in 0..n {
         for i in 0..n {
@@ -350,7 +373,19 @@ fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> (MeshBuf, Mes
                 let f = forest_amount(wx, wz);
                 let g = lod_hash2(wx * 1.7 + 3.0, wz * 1.3 + 7.0);
                 if f > 0.4 && g < 0.22 * f {
-                    push_tree(&mut overlay, (x0 + x1) * 0.5, (z0 + z1) * 0.5, h);
+                    let cx = (x0 + x1) * 0.5;
+                    let cz = (z0 + z1) * 0.5;
+                    push_tree(
+                        &mut overlay,
+                        &mut foliage,
+                        cx,
+                        cz,
+                        h,
+                        wx,
+                        wz,
+                        source.foliage_color(wx, wz),
+                        source.world_seed,
+                    );
                 }
             }
 
@@ -395,16 +430,26 @@ fn build_tile(source: &HeightSource, ring: usize, coord: IVec2) -> (MeshBuf, Mes
         push_riser_layered(&mut buf, false, t, x0, x1, h - drop, h, true, SHADE_Z, sandy_at(i, n - 1));
     }
 
-    (buf, overlay)
+    (buf, overlay, foliage)
 }
 
 /// ต้นไม้ LOD: ลำต้น + กิ่งเฉียง + พุ่มใบแบบ crossed-billboard (ฟูเหมือนต้นไม้จริง
 /// ไม่ใช่กล่องทึบ) — double-sided material เลยเห็น quad ทั้งสองด้าน สัดส่วนตาม tree จริง (~10m)
-fn push_tree(buf: &mut MeshBuf, cx: f32, cz: f32, ground: f32) {
+#[allow(clippy::too_many_arguments)]
+fn push_tree(
+    buf: &mut MeshBuf,
+    foliage: &mut MeshBuf,
+    cx: f32,
+    cz: f32,
+    ground: f32,
+    wx: f64,
+    wz: f64,
+    base_leaf: [f32; 3],
+    world_seed: u32,
+) {
     let trunk_h = 5.0;
     let r = 2.6; // รัศมีพุ่มใบ
     let wood = block_color(BlockType::OakWood);
-    let leaf = block_color(BlockType::Leaves);
 
     // ลำต้น (กล่องบางน้ำตาล)
     push_box(buf, cx, cz, ground, ground + trunk_h + 1.0, 0.4, wood);
@@ -417,10 +462,28 @@ fn push_tree(buf: &mut MeshBuf, cx: f32, cz: f32, ground: f32) {
 
     // พุ่มใบ: 2 quad ตั้งฉากกัน + 1 quad นอนบน = มวลฟู
     let cy = ground + trunk_h + r * 0.7;
-    push_quad_flat(buf, [[cx - r, cy - r, cz], [cx + r, cy - r, cz], [cx + r, cy + r, cz], [cx - r, cy + r, cz]], shade(leaf, SHADE_TOP));
-    push_quad_flat(buf, [[cx, cy - r, cz - r], [cx, cy - r, cz + r], [cx, cy + r, cz + r], [cx, cy + r, cz - r]], shade(leaf, SHADE_X));
+    let offset = crate::voxel::seasonal_offset_from_key(
+        IVec3::new(wx.round() as i32, ground.round() as i32, wz.round() as i32),
+        world_seed,
+    );
+    push_lod_foliage_quad(foliage, [[cx - r, cy - r, cz], [cx + r, cy - r, cz], [cx + r, cy + r, cz], [cx - r, cy + r, cz]], base_leaf, SHADE_TOP, offset);
+    push_lod_foliage_quad(foliage, [[cx, cy - r, cz - r], [cx, cy - r, cz + r], [cx, cy + r, cz + r], [cx, cy + r, cz - r]], base_leaf, SHADE_X, offset);
     let ry = cy + r * 0.55;
-    push_quad_flat(buf, [[cx - r * 0.8, ry, cz - r * 0.8], [cx + r * 0.8, ry, cz - r * 0.8], [cx + r * 0.8, ry, cz + r * 0.8], [cx - r * 0.8, ry, cz + r * 0.8]], shade(leaf, 0.9));
+    push_lod_foliage_quad(foliage, [[cx - r * 0.8, ry, cz - r * 0.8], [cx + r * 0.8, ry, cz - r * 0.8], [cx + r * 0.8, ry, cz + r * 0.8], [cx - r * 0.8, ry, cz + r * 0.8]], base_leaf, 0.9, offset);
+}
+
+fn push_lod_foliage_quad(
+    buf: &mut MeshBuf,
+    verts: [[f32; 3]; 4],
+    base: [f32; 3],
+    light: f32,
+    offset: f32,
+) {
+    const UVS: [[f32; 2]; 4] = [[0., 1.], [1., 1.], [1., 0.], [0., 0.]];
+    let first = buf.positions.len();
+    let color = [base[0], base[1], base[2], light];
+    buf.push_quad(verts, [0.0, 1.0, 0.0], [color; 4], UVS, false);
+    buf.uv_b[first..first + 4].copy_from_slice(&[[offset, 0.0]; 4]);
 }
 
 /// กิ่งเฉียง — ribbon quad บางจากลำต้นยื่นออก-ขึ้น (dx,dz = ทิศแนวราบ)
@@ -594,6 +657,7 @@ pub fn update_lod_tiles(
     regenerate: Res<crate::RegenerateWorld>,
     mut lod: ResMut<LodTiles>,
     mut meshes: ResMut<Assets<Mesh>>,
+    foliage_material: Res<crate::voxel::SeasonalFoliageMaterialHandles>,
     camera: Query<&Transform, With<crate::camera::FreeCamera>>,
 ) {
     let lod = &mut *lod;
@@ -623,6 +687,8 @@ pub fn update_lod_tiles(
         let center = Vec2::new(origin.x + tile_size as f32 * 0.5, origin.z + tile_size as f32 * 0.5);
         let has_overlay = !res.overlay.positions.is_empty();
         let overlay_mesh = has_overlay.then(|| meshes.add(res.overlay.into_mesh()));
+        let has_foliage = !res.foliage.positions.is_empty();
+        let foliage_mesh = has_foliage.then(|| meshes.add(res.foliage.into_mesh()));
         let entity = commands
             .spawn((
                 Mesh3d(meshes.add(res.buf.into_mesh())),
@@ -634,6 +700,14 @@ pub fn update_lod_tiles(
                     parent.spawn((
                         Mesh3d(m),
                         MeshMaterial3d(lod.material.clone()),
+                        Transform::default(),
+                        LodOverlay { center },
+                    ));
+                }
+                if let Some(m) = foliage_mesh {
+                    parent.spawn((
+                        Mesh3d(m),
+                        MeshMaterial3d(foliage_material.oak.clone()),
                         Transform::default(),
                         LodOverlay { center },
                     ));
@@ -735,8 +809,8 @@ pub fn update_lod_tiles(
         AsyncComputeTaskPool::get()
             .spawn(async move {
                 if let Some(source) = HeightSource::build(spec) {
-                    let (buf, overlay) = build_tile(&source, ring, coord);
-                    let _ = sender.send(LodTileResult { ring, coord, version, buf, overlay });
+                    let (buf, overlay, foliage) = build_tile(&source, ring, coord);
+                    let _ = sender.send(LodTileResult { ring, coord, version, buf, overlay, foliage });
                 }
             })
             .detach();

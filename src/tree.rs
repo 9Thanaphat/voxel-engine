@@ -207,21 +207,36 @@ impl BranchNetwork {
         }
     }
 
-    /// สำเนา node เฉพาะในกรอบ chunk + ขอบ 1 บล็อกในแกน x/z
+    /// สำเนา node ในกรอบ chunk + ระยะพยุงใบ และ ancestor จนถึง root
     /// (mesh ต้องรู้ thickness ของ node เพื่อนบ้านที่อยู่ข้าม chunk เพื่อคำนวณรอยต่อ)
     /// ใช้ส่งเข้า async mesh task ที่แตะ resource ตรงๆ ไม่ได้
     pub fn snapshot_for_chunk(&self, chunk_pos: IVec2, width: i32) -> Self {
-        let min_x = chunk_pos.x * width - 1;
-        let max_x = chunk_pos.x * width + width;
-        let min_z = chunk_pos.y * width - 1;
-        let max_z = chunk_pos.y * width + width;
+        const LEAF_MARGIN: i32 = 3;
+        let min_x = chunk_pos.x * width - LEAF_MARGIN;
+        let max_x = chunk_pos.x * width + width - 1 + LEAF_MARGIN;
+        let min_z = chunk_pos.y * width - LEAF_MARGIN;
+        let max_z = chunk_pos.y * width + width - 1 + LEAF_MARGIN;
 
-        let nodes = self
+        let mut nodes: HashMap<IVec3, BranchNode> = self
             .nodes
             .iter()
             .filter(|(p, _)| p.x >= min_x && p.x <= max_x && p.z >= min_z && p.z <= max_z)
             .map(|(p, n)| (*p, n.clone()))
             .collect();
+        let mut ancestors: Vec<IVec3> = nodes
+            .values()
+            .filter_map(|node| node.parent_pos)
+            .collect();
+        while let Some(pos) = ancestors.pop() {
+            if nodes.contains_key(&pos) {
+                continue;
+            }
+            let Some(node) = self.nodes.get(&pos) else { continue };
+            nodes.insert(pos, node.clone());
+            if let Some(parent) = node.parent_pos {
+                ancestors.push(parent);
+            }
+        }
         Self { nodes }
     }
 
@@ -252,6 +267,25 @@ impl BranchNetwork {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunk_snapshot_keeps_ancestor_chain_to_root() {
+        let root = IVec3::new(-4, 1, 8);
+        let near = IVec3::new(1, 2, 8);
+        let mut network = BranchNetwork::default();
+        network.add_root(root, TRUNK_THICKNESS);
+        let mut previous = root;
+        for x in -3..=1 {
+            let pos = IVec3::new(x, 2, 8);
+            network.add_branch(pos, previous);
+            previous = pos;
+        }
+        assert_eq!(previous, near);
+
+        let snapshot = network.snapshot_for_chunk(IVec2::ZERO, 16);
+        assert!(snapshot.nodes.contains_key(&near));
+        assert!(snapshot.nodes.contains_key(&root));
+    }
 
     /// detach ลบแค่ตัวเอง ถอดจาก parent และคืนลูกที่กำพร้า (ไม่ลบลูกทิ้งเอง)
     #[test]
@@ -287,13 +321,13 @@ mod tests {
         assert!(bn.is_supported(hanging), "root ลอยถือว่ามีที่ยึดในตัวเอง");
     }
 
-    /// snapshot เอาเฉพาะ node ในกรอบ chunk + ขอบ 1 บล็อก
+    /// snapshot เอา node ในกรอบ chunk + ระยะพยุงใบ 3 บล็อก
     #[test]
     fn snapshot_covers_chunk_plus_margin() {
         let mut bn = BranchNetwork::default();
         let inside = IVec3::new(5, 70, 5);
-        let margin = IVec3::new(-1, 70, 5);
-        let outside = IVec3::new(-2, 70, 5);
+        let margin = IVec3::new(-3, 70, 5);
+        let outside = IVec3::new(-4, 70, 5);
         bn.add_root(inside, TRUNK_THICKNESS);
         bn.add_root(margin, TRUNK_THICKNESS);
         bn.add_root(outside, TRUNK_THICKNESS);
