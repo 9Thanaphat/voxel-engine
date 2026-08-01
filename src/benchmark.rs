@@ -149,12 +149,27 @@ fn check_benchmark_end(
                 max_pending_blocks,
                 max_pending_lights,
                 max_pending_meshes,
+                visible_latency_avg_ms,
+                visible_latency_p95_ms,
             ) = generator.as_ref().map_or(
-                (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0),
+                (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0.0, 0.0),
                 |g| {
                     let s = &g.stats;
                     let avg = |micros: u64, jobs: u64| {
                         if jobs == 0 { 0.0 } else { micros as f64 / jobs as f64 / 1000.0 }
+                    };
+                    let mut visible = s.visible_latency_micros.clone();
+                    visible.sort_unstable();
+                    let visible_avg = if visible.is_empty() {
+                        0.0
+                    } else {
+                        visible.iter().sum::<u64>() as f64 / visible.len() as f64 / 1000.0
+                    };
+                    let visible_p95 = if visible.is_empty() {
+                        0.0
+                    } else {
+                        let index = ((visible.len() - 1) as f64 * 0.95).round() as usize;
+                        visible[index] as f64 / 1000.0
                     };
                     (
                         avg(s.block_work_micros, s.block_jobs),
@@ -166,6 +181,8 @@ fn check_benchmark_end(
                         s.max_pending_blocks,
                         s.max_pending_lights,
                         s.max_pending_meshes,
+                        visible_avg,
+                        visible_p95,
                     )
                 },
             );
@@ -188,7 +205,9 @@ fn check_benchmark_end(
                     "  \"mesh_integrate_total_ms\": {:.3},\n",
                     "  \"max_pending_blocks\": {},\n",
                     "  \"max_pending_lights\": {},\n",
-                    "  \"max_pending_meshes\": {}\n",
+                    "  \"max_pending_meshes\": {},\n",
+                    "  \"visible_latency_average_ms\": {:.3},\n",
+                    "  \"visible_latency_p95_ms\": {:.3}\n",
                     "}}\n"
                 ),
                 elapsed - 5.0,
@@ -207,6 +226,8 @@ fn check_benchmark_end(
                 max_pending_blocks,
                 max_pending_lights,
                 max_pending_meshes,
+                visible_latency_avg_ms,
+                visible_latency_p95_ms,
             );
             
             let timestamp = SystemTime::now()

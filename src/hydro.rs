@@ -40,7 +40,7 @@ pub struct RiverConfig {
 impl RiverConfig {
     pub const fn new() -> Self {
         Self {
-            threshold: AtomicU32::new(120f32.to_bits()),
+            threshold: AtomicU32::new(300f32.to_bits()),
             width_acc: AtomicU32::new(1800f32.to_bits()),
             width_min: AtomicU32::new(2.5f32.to_bits()),
             width_max: AtomicU32::new(14f32.to_bits()),
@@ -122,7 +122,10 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 // ── global cache ──
 struct State {
     params: Option<NoiseParams>,
-    tiles: HashMap<(i32, i32), Arc<Tile>>,
+    /// Per-key OnceLock is a single-flight gate: neighboring chunk workers that
+    /// miss the same hydrology tile share one computation instead of each doing
+    /// the full priority-flood independently.
+    tiles: HashMap<(i32, i32), Arc<OnceLock<Arc<Tile>>>>,
     insertion_order: VecDeque<(i32, i32)>,
     generation: u64,
 }
@@ -201,33 +204,107 @@ pub fn river_at(wx: f64, wz: f64) -> Option<RiverPoint> {
     best
 }
 
+/// Hydrology tiles covering a generation region. Holding these Arcs lets a
+/// chunk query all of its columns without reacquiring the global cache lock.
+pub struct RiverRegion {
+    tiles: Vec<Arc<Tile>>,
+}
+
+impl RiverRegion {
+    pub fn river_at(&self, wx: f64, wz: f64) -> Option<RiverPoint> {
+        let mut best: Option<RiverPoint> = None;
+        for tile in &self.tiles {
+            let Some(candidate) = tile.query(wx, wz) else { continue };
+            let replace = best.is_none_or(|current| {
+                candidate.mask > current.mask + 0.01
+                    || ((candidate.mask - current.mask).abs() <= 0.01
+                        && candidate.speed > current.speed)
+            });
+            if replace {
+                best = Some(candidate);
+            }
+        }
+        best
+    }
+}
+
+/// Prepare the small set of hydrology tiles that can affect an axis-aligned
+/// world region. Two coarse cells of padding cover seam overlap and valley
+/// margins used by `river_at`.
+pub fn region(min_wx: f64, min_wz: f64, max_wx: f64, max_wz: f64) -> Option<RiverRegion> {
+    let min_cx = (min_wx / CELL).floor() as i32 - 2;
+    let min_cz = (min_wz / CELL).floor() as i32 - 2;
+    let max_cx = (max_wx / CELL).floor() as i32 + 2;
+    let max_cz = (max_wz / CELL).floor() as i32 + 2;
+    let min_tx = min_cx.div_euclid(TILE);
+    let min_tz = min_cz.div_euclid(TILE);
+    let max_tx = max_cx.div_euclid(TILE);
+    let max_tz = max_cz.div_euclid(TILE);
+    let mut tiles = Vec::new();
+    for tz in min_tz..=max_tz {
+        for tx in min_tx..=max_tx {
+            tiles.push(tile_for_cell(tx * TILE, tz * TILE)?);
+        }
+    }
+    Some(RiverRegion { tiles })
+}
+
 fn tile_for_cell(cx: i32, cz: i32) -> Option<Arc<Tile>> {
     let tx = cx.div_euclid(TILE);
     let tz = cz.div_euclid(TILE);
-    // fast path: มีใน cache แล้ว
-    let (params, generation) = {
+    // Fast path for a completed tile. An incomplete entry is cloned below and
+    // initialized outside the global state lock.
+    let (params, generation, entry) = {
         let s = state().read().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(t) = s.tiles.get(&(tx, tz)) {
-            return Some(t.clone());
+        if let Some(entry) = s.tiles.get(&(tx, tz)) {
+            if let Some(tile) = entry.get() {
+                return Some(tile.clone());
+            }
+            (s.params?, s.generation, Some(entry.clone()))
+        } else {
+            (s.params?, s.generation, None)
         }
-        (s.params?, s.generation)
     };
-    // คำนวณนอก lock (deterministic — สองเธรดคำนวณ tile เดียวกันได้ผลเท่ากัน)
-    let tile = Arc::new(Tile::compute(tx, tz, params, RiverTuning::snapshot()));
-    let mut s = state().write().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let entry = match entry {
+        Some(entry) => entry,
+        None => {
+            let mut s = state().write().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if s.generation != generation || s.params != Some(params) {
+                drop(s);
+                return tile_for_cell(cx, cz);
+            }
+            if let Some(existing) = s.tiles.get(&(tx, tz)) {
+                existing.clone()
+            } else {
+                // Never evict a tile while its initializer is running. A short
+                // temporary overflow is preferable to duplicating that work.
+                while s.tiles.len() >= MAX_CACHED_TILES {
+                    let Some(oldest) = s.insertion_order.pop_front() else { break };
+                    let ready = s.tiles.get(&oldest).is_some_and(|entry| entry.get().is_some());
+                    if ready {
+                        s.tiles.remove(&oldest);
+                    } else {
+                        s.insertion_order.push_back(oldest);
+                        break;
+                    }
+                }
+                let entry = Arc::new(OnceLock::new());
+                s.insertion_order.push_back((tx, tz));
+                s.tiles.insert((tx, tz), entry.clone());
+                entry
+            }
+        }
+    };
+
+    let tile = entry
+        .get_or_init(|| Arc::new(Tile::compute(tx, tz, params, RiverTuning::snapshot())))
+        .clone();
+    let s = state().read().unwrap_or_else(|poisoned| poisoned.into_inner());
     if s.generation != generation || s.params != Some(params) {
         drop(s);
         return tile_for_cell(cx, cz);
     }
-    if let Some(existing) = s.tiles.get(&(tx, tz)) {
-        return Some(existing.clone());
-    }
-    while s.tiles.len() >= MAX_CACHED_TILES {
-        let Some(oldest) = s.insertion_order.pop_front() else { break };
-        s.tiles.remove(&oldest);
-    }
-    s.insertion_order.push_back((tx, tz));
-    s.tiles.insert((tx, tz), tile.clone());
     Some(tile)
 }
 

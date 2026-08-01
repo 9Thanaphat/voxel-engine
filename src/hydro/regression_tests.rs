@@ -23,7 +23,11 @@ fn centripetal_spline_keeps_segment_endpoints() {
 
 #[test]
 fn adjacent_tiles_produce_compatible_overlap() {
-    let tuning = RiverTuning::snapshot();
+    // This fixture needs a channel crossing this specific seam. Keep its density
+    // independent from the gameplay default so tuning river frequency does not
+    // turn the overlap regression into an empty sample.
+    let mut tuning = RiverTuning::snapshot();
+    tuning.threshold = 120.0;
     let left = Tile::compute(0, 0, params(), tuning);
     let right = Tile::compute(1, 0, params(), tuning);
     let seam_x = TILE as f64 * CELL;
@@ -45,4 +49,25 @@ fn adjacent_tiles_produce_compatible_overlap() {
     }
 
     assert!(compared > 0, "test seed must include a river at this seam");
+}
+
+#[test]
+fn regional_queries_match_point_queries() {
+    configure(params());
+    let min = CELL * 9.0;
+    let region = region(min, min, min + 15.0, min + 15.0).expect("configured hydrology");
+    for z in 0..16 {
+        for x in 0..16 {
+            let wx = min + x as f64 + 0.5;
+            let wz = min + z as f64 + 0.5;
+            let point = river_at(wx, wz);
+            let batch = region.river_at(wx, wz);
+            assert_eq!(point.is_some(), batch.is_some());
+            if let (Some(point), Some(batch)) = (point, batch) {
+                assert!((point.mask - batch.mask).abs() < 1e-5);
+                assert!((point.surface - batch.surface).abs() < 1e-5);
+                assert!(point.flow.dot(batch.flow) > 0.999);
+            }
+        }
+    }
 }

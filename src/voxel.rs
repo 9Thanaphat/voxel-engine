@@ -975,6 +975,40 @@ impl ChunkBlocks {
         }
     }
 
+    /// Fill an inclusive vertical range while materializing each touched
+    /// section at most once. Used by worldgen for the common solid-column path.
+    pub fn fill_column_range(
+        &mut self,
+        x: usize,
+        z: usize,
+        y_start: usize,
+        y_end: usize,
+        block: BlockType,
+    ) {
+        if y_start > y_end || y_start >= CHUNK_HEIGHT {
+            return;
+        }
+        let y_end = y_end.min(CHUNK_HEIGHT - 1);
+        let first_section = y_start / SECTION_H;
+        let last_section = y_end / SECTION_H;
+        for si in first_section..=last_section {
+            let lo = y_start.max(si * SECTION_H) - si * SECTION_H;
+            let hi = y_end.min((si + 1) * SECTION_H - 1) - si * SECTION_H;
+            let section = &mut self.sections[si];
+            if let Section::Uniform(existing) = section {
+                if *existing == block {
+                    continue;
+                }
+                *section = Section::Dense(Box::new([*existing; SECTION_VOLUME]));
+            }
+            if let Section::Dense(values) = section {
+                for yl in lo..=hi {
+                    values[Section::idx(x, yl, z)] = block;
+                }
+            }
+        }
+    }
+
     /// ยุบ Dense ที่กลายเป็นชนิดเดียวล้วนกลับเป็น Uniform (เรียกตอนเซฟ/หลัง gen)
     pub fn compact(&mut self) {
         for section in &mut self.sections {
@@ -2732,12 +2766,10 @@ pub struct TerrainSampler {
     pub fbm: Fbm<Perlin>,
     temperature: Perlin,
     cave: Perlin,
-    copper_ore: Perlin,
-    iron_ore: Perlin,
-    coal_ore: Perlin,
-    tin_ore: Perlin,
-    zinc_ore: Perlin,
-    limestone: Perlin,
+    /// Shared vein mask plus a low-frequency selector replaces six independent
+    /// 3D noise calls for every underground voxel.
+    ore_field: Perlin,
+    ore_kind: Perlin,
     humidity: Perlin,
     pub region: Perlin,
     /// domain warp (บิดพิกัดก่อน sample) → ชายฝั่ง/รอยต่อเป็นธรรมชาติ ไม่เป็นก้อนกลม
@@ -2800,6 +2832,18 @@ pub struct ColumnBiome {
     pub tree_density: f32,
 }
 
+/// All expensive world-generation properties for one horizontal coordinate.
+/// Chunk generation keeps these samples hot instead of independently repeating
+/// terrain, volcanism, and hydrothermal queries for the same column.
+#[derive(Clone, Copy)]
+pub struct ColumnSample {
+    pub height: i32,
+    pub water_level: i32,
+    pub biome: ColumnBiome,
+    pub volcano: crate::volcanism::VolcanoSample,
+    pub hydrothermal: crate::volcanism::HydrothermalSample,
+}
+
 impl TerrainSampler {
     pub fn new(params: crate::NoiseParams) -> Self {
         Self {
@@ -2807,12 +2851,8 @@ impl TerrainSampler {
             fbm: Fbm::<Perlin>::new(params.seed).set_octaves(params.octaves as usize),
             temperature: Perlin::new(params.seed.wrapping_add(1)),
             cave: Perlin::new(params.seed.wrapping_add(2)),
-            copper_ore: Perlin::new(params.seed.wrapping_add(20)),
-            iron_ore: Perlin::new(params.seed.wrapping_add(21)),
-            coal_ore: Perlin::new(params.seed.wrapping_add(22)),
-            tin_ore: Perlin::new(params.seed.wrapping_add(23)),
-            zinc_ore: Perlin::new(params.seed.wrapping_add(24)),
-            limestone: Perlin::new(params.seed.wrapping_add(25)),
+            ore_field: Perlin::new(params.seed.wrapping_add(20)),
+            ore_kind: Perlin::new(params.seed.wrapping_add(21)),
             humidity: Perlin::new(params.seed.wrapping_add(3)),
             region: Perlin::new(params.seed.wrapping_add(4)),
             warp_x: Perlin::new(params.seed.wrapping_add(5)),
@@ -3046,6 +3086,42 @@ impl TerrainSampler {
         )
     }
 
+    /// Sample every column property used by block generation once. In
+    /// particular, hydrothermal sampling reuses the volcano lookup instead of
+    /// performing the same continental/volcano search a second time.
+    pub fn column_sample(&self, wx: f64, wz: f64) -> ColumnSample {
+        self.column_sample_with_river(wx, wz, crate::hydro::river_at(wx, wz))
+    }
+
+    /// Variant used by chunk generation after it has pinned a hydrology region.
+    pub fn column_sample_with_river(
+        &self,
+        wx: f64,
+        wz: f64,
+        river: Option<crate::hydro::RiverPoint>,
+    ) -> ColumnSample {
+        let volcano = self.volcano_sample(wx, wz);
+        let hydrothermal = if volcano.descriptor.is_none() {
+            crate::volcanism::HydrothermalSample::default()
+        } else {
+            crate::volcanism::sample_hydrothermal(
+                self.params.seed,
+                wx,
+                wz,
+                self.humidity_raw(wx, wz),
+            )
+        };
+        let (height, water_level) =
+            self.column_with_features(wx, wz, volcano, hydrothermal, river);
+        ColumnSample {
+            height,
+            water_level,
+            biome: self.column_biome(wx, wz),
+            volcano,
+            hydrothermal,
+        }
+    }
+
     /// ความสูงผิว — หลายชั้น: domain warp → ทวีป(low-freq) + เนิน biome(fbm) + เทือกเขา ridged + carve แม่น้ำ
     pub fn height(&self, wx: f64, wz: f64) -> i32 {
         self.column(wx, wz).0
@@ -3054,6 +3130,19 @@ impl TerrainSampler {
     /// (ความสูงผิว, ระดับผิวน้ำ) ของคอลัมน์ — คำนวณ base ครั้งเดียว, carve แม่น้ำที่นี่
     pub fn column(&self, wx: f64, wz: f64) -> (i32, i32) {
         let (h, water) = self.column_raw(wx, wz);
+        (h.clamp(3.0, (CHUNK_HEIGHT - 1) as f64) as i32, water)
+    }
+
+    fn column_with_features(
+        &self,
+        wx: f64,
+        wz: f64,
+        volcano: crate::volcanism::VolcanoSample,
+        hydrothermal: crate::volcanism::HydrothermalSample,
+        river: Option<crate::hydro::RiverPoint>,
+    ) -> (i32, i32) {
+        let (h, water) =
+            self.column_raw_with_features(wx, wz, volcano, hydrothermal, river);
         (h.clamp(3.0, (CHUNK_HEIGHT - 1) as f64) as i32, water)
     }
 
@@ -3081,6 +3170,29 @@ impl TerrainSampler {
     }
 
     fn column_raw(&self, wx: f64, wz: f64) -> (f64, i32) {
+        let volcano = self.volcano_sample(wx, wz);
+        let hydrothermal = if volcano.descriptor.is_none() {
+            crate::volcanism::HydrothermalSample::default()
+        } else {
+            crate::volcanism::sample_hydrothermal(
+                self.params.seed,
+                wx,
+                wz,
+                self.humidity_raw(wx, wz),
+            )
+        };
+        let river = crate::hydro::river_at(wx, wz);
+        self.column_raw_with_features(wx, wz, volcano, hydrothermal, river)
+    }
+
+    fn column_raw_with_features(
+        &self,
+        wx: f64,
+        wz: f64,
+        volcano: crate::volcanism::VolcanoSample,
+        hydrothermal: crate::volcanism::HydrothermalSample,
+        river: Option<crate::hydro::RiverPoint>,
+    ) -> (f64, i32) {
         let (px, pz) = self.warp(wx, wz);
         let cont = self.continent_off(px, pz);
         let (off, amp) = crate::biomegen::terrain_at(
@@ -3103,11 +3215,11 @@ impl TerrainSampler {
             * rough
             * coast_damp;
         let mut h = base + detail + mount_f * land * self.ridged(px, pz) * MOUNT_AMP;
-        h += self.volcano_sample(wx, wz).elevation;
+        h += volcano.elevation;
 
         // แม่น้ำ: โครงข่ายจริงจาก hydro (flow accumulation) — carve หุบเขาก่อน แล้วค่อย carve แม่น้ำ
         let mut water = SEA_LEVEL as i32;
-        if let Some(r) = crate::hydro::river_at(wx, wz) {
+        if let Some(r) = river {
             // Hydrology owns the downhill profile, but never allow a coarse sample
             // to suspend water more than one block above the detailed local terrain.
             let (local_surface, bed, terrain_fit) = Self::river_levels(h, r);
@@ -3135,7 +3247,6 @@ impl TerrainSampler {
                 water = water.max(local_surface.floor() as i32);
             }
         }
-        let hydrothermal = self.hydrothermal_sample(wx, wz);
         if hydrothermal.pool > 0.0 {
             h -= hydrothermal.pool_depth as f64 * hydrothermal.pool.powf(0.7);
         }
@@ -3156,28 +3267,46 @@ impl TerrainSampler {
         self.cave.get([wx * 0.06, y as f64 * 0.06, wz * 0.06]) > 0.45
     }
     
-    pub fn is_copper_ore(&self, wx: f64, y: i32, wz: f64) -> bool {
-        y > -20 && y < 80 && self.copper_ore.get([wx * 0.2, y as f64 * 0.2, wz * 0.2]) > 0.5
-    }
-
-    pub fn is_iron_ore(&self, wx: f64, y: i32, wz: f64) -> bool {
-        y < 40 && self.iron_ore.get([wx * 0.2, y as f64 * 0.2, wz * 0.2]) > 0.5
-    }
-
-    pub fn is_coal_ore(&self, wx: f64, y: i32, wz: f64) -> bool {
-        y < 100 && self.coal_ore.get([wx * 0.18, y as f64 * 0.18, wz * 0.18]) > 0.54
-    }
-
-    pub fn is_tin_ore(&self, wx: f64, y: i32, wz: f64) -> bool {
-        y < 35 && self.tin_ore.get([wx * 0.22, y as f64 * 0.22, wz * 0.22]) > 0.58
-    }
-
-    pub fn is_zinc_ore(&self, wx: f64, y: i32, wz: f64) -> bool {
-        y < 60 && self.zinc_ore.get([wx * 0.22, y as f64 * 0.22, wz * 0.22]) > 0.58
-    }
-
-    pub fn is_limestone(&self, wx: f64, y: i32, wz: f64) -> bool {
-        y < 90 && self.limestone.get([wx * 0.09, y as f64 * 0.09, wz * 0.09]) > 0.60
+    /// Select at most one geology material with one common vein field and one
+    /// mineral selector. Height bands retain the former availability ranges.
+    #[inline]
+    pub fn geology_block(&self, wx: f64, y: i32, wz: f64) -> Option<BlockType> {
+        if !(2..100).contains(&y) {
+            return None;
+        }
+        let p = [wx * 0.19, y as f64 * 0.19, wz * 0.19];
+        if self.ore_field.get(p) <= 0.50 {
+            return None;
+        }
+        let kind = self.ore_kind.get([wx * 0.055, y as f64 * 0.055, wz * 0.055]);
+        let block = if y < 35 {
+            if kind < -0.60 { BlockType::TinOre }
+            else if kind < -0.25 { BlockType::ZincOre }
+            else if kind < 0.05 { BlockType::IronOre }
+            else if kind < 0.35 { BlockType::CopperOre }
+            else if kind < 0.70 { BlockType::CoalOre }
+            else { BlockType::Limestone }
+        } else if y < 40 {
+            if kind < -0.35 { BlockType::ZincOre }
+            else if kind < 0.0 { BlockType::IronOre }
+            else if kind < 0.35 { BlockType::CopperOre }
+            else if kind < 0.70 { BlockType::CoalOre }
+            else { BlockType::Limestone }
+        } else if y < 60 {
+            if kind < -0.20 { BlockType::ZincOre }
+            else if kind < 0.25 { BlockType::CopperOre }
+            else if kind < 0.70 { BlockType::CoalOre }
+            else { BlockType::Limestone }
+        } else if y < 80 {
+            if kind < 0.05 { BlockType::CopperOre }
+            else if kind < 0.65 { BlockType::CoalOre }
+            else { BlockType::Limestone }
+        } else if y < 90 {
+            if kind < 0.45 { BlockType::CoalOre } else { BlockType::Limestone }
+        } else {
+            BlockType::CoalOre
+        };
+        Some(block)
     }
 }
 
@@ -3275,16 +3404,32 @@ pub fn coastal_surface(
     sea_level: i32,
     snow_line: i32,
 ) -> BlockType {
+    if !(0..=BEACH_MAX_ABOVE).contains(&(height - sea_level)) {
+        return surface_block_for(col, height, sea_level, snow_line);
+    }
+    let e = BEACH_SLOPE_STEP;
+    let neighbors = [
+        sampler.height(wx + e, wz),
+        sampler.height(wx - e, wz),
+        sampler.height(wx, wz + e),
+        sampler.height(wx, wz - e),
+    ];
+    coastal_surface_from_neighbors(sampler, wx, wz, col, height, sea_level, snow_line, neighbors)
+}
+
+fn coastal_surface_from_neighbors(
+    sampler: &TerrainSampler,
+    wx: f64,
+    wz: f64,
+    col: ColumnBiome,
+    height: i32,
+    sea_level: i32,
+    snow_line: i32,
+    neighbors: [i32; 4],
+) -> BlockType {
     let above = height - sea_level;
     if (0..=BEACH_MAX_ABOVE).contains(&above) {
-        let e = BEACH_SLOPE_STEP;
-        let max_diff = [
-            sampler.height(wx + e, wz),
-            sampler.height(wx - e, wz),
-            sampler.height(wx, wz + e),
-            sampler.height(wx, wz - e),
-        ]
-        .iter()
+        let max_diff = neighbors.iter()
         .map(|h| (h - height).abs())
         .max()
         .unwrap_or(0);
@@ -3324,6 +3469,12 @@ fn generate_chunk_blocks(
     let base_x = chunk_pos.x as f64 * CHUNK_WIDTH as f64;
     let base_z = chunk_pos.y as f64 * CHUNK_WIDTH as f64;
     let sea_level: i32 = SEA_LEVEL as i32;
+    let river_region = crate::hydro::region(
+        base_x,
+        base_z,
+        base_x + CHUNK_WIDTH as f64 - 1.0,
+        base_z + CHUNK_WIDTH as f64 - 1.0,
+    );
 
     let mut heights = [[0i32; CHUNK_WIDTH]; CHUNK_WIDTH];
     let def_col = ColumnBiome {
@@ -3343,14 +3494,29 @@ fn generate_chunk_blocks(
         for x in 0..CHUNK_WIDTH {
             let wx = base_x + x as f64;
             let wz = base_z + z as f64;
-            let (h, wl) = sampler.column(wx, wz);
-            heights[z][x] = h;
-            water_levels[z][x] = wl;
-            biomes[z][x] = sampler.column_biome(wx, wz);
-            volcanoes[z][x] = sampler.volcano_sample(wx, wz);
-            hydrothermal[z][x] = sampler.hydrothermal_sample(wx, wz);
+            let river = river_region
+                .as_ref()
+                .and_then(|region| region.river_at(wx, wz));
+            let sample = sampler.column_sample_with_river(wx, wz, river);
+            heights[z][x] = sample.height;
+            water_levels[z][x] = sample.water_level;
+            biomes[z][x] = sample.biome;
+            volcanoes[z][x] = sample.volcano;
+            hydrothermal[z][x] = sample.hydrothermal;
         }
     }
+
+    let mut height_cache: HashMap<(i32, i32), i32> = HashMap::with_capacity(CHUNK_WIDTH * CHUNK_WIDTH * 2);
+    for z in 0..CHUNK_WIDTH {
+        for x in 0..CHUNK_WIDTH {
+            height_cache.insert((base_x as i32 + x as i32, base_z as i32 + z as i32), heights[z][x]);
+        }
+    }
+    let mut cached_height = |x: i32, z: i32| -> i32 {
+        *height_cache
+            .entry((x, z))
+            .or_insert_with(|| sampler.height(x as f64, z as f64))
+    };
 
     for z in 0..CHUNK_WIDTH {
         for x in 0..CHUNK_WIDTH {
@@ -3383,7 +3549,22 @@ fn generate_chunk_blocks(
             } else if h < water {
                 ocean_floor_block(water - h) // ก้นทะเล: ตื้น=ทราย กลาง=กรวด ลึก=ดินเหนียว
             } else {
-                coastal_surface(&sampler, wx, wz, col, h, sea_level, snow_line)
+                if (0..=BEACH_MAX_ABOVE).contains(&(h - sea_level)) {
+                    let sx = wx as i32;
+                    let sz = wz as i32;
+                    let step = BEACH_SLOPE_STEP as i32;
+                    let neighbors = [
+                        cached_height(sx + step, sz),
+                        cached_height(sx - step, sz),
+                        cached_height(sx, sz + step),
+                        cached_height(sx, sz - step),
+                    ];
+                    coastal_surface_from_neighbors(
+                        &sampler, wx, wz, col, h, sea_level, snow_line, neighbors,
+                    )
+                } else {
+                    surface_block_for(col, h, sea_level, snow_line)
+                }
             };
             // ทะเล/ผืนน้ำในเขตหนาว → ผิวน้ำเป็นน้ำแข็ง (sea ice)
             let frozen = h < water
@@ -3396,6 +3577,51 @@ fn generate_chunk_blocks(
             } else {
                 col.subsurface
             };
+
+            // Common terrain has no volcanic structures or acid pools. Build it
+            // as vertical ranges, then overlay the comparatively small ore and
+            // cave bands instead of branching over every y up to the surface.
+            if volcano.descriptor.is_none() && hydro.pool <= 0.05 {
+                if h >= 4 {
+                    blocks.fill_column_range(x, z, 0, (h - 4) as usize, BlockType::Stone);
+                    let ore_end = (h - 4).min(99);
+                    if ore_end >= 2 {
+                        for yi in 2..=ore_end {
+                            if let Some(ore) = sampler.geology_block(wx, yi, wz) {
+                                blocks.set(x, yi as usize, z, ore);
+                            }
+                        }
+                    }
+                }
+                if h >= 3 {
+                    blocks.fill_column_range(x, z, (h - 3) as usize, (h - 1) as usize, subsurface);
+                }
+                blocks.set(x, h as usize, z, surface);
+
+                let cave_start = (h - CAVE_DEPTH).max(2) + 1;
+                let cave_end = h - 5;
+                if cave_start <= cave_end {
+                    for yi in cave_start..=cave_end {
+                        if sampler.is_cave(wx, yi, wz) {
+                            blocks.set(x, yi as usize, z, BlockType::Air);
+                        }
+                    }
+                }
+
+                if water > h {
+                    blocks.fill_column_range(
+                        x,
+                        z,
+                        (h + 1) as usize,
+                        water as usize,
+                        BlockType::Water,
+                    );
+                    if frozen {
+                        blocks.set(x, water as usize, z, BlockType::Ice);
+                    }
+                }
+                continue;
+            }
 
             let (volcano_distance, volcano_base, chamber_y) =
                 if let Some(v) = volcano.descriptor {
@@ -3430,22 +3656,10 @@ fn generate_chunk_blocks(
                 } else if chamber_shell {
                     BlockType::MagmaRock
                 } else if yi < h - 3 {
-                    if sampler.is_tin_ore(wx, yi, wz) {
-                        BlockType::TinOre
-                    } else if sampler.is_zinc_ore(wx, yi, wz) {
-                        BlockType::ZincOre
-                    } else if sampler.is_iron_ore(wx, yi, wz) {
-                        BlockType::IronOre
-                    } else if sampler.is_copper_ore(wx, yi, wz) {
-                        BlockType::CopperOre
-                    } else if sampler.is_coal_ore(wx, yi, wz) {
-                        BlockType::CoalOre
-                    } else if sampler.is_limestone(wx, yi, wz) {
-                        BlockType::Limestone
-                    } else if volcano.cone > 0.0 && yi > volcano_base - 6 {
+                    if volcano.cone > 0.0 && yi > volcano_base - 6 {
                         BlockType::Basalt
                     } else {
-                        BlockType::Stone
+                        sampler.geology_block(wx, yi, wz).unwrap_or(BlockType::Stone)
                     }
                 } else if yi < h {
                     subsurface
@@ -3577,6 +3791,7 @@ fn decorate_trees_for_chunk(
     let snow_line = sampler.snow_line();
     let mut tree_blocks = WorldTreeBlocks::default();
     let mut records_by_pos: HashMap<IVec3, crate::tree::BranchRecord> = HashMap::new();
+    let mut sample_cache: HashMap<(i32, i32), ColumnSample> = HashMap::new();
     // Candidate จะผ่านเมื่อมี priority สูงสุดในรัศมีขั้นต่ำของมันเอง กฎนี้ไม่ขึ้นกับ
     // ลำดับการ generate/load chunk และกันทั้งฐานซ้ำกับต้นที่ขึ้นชิดจนลำต้นซ้อนกัน
     let spacing_owner_radius = TREE_OWNER_RADIUS + 1;
@@ -3594,10 +3809,13 @@ fn decorate_trees_for_chunk(
                 let local_z = (xorshift_next(&mut state) % CHUNK_WIDTH as u64) as i32;
                 let wx = owner.x * CHUNK_WIDTH as i32 + local_x;
                 let wz = owner.y * CHUNK_WIDTH as i32 + local_z;
-                let (height, water_level) = sampler.column(wx as f64, wz as f64);
-                let col = sampler.column_biome(wx as f64, wz as f64);
-                let volcanic = sampler.volcano_sample(wx as f64, wz as f64).cone > 0.0
-                    || sampler.hydrothermal_sample(wx as f64, wz as f64).altered > 0.08;
+                let sample = *sample_cache
+                    .entry((wx, wz))
+                    .or_insert_with(|| sampler.column_sample(wx as f64, wz as f64));
+                let (height, water_level) = (sample.height, sample.water_level);
+                let col = sample.biome;
+                let volcanic = sample.volcano.cone > 0.0
+                    || sample.hydrothermal.altered > 0.08;
                 let roll = (xorshift_next(&mut state) % 1000) as f32 / 1000.0;
                 let surface = surface_block_for(col, height, sea_level, snow_line);
                 let params = match col.tree {
@@ -3638,10 +3856,13 @@ fn decorate_trees_for_chunk(
                 let local_z = (next() % CHUNK_WIDTH as u64) as i32;
                 let wx = owner.x * CHUNK_WIDTH as i32 + local_x;
                 let wz = owner.y * CHUNK_WIDTH as i32 + local_z;
-                let (height, water_level) = sampler.column(wx as f64, wz as f64);
-                let col = sampler.column_biome(wx as f64, wz as f64);
-                let volcanic = sampler.volcano_sample(wx as f64, wz as f64).cone > 0.0
-                    || sampler.hydrothermal_sample(wx as f64, wz as f64).altered > 0.08;
+                let sample = *sample_cache
+                    .entry((wx, wz))
+                    .or_insert_with(|| sampler.column_sample(wx as f64, wz as f64));
+                let (height, water_level) = (sample.height, sample.water_level);
+                let col = sample.biome;
+                let volcanic = sample.volcano.cone > 0.0
+                    || sample.hydrothermal.altered > 0.08;
                 let base = IVec3::new(wx, height + 1, wz);
                 let distance = horizontal_distance_to_chunk(base, target);
                 if distance.x > TREE_MAX_HORIZONTAL_REACH
@@ -4686,6 +4907,8 @@ pub struct ChunkPipelineStats {
     pub max_pending_blocks: usize,
     pub max_pending_lights: usize,
     pub max_pending_meshes: usize,
+    /// End-to-end request-to-visible samples, capped to bound long-session memory.
+    pub visible_latency_micros: Vec<u64>,
 }
 
 #[derive(Resource)]
@@ -4699,6 +4922,7 @@ pub struct ChunkGenerator {
     pub generating_blocks: HashMap<IVec2, bool>,
     pub generating_meshes: HashMap<IVec2, bool>,
     pub generating_lights: HashMap<IVec2, u64>,
+    pub requested_at: HashMap<IVec2, Instant>,
     /// Completed jobs wait here so the main thread can apply the nearest chunks first.
     pub pending_blocks: Vec<ChunkBlockData>,
     pub pending_meshes: Vec<ChunkMeshData>,
@@ -4725,6 +4949,7 @@ impl Default for ChunkGenerator {
             generating_blocks: HashMap::new(),
             generating_meshes: HashMap::new(),
             generating_lights: HashMap::new(),
+            requested_at: HashMap::new(),
             pending_blocks: Vec::new(),
             pending_meshes: Vec::new(),
             pending_lights: Vec::new(),
@@ -5577,6 +5802,7 @@ fn despawn_world(
     generator.generating_blocks.clear();
     generator.generating_meshes.clear();
     generator.generating_lights.clear();
+    generator.requested_at.clear();
     generator.pending_blocks.clear();
     generator.pending_meshes.clear();
     generator.pending_lights.clear();
@@ -5964,7 +6190,15 @@ pub fn relight_system(
     generator.stats.light_integrate_micros += apply_started.elapsed().as_micros() as u64;
 
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let available = workers.saturating_sub(generator.generating_lights.len());
+    let block_slots = workers.div_ceil(2).max(1);
+    let mesh_slots = (workers / 4).max(1);
+    let light_slots = workers.saturating_sub(block_slots + mesh_slots).max(1);
+    let total_inflight = generator.generating_blocks.len()
+        + generator.generating_meshes.len()
+        + generator.generating_lights.len();
+    let available = light_slots
+        .saturating_sub(generator.generating_lights.len())
+        .min(workers.saturating_sub(total_inflight));
     if available == 0 {
         return;
     }
@@ -5975,6 +6209,10 @@ pub fn relight_system(
         .filter(|(pos, chunk)| {
             chunk.light_dirty
                 && !generator.generating_lights.contains_key(pos)
+                // First meshes already require all eight neighbors for AO. A
+                // provisional light pass before then can never become visible
+                // and only gets invalidated as those neighbors arrive.
+                && chunk_neighbors(**pos).iter().all(|neighbor| world.chunks.contains_key(neighbor))
         })
         .map(|(pos, _)| *pos)
         .collect();
@@ -6076,8 +6314,11 @@ pub fn world_generation_system(
     let mut block_budget: usize = 6;
     let mut mesh_budget: usize = 8;
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let max_block_jobs = workers.saturating_mul(2).max(2);
-    let max_mesh_jobs = workers.max(1);
+    // Keep the compute pool bounded across the three heavy stages. With the old
+    // 2×/1×/1× limits, distant queued jobs could occupy roughly four times the
+    // available workers and delay chunks nearest to the player.
+    let max_block_jobs = workers.div_ceil(2).max(1);
+    let max_mesh_jobs = (workers / 4).max(1);
 
     for offset in offsets_cache.1.iter() {
         if block_budget == 0 && mesh_budget == 0 {
@@ -6092,9 +6333,14 @@ pub fn world_generation_system(
         if settings.render_mode == crate::RenderMode::SurfacePreview {
             if mesh_budget > 0
                 && generator.generating_meshes.len() < max_mesh_jobs
+                && generator.generating_blocks.len()
+                    + generator.generating_meshes.len()
+                    + generator.generating_lights.len()
+                    < workers
                 && !world.generated_chunks.contains_key(&chunk_pos)
                 && !generator.generating_meshes.contains_key(&chunk_pos)
             {
+                generator.requested_at.entry(chunk_pos).or_insert_with(Instant::now);
                 generator.generating_meshes.insert(chunk_pos, true);
                 let sender = generator
                     .sender_meshes
@@ -6110,9 +6356,14 @@ pub fn world_generation_system(
         // Phase 1: Block Generation
         if block_budget > 0
             && generator.generating_blocks.len() < max_block_jobs
+            && generator.generating_blocks.len()
+                + generator.generating_meshes.len()
+                + generator.generating_lights.len()
+                < workers
             && !world.chunks.contains_key(&chunk_pos)
             && !generator.generating_blocks.contains_key(&chunk_pos)
         {
+            generator.requested_at.entry(chunk_pos).or_insert_with(Instant::now);
             generator.generating_blocks.insert(chunk_pos, true);
             let sender = generator
                 .sender_blocks
@@ -6148,6 +6399,10 @@ pub fn world_generation_system(
         // Phase 2: Mesh Generation
         if mesh_budget > 0
             && generator.generating_meshes.len() < max_mesh_jobs
+            && generator.generating_blocks.len()
+                + generator.generating_meshes.len()
+                + generator.generating_lights.len()
+                < workers
             && world.chunks.contains_key(&chunk_pos)
             && !world.generated_chunks.contains_key(&chunk_pos)
             && !generator.generating_meshes.contains_key(&chunk_pos)
@@ -6853,6 +7108,7 @@ pub fn process_generated_chunks_system(
         let chunk_pos = block_data.chunk_pos;
         if distance2(chunk_pos) > keep_distance2 {
             generator.generating_blocks.remove(&chunk_pos);
+            generator.requested_at.remove(&chunk_pos);
             continue;
         }
 
@@ -6982,6 +7238,7 @@ pub fn process_generated_chunks_system(
         let ChunkMeshData { chunk_pos, set, .. } = mesh_data;
         if distance2(chunk_pos) > keep_distance2 {
             generator.generating_meshes.remove(&chunk_pos);
+            generator.requested_at.remove(&chunk_pos);
             continue;
         }
         let transform = Transform::from_xyz(
@@ -7021,6 +7278,15 @@ pub fn process_generated_chunks_system(
         }
         let entity = chunk_entity.id();
         world.generated_chunks.insert(chunk_pos, entity);
+        if let Some(requested_at) = generator.requested_at.remove(&chunk_pos) {
+            if generator.stats.visible_latency_micros.len() >= 4096 {
+                generator.stats.visible_latency_micros.remove(0);
+            }
+            generator
+                .stats
+                .visible_latency_micros
+                .push(requested_at.elapsed().as_micros() as u64);
+        }
         // overlay แสงโคม — entity แยก (track ใน block_light_chunks) แบบเดียวกับน้ำ/กระจก
         update_single_mesh_entity(&mut commands, &mut world.block_light_chunks, &mut meshes, &mesh_query, &render_materials.block_light.0, chunk_pos, block_overlay, transform);
 
@@ -11133,6 +11399,37 @@ pub fn branch_remesh_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_range_fill_crosses_sections_without_touching_neighbors() {
+        let mut blocks = ChunkBlocks::new_uniform(BlockType::Air);
+        blocks.fill_column_range(3, 5, 14, 34, BlockType::Stone);
+        for y in 0..48 {
+            let expected = if (14..=34).contains(&y) {
+                BlockType::Stone
+            } else {
+                BlockType::Air
+            };
+            assert_eq!(blocks.get(3, y, 5), expected);
+            assert_eq!(blocks.get(4, y, 5), BlockType::Air);
+        }
+    }
+
+    #[test]
+    fn geology_is_deterministic_and_respects_height_bands() {
+        let sampler = TerrainSampler::new(crate::NoiseParams::default());
+        for y in 0..CHUNK_HEIGHT as i32 {
+            let a = sampler.geology_block(41.0, y, -73.0);
+            let b = sampler.geology_block(41.0, y, -73.0);
+            assert_eq!(a, b);
+            if y >= 100 || y < 2 {
+                assert_eq!(a, None);
+            }
+            if y >= 90 {
+                assert!(!matches!(a, Some(block) if block != BlockType::CoalOre));
+            }
+        }
+    }
 
     #[test]
     fn fast_forward_moves_forward_and_wraps_midnight() {
